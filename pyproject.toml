@@ -31,9 +31,10 @@ basal-serve = "basal.server:main"
 basal-bench = "basal.bench:main"
 basal-loadtest = "basal.loadtest:main"
 basal-run = "basal.run:main"
+basal-viz = "basal.viz:main"
 
 [tool.setuptools]
 packages = ["basal"]
 
 [tool.setuptools.package-data]
-basal = ["examples/*.jsonl", "examples/*.py"]
+basal = ["examples/*.jsonl", "examples/*.py", "viz.html"]
