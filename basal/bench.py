@@ -21,7 +21,7 @@ from pathlib import Path
 
 import torch
 
-from .engine import EagerBackend, ExitGraphBackend, GraphBackend, VLLMBackend, resolve
+from .engine import EagerBackend, ExitGraphBackend, GraphBackend, SharedBackend, VLLMBackend, default_device, resolve, sync
 from .prompt import letter_ids, render
 from .server import MODES
 
@@ -31,9 +31,13 @@ def build(mode, md, vllm_model=None):
         return EagerBackend(md, "float32")
     if mode.startswith("fast-exit@"):
         return ExitGraphBackend(md, "bfloat16", compile=True, default_policy=mode.split("@")[1])
+    if mode.startswith("mps-"):  # mps-float16 etc.: the mps mode in another dtype
+        return SharedBackend(md, mode.split("-", 1)[1])
     kind, quant, comp = MODES[mode]
     if kind == "eager":
         return EagerBackend(md, "bfloat16")
+    if kind == "shared":
+        return SharedBackend(md, "bfloat16")
     if kind == "vllm":
         return VLLMBackend(vllm_model or md)
     if kind == "exit":
@@ -88,13 +92,44 @@ def cold(be):
 
 
 def timed(fn, reps, be=None):
+    dev = getattr(be, "dev", default_device())
     lat = []
     for _ in range(reps):
         cold(be)
-        torch.cuda.synchronize(); t = time.perf_counter()
+        sync(dev); t = time.perf_counter()
         fn()
-        torch.cuda.synchronize(); lat.append(time.perf_counter() - t)
+        sync(dev); lat.append(time.perf_counter() - t)
     return lat
+
+
+def device_name(dev):
+    if dev == "cuda":
+        return torch.cuda.get_device_name(0)
+    if dev == "mps":
+        import platform
+        import subprocess
+        try:
+            return subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+        except OSError:
+            return f"mps ({platform.machine()})"
+    return "cpu"
+
+
+def reset_memory(dev):
+    gc.collect()
+    if dev == "cuda":
+        torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
+    elif dev == "mps":
+        torch.mps.empty_cache()
+
+
+def peak_memory_gb(dev):
+    """CUDA: peak allocated. MPS has no peak counter: memory held by the Metal driver at the end of the run."""
+    if dev == "cuda":
+        return torch.cuda.max_memory_allocated() / 2**30
+    if dev == "mps":
+        return torch.mps.driver_allocated_memory() / 2**30
+    return float("nan")
 
 
 def measure(be, groups, lat_n):
@@ -120,7 +155,8 @@ def main():
     ap.add_argument("--model", default="Remek/basal-1.0-4.5B")
     ap.add_argument("--vllm-model", dest="vllm_model", default=None, help="checkpoint for --modes vllm (e.g. the NVFP4 repo)")
     ap.add_argument("--modes", nargs="+", default=["eager-fp32", "fast"],
-                    help="eager-fp32, eager, fast, fast-nocompile, fp8, nvfp4, vllm, fast-exit@off|0.999|0.995|0.99|0.98")
+                    help="eager-fp32, eager, fast, fast-nocompile, fp8, nvfp4, vllm, fast-exit@off|0.999|0.995|0.99|0.98; "
+                         "Apple Silicon: eager-fp32, eager, mps, mps-float16")
     ap.add_argument("--questions", nargs="+", default=DEFAULT_QUESTIONS,
                     help="JSONL file(s) with simple items (default: the bundled examples, 44 items)")
     ap.add_argument("--n", type=int, default=500)
@@ -131,16 +167,16 @@ def main():
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)
     ref, rows = None, []
+    dev = default_device()
     for mode in a.modes:
-        torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
+        reset_memory(dev)
         t0 = time.time()
         be = build(mode, md, vm)
         load_s = time.time() - t0
         groups = groups_for(be.tok, qs)
         dec, r = measure(be, groups, min(a.lat_n, len(groups) - 5))
         top = [max(range(len(d)), key=d.__getitem__) for d in dec]
-        r = dict(mode=mode, gpu=torch.cuda.get_device_name(0), n=len(groups), load_s=round(load_s, 1), **r,
-                 mem_gb=torch.cuda.max_memory_allocated() / 2**30)
+        r = dict(mode=mode, gpu=device_name(dev), n=len(groups), load_s=round(load_s, 1), **r, mem_gb=peak_memory_gb(dev))
         if all("gold" in g[0] for g in groups):
             r["acc"] = sum(t == g[0]["gold"] for t, g in zip(top, groups)) / len(groups)
         if ref is None:
@@ -151,7 +187,7 @@ def main():
         print(json.dumps({k: round(v, 3) if isinstance(v, float) else v for k, v in r.items()}), flush=True)
         if hasattr(be, "llm"):
             del be.llm
-        del be; gc.collect(); torch.cuda.empty_cache()
+        del be; reset_memory(dev)
     print(f"\n{'mode':<18}{'lat2 ms':>9}{'lat1 ms':>9}{'dec/s':>8}{'agree':>8}{'acc':>7}{'GB':>6}")
     for r in rows:
         print(f"{r['mode']:<18}{r['lat2_ms']:>9.1f}{r['lat1_ms']:>9.1f}{r['dec_s']:>8.1f}"
