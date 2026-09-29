@@ -306,6 +306,19 @@ Start-up: `fast` compiles and captures CUDA graphs for all input shapes before a
 the first time for the 4.5B model, 2.5–4 minutes for the 1.5B, 10–17 minutes in `fp8`; much less with a warm
 compile cache). Prompts longer than 3,072 tokens are served with a normal forward pass.
 
+## See how a decision is made
+
+`basal-viz` opens a local web page that runs the model and shows every step of a decision: the prompt of each option
+order, the shared-prefix packing and its attention mask, the letter probabilities after every layer ("logit lens"),
+the letter readout, the order average, the calibration and the decision against the confidence thresholds. The bundled
+examples are in a drop-down, with the expected answer where the file has one.
+
+```bash
+basal-viz --model Remek/basal-1.0-1.5B --port 8080     # then open http://127.0.0.1:8080
+```
+
+It is meant for exploring, not serving: every question runs one extra forward per option order to record all layers.
+
 ## Benchmark your GPU
 
 Two tools are installed with the package. Both run out of the box on the bundled examples (`questions.jsonl`,

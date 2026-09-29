@@ -98,3 +98,13 @@ def test_swapping_keys_changes_what_the_model_sees():
     d1, d2 = "Processes approve/reject requests; handled by Alice", "Processes approve/reject requests; handled by Bob"
     assert swapped_prompts_differ({"approve": d1, "reject": d2}, {"reject": d1, "approve": d2})
     assert swapped_prompts_differ({"low": "minor", "high": "severe"}, {"high": "minor", "low": "severe"}, "score")
+
+
+def test_viz_segments_rebuild_the_prompt():
+    from basal.prompt import render
+    from basal.viz import segments
+    opts = ["Reklamacje kart", "Kredyty"]
+    p = render(Tok(), "Klient: błąd hasła.", "Który dział?", opts)
+    seg = segments(p, "Klient: błąd hasła.", "Który dział?", opts)
+    assert "".join(s["text"] for s in seg) == p
+    assert [s["kind"] for s in seg if s["kind"] != "template"] == ["state", "question", "option", "option", "prefill"]
