@@ -138,6 +138,26 @@ basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
 - From a clone instead: `git clone https://github.com/rkinas/basal && cd basal && uv pip install -e ".[fp8]"`
   (after the torch line above).
 
+### macOS (Apple Silicon)
+
+The models run on the GPU of M-series Macs through PyTorch's Metal backend (MPS). Plain PyPI torch already includes it:
+no CUDA index and no `[fp8]` extra.
+
+```bash
+uv venv --python 3.12 ~/basal-env && source ~/basal-env/bin/activate
+uv pip install "basal @ https://github.com/rkinas/basal/archive/refs/heads/main.tar.gz"
+basal-serve --model Remek/basal-1.0-1.5B --port 8000        # --mode mps is the default without CUDA
+```
+
+- `--mode mps` keeps the shared prefix of the two option orders and the token-budget batching of `fast`, without CUDA
+  graphs or `torch.compile`; it starts in seconds. `--mode eager` is the plain reference (on MPS as well).
+- Memory: the GPU shares system memory. basal-1.0-1.5B needs about 4 GB, basal-1.0-4.5B about 10 GB (bf16), so the
+  4.5B model wants a Mac with 16 GB or more and few other apps open. `eager-fp32` in `basal-bench` doubles that.
+- `fp8`, `nvfp4`, `vllm`, `fast` and `fast-exit` need an NVIDIA GPU.
+- Speed on an M3 Pro (18 GB), bundled examples, both option orders: basal-1.0-1.5B **224 ms** per decision (4.0 dec/s,
+  agreement with fp32 0.977); basal-1.0-4.5B **660 ms** (1.5 dec/s, 10.1 GB; 1.35× faster than `eager`, same decision on 43 of 44 items). The Mac is useful for development and low-volume use;
+  for serving, use a CUDA GPU.
+
 ```bash
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
   "state": "Klient: od wczoraj nie mogę zalogować się do bankowości internetowej, system pokazuje błąd hasła.",
@@ -263,7 +283,8 @@ for line in open("basal/examples/questions.jsonl"):
 | `fp8` | `fast` with dynamic FP8 weights + activations (torchao) | Hopper, Blackwell (Ada: FP8 compilation stalled on an RTX 4090) |
 | `nvfp4` | `fast` with NVFP4 weights + activations (torchao, experimental) | Blackwell (B200/B300, RTX 50xx/PRO, GB10) |
 | `vllm` | vLLM with the ModelOpt **FP8 / NVFP4** checkpoints (native low-precision kernels) | Hopper / Blackwell |
-| `eager` | plain PyTorch reference | any GPU or CPU |
+| `mps` | shared prefix + token-budget batching without CUDA graphs (default when there is no CUDA GPU) | Apple Silicon (MPS), CPU |
+| `eager` | plain PyTorch reference | any GPU, Apple Silicon or CPU |
 
 - **Two option orders** (`--orders 2`, default): every question is asked with the options in original and reversed
   order and the probabilities are averaged; with the shared prefix this costs only ~8% more than one order.

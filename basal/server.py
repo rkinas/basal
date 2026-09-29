@@ -7,6 +7,7 @@
   GET  /health
 
   basal-serve --model Remek/basal-1.0-4.5B --mode fast --port 8000
+  basal-serve --model Remek/basal-1.0-4.5B --mode mps --port 8000     # Apple Silicon
 """
 import argparse
 import asyncio
@@ -15,14 +16,15 @@ import time
 
 import torch
 
-from .engine import EagerBackend, ExitGraphBackend, GraphBackend, VLLMBackend, resolve
+from .engine import EagerBackend, ExitGraphBackend, GraphBackend, SharedBackend, VLLMBackend, default_device, resolve
 from .prompt import MAX_OPTIONS, lang_of, letter_ids, render
 
 RELEASE_DATE = "2026-10-01"
 
 MODES = {
     # mode: (backend, quantisation, compile)
-    "eager": ("eager", None, False),        # reference PyTorch forward, any GPU (or CPU)
+    "eager": ("eager", None, False),        # reference PyTorch forward, any GPU, Apple Silicon or CPU
+    "mps": ("shared", None, False),         # shared prefix + token-budget batching, no CUDA graphs (Apple Silicon, CPU)
     "fast": ("graph", None, True),          # bf16 + torch.compile + CUDA graphs + shared prefix (recommended)
     "fast-nocompile": ("graph", None, False),  # same without torch.compile (faster start-up, ~1.4x slower on H100)
     "fast-exit": ("exit", None, True),      # "fast" + trained early exits, policy chosen per request
@@ -99,7 +101,9 @@ class Server:
         kind, quant, comp = MODES[a.mode]
         quant = a.quant or quant
         if kind == "eager":
-            self.backend = EagerBackend(md, a.dtype)
+            self.backend = EagerBackend(md, a.dtype, a.device)
+        elif kind == "shared":
+            self.backend = SharedBackend(md, a.dtype, a.device)
         elif kind == "exit":
             self.backend = ExitGraphBackend(md, a.dtype, quant, compile=comp, heads_dir=a.exit_heads,
                                             default_policy=a.early_exit)
@@ -205,7 +209,9 @@ def parser():
     ap.add_argument("--model", default="Remek/basal-1.0-4.5B", help="local directory or Hugging Face repo id")
     ap.add_argument("--revision", default=None)
     ap.add_argument("--name", default=None, help="model name reported in responses (default: last part of --model)")
-    ap.add_argument("--mode", choices=list(MODES), default="fast")
+    ap.add_argument("--mode", choices=list(MODES), default=None,
+                    help="default: fast on CUDA, mps on Apple Silicon or CPU")
+    ap.add_argument("--device", default=None, help="eager / mps modes: cuda, mps or cpu (default: the best available)")
     ap.add_argument("--quant", choices=["fp8", "nvfp4"], default=None, help="override the quantisation of the mode")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--orders", type=int, choices=[1, 2], default=2,
@@ -222,8 +228,13 @@ def parser():
     return ap
 
 
+def default_mode():
+    return "fast" if default_device() == "cuda" else "mps"
+
+
 def main():
     a = parser().parse_args()
+    a.mode = a.mode or default_mode()
     from contextlib import asynccontextmanager
 
     import uvicorn

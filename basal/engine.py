@@ -4,7 +4,9 @@
   run_shared(groups[, policy])    -> groups = [(prompts, ids_list)], all option orders of one question in one group
 
 Backends:
-  EagerBackend      plain PyTorch forward (reference, any GPU or CPU)
+  EagerBackend      plain PyTorch forward (reference, any GPU, Apple Silicon (MPS) or CPU)
+  SharedBackend     shared prefix for the two option orders + token-budget batching without CUDA graphs
+                    (Apple Silicon (MPS), CPU; also runs on CUDA)
   GraphBackend      static shapes + CUDA graphs, optional torch.compile, shared prefix for the two option orders,
                     token-budget batching, optional torchao FP8 / NVFP4 quantisation
   ExitGraphBackend  GraphBackend split into graph segments at trained early-exit layers; exit policy per request
@@ -28,14 +30,32 @@ def resolve(name, revision=None):
     return Path(snapshot_download(name, revision=revision))
 
 
+def default_device():
+    """cuda if available, then Apple Silicon (mps), then cpu."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def sync(dev):
+    """Wait for queued kernels (timing): CUDA and MPS run asynchronously."""
+    kind = torch.device(dev).type
+    if kind == "cuda":
+        torch.cuda.synchronize()
+    elif kind == "mps":
+        torch.mps.synchronize()
+
+
 class EagerBackend:
     def __init__(self, model_dir, dtype="bfloat16", device=None):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.padding_side = "left"
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
-        dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dev = device or default_device()
         self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).to(dev).eval()
-        self.dev = dev
+        self.dev = torch.device(dev)
         self.prefill = PREFILL
 
     @torch.no_grad()
@@ -242,6 +262,51 @@ class GraphBackend(EagerBackend):
             ri, ci = self._fill(packs, idx, b, L, ids, mask, pos)
             g.replay()
             probs = self._readout(out[ri, ci], [x for k in idx for x in groups[k][1]])
+            j = 0
+            for k in idx:
+                n = len(groups[k][1]); res[k] = probs[j: j + n]; j += n
+        return res
+
+
+class SharedBackend(GraphBackend):
+    """The shared-prefix path of GraphBackend without CUDA graphs, for Apple Silicon (MPS) and CPU. The option orders
+    of one question are packed into one row (see GraphBackend), questions are batched under the token budget, and rows
+    are padded on the right to the same length buckets, so the Metal kernels see a small, repeating set of shapes."""
+
+    TOKEN_BUDGET = 4096  # smaller than on CUDA: attention scores are materialised, and the GPU shares system memory
+
+    def __init__(self, model_dir, dtype="bfloat16", device=None, warm=True):
+        EagerBackend.__init__(self, model_dir, dtype, device)
+        self.tok.padding_side = "right"
+        self.shared = True
+        if warm:  # the first forward of a shape is slow on MPS (kernel selection); run the common ones once
+            with torch.no_grad():
+                for L in self.LENS[:8]:
+                    self._forward_masked(*self._inputs([([self.tok.pad_token_id] * (L - 1), [0] * (L - 1),
+                                                         [1] * (L - 1), [L - 2])], [0], 1, L)[:3])
+                sync(self.dev)
+
+    def _inputs(self, packs, idx, b, L):
+        ids = torch.full((b, L), self.tok.pad_token_id, dtype=torch.long)
+        pos = torch.arange(L)[None].repeat(b, 1)
+        seg = torch.full((b, L), -1, dtype=torch.long)
+        rows, cols = [], []
+        for r, k in enumerate(idx):
+            t, pp, sg, last = packs[k]
+            ids[r, : len(t)] = torch.tensor(t); pos[r, : len(t)] = torch.tensor(pp); seg[r, : len(t)] = torch.tensor(sg)
+            rows += [r] * len(last); cols += last
+        d = self.dev
+        return ids.to(d), self._mask_from_seg(seg.to(d)), pos.to(d), torch.tensor(rows, device=d), torch.tensor(cols, device=d)
+
+    @torch.no_grad()
+    def run_shared(self, groups, policy=None):
+        packs = [self._pack([self.tok(p, add_special_tokens=False).input_ids for p in prompts]) for prompts, _ in groups]
+        res = [None] * len(packs)
+        for idx in self._chunks([len(pk[0]) for pk in packs]):
+            longest = max(len(packs[k][0]) for k in idx)
+            L = self._bucket(longest, self.LENS) if longest <= self.LENS[-1] else longest
+            ids, mask, pos, ri, ci = self._inputs(packs, idx, len(idx), L)
+            probs = self._readout(self._forward_masked(ids, mask, pos)[ri, ci], [x for k in idx for x in groups[k][1]])
             j = 0
             for k in idx:
                 n = len(groups[k][1]); res[k] = probs[j: j + n]; j += n
