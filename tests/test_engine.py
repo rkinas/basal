@@ -2,6 +2,7 @@
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
+from basal import engine
 from basal.engine import GraphBackend
 
 
@@ -31,3 +32,18 @@ def test_shared_equals_separate():
         ha = m.model(input_ids=torch.tensor([a])).last_hidden_state[0, -1]
         hb = m.model(input_ids=torch.tensor([b])).last_hidden_state[0, -1]
     assert torch.allclose(h[0, last[0]], ha, atol=1e-4) and torch.allclose(h[0, last[1]], hb, atol=1e-4)
+
+
+def test_resolve_skips_weights_for_file_backed_backends(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_snapshot_download(name, revision=None, ignore_patterns=None):
+        calls.append((name, revision, ignore_patterns))
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+    assert engine.resolve("org/model") == tmp_path
+    assert engine.resolve("org/model", "rev", weights=False) == tmp_path
+    assert calls[0] == ("org/model", None, None)
+    assert calls[1][:2] == ("org/model", "rev") and "*.safetensors" in calls[1][2] and "*.gguf" in calls[1][2]
+    assert engine.resolve(str(tmp_path), weights=False) == tmp_path and len(calls) == 2  # local directory: no download

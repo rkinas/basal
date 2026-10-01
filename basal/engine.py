@@ -21,13 +21,21 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from .prompt import PREFILL
 
 
-def resolve(name, revision=None):
-    """Local directory or Hugging Face repo id (downloaded once to the HF cache)."""
+# Checkpoint files that the gguf and ollama backends never read: their weights come from elsewhere.
+WEIGHT_PATTERNS = ("*.safetensors", "*.safetensors.index.json", "*.bin", "*.pt", "*.pth", "*.ckpt", "*.h5", "*.msgpack",
+                   "*.gguf")
+
+
+def resolve(name, revision=None, weights=True):
+    """Local directory or Hugging Face repo id (downloaded once to the HF cache). With weights=False only the
+    tokenizer, chat template, config and CALIBRATION.json are fetched (about 10 MB instead of the full checkpoint);
+    a later call with weights=True completes the same snapshot."""
     p = Path(name)
     if p.exists():
         return p
     from huggingface_hub import snapshot_download
-    return Path(snapshot_download(name, revision=revision))
+    ignore = None if weights else list(WEIGHT_PATTERNS)
+    return Path(snapshot_download(name, revision=revision, ignore_patterns=ignore))
 
 
 def default_device():
