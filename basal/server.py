@@ -131,9 +131,9 @@ class Server:
         validate_quant(a.mode, a.quant)
         if a.mode == "ollama" and not a.ollama_model:
             raise SystemExit("--mode ollama needs --ollama-model <name> (an Ollama safetensors import of --model)")
-        md = resolve(a.model, a.revision)
-        self.name = a.name or a.model.rstrip("/").split("/")[-1]
         kind, quant, comp = MODES[a.mode]
+        md = resolve(a.model, a.revision, weights=kind not in ("gguf", "ollama"))
+        self.name = a.name or a.model.rstrip("/").split("/")[-1]
         quant = a.quant or quant
         if kind == "eager":
             self.backend = EagerBackend(md, a.dtype)

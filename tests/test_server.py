@@ -129,7 +129,7 @@ def test_model_list_conforms_to_official_schema():
 ])
 def test_unsupported_quant_fails_before_model_loading(monkeypatch, mode, quant):
     monkeypatch.setattr(sys, "argv", ["basal-serve", "--mode", mode, "--quant", quant])
-    monkeypatch.setattr(server_module, "resolve", lambda *_: pytest.fail("must reject before loading a model"))
+    monkeypatch.setattr(server_module, "resolve", lambda *_, **__: pytest.fail("must reject before loading a model"))
     with pytest.raises(SystemExit, match="not supported"):
         server_module.main()
 

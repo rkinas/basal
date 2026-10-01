@@ -206,7 +206,7 @@ def main():
     ap.add_argument("--out", default=None, help="write results as JSON")
     a = ap.parse_args()
     a.modes = a.modes or default_modes()
-    md = resolve(a.model)
+    md = resolve(a.model, weights=any(not (m.startswith("gguf") or m == "ollama") for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)
     ref, rows = None, []
