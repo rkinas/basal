@@ -183,6 +183,9 @@ changes some decisions. The other measured 4-bit formats are not staged.
   [pawelkiszczak/basal-1.0-4.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-4.5B-GGUF),
   [pawelkiszczak/basal-1.0-1.5B-GGUF](https://huggingface.co/pawelkiszczak/basal-1.0-1.5B-GGUF); see
   [docs/GGUF.md](docs/GGUF.md).
+- **Ollama `/v1/systemone`**: a GGUF from `basal-export-gguf --ollama-decision` is served natively by Ollama's typed-decision API
+  (basal's prompt format, both option orders, calibrated temperatures) with an Ollama build that has the `basal`
+  decision encoding; see [docs/GGUF.md](docs/GGUF.md#ollama-v1systemone).
 - **Ollama**: `--mode ollama --ollama-model <name>` reads letter logprobs from a *safetensors import of the original
   checkpoint*, not an MLX/GGUF conversion. Ollama takes text rather than token IDs; it can omit a letter from its
   top-20 list, in which case basal reports an error instead of returning invented probabilities. See

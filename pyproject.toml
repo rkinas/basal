@@ -29,6 +29,7 @@ mlx = [
   "mlx-lm>=0.31; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 gguf = ["llama-cpp-python>=0.3.35"]
+gguf-export = ["gguf>=0.19"]
 test = [
   "pytest", "jsonschema",
   "mlx>=0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -40,6 +41,7 @@ basal-serve = "basal.server:main"
 basal-bench = "basal.bench:main"
 basal-loadtest = "basal.loadtest:main"
 basal-run = "basal.run:main"
+basal-export-gguf = "basal.gguf_export:main"
 
 [tool.setuptools]
 packages = ["basal"]

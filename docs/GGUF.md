@@ -19,6 +19,17 @@ hf download pawelkiszczak/basal-1.0-4.5B-GGUF basal-1.0-4.5B-F16.gguf --local-di
 
 ## Convert yourself
 
+`basal-export-gguf` runs llama.cpp's converter and then fixes the tokenizer of the file, so that llama.cpp splits basal
+prompts exactly like the Hugging Face tokenizer (see [Other llama.cpp front ends](#other-llama-cpp-front-ends-send-token-ids));
+with `--ollama-decision` it also writes the decision metadata [Ollama](#ollama-v1systemone) uses:
+
+```bash
+uv pip install -e ".[gguf-export]"
+basal-export-gguf Remek/basal-1.0-4.5B basal-1.0-4.5B-F16.gguf --outtype f16 --llama-cpp ~/llama.cpp
+```
+
+The converter alone (below) gives correct weights, but a tokenizer that differs in text front ends.
+
 The converter lives in llama.cpp and needs transformers 5 to read basal-1.0-1.5B's tokenizer config. Its current
 `requirements-convert_hf_to_gguf.txt` pins transformers 4, so install the needed converter packages directly:
 
@@ -86,6 +97,49 @@ call; *TV*: total-variation distance between the averaged two-order probabilitie
 Per-item deviations of every variant and of other engines:
 [HARDWARE.md, inference engines on Apple Silicon](HARDWARE.md#inference-engines-on-apple-silicon).
 
+## Ollama `/v1/systemone`
+
+Ollama serves typed decisions on `/v1/systemone`. A GGUF written by `basal-export-gguf --ollama-decision` carries
+`<arch>.decision.type = "basal"` and the calibrated temperatures of `CALIBRATION.json`
+(`<arch>.decision.temperature.{choice,noul,score}`). An Ollama build with the `basal` decision encoding
+(proposed in [ollama/ollama#18760](https://github.com/ollama/ollama/issues/18760), branch [pdurlej/ollama@decision-basal-encoding](https://github.com/pdurlej/ollama/tree/decision-basal-encoding)) then renders each question in basal's own prompt format, scores both option orders, averages them and
+applies the temperature, like `basal-serve`. No Modelfile template or system prompt is needed.
+
+- Such a file is **decision-only** in Ollama: `/api/generate` and `/api/chat` refuse it. Ollama versions without the
+  `basal` encoding reject it on `/v1/systemone` (`unsupported decision encoding "basal"`). Export without
+  `--ollama-decision` for any other use.
+- Ollama's request schema has no `option_keys`: described choices are always shown as `key: description`
+  (`basal-serve`'s default), never in the keys-hidden training format.
+- A structured `state` (object or array) is passed as sent, with `, ` / `: ` separators; number spellings and
+  duplicate keys are not normalized as Python's `json.dumps` would.
+
+```bash
+basal-export-gguf Remek/basal-1.0-1.5B basal-1.0-1.5B-F16.gguf --outtype f16 --llama-cpp ~/llama.cpp --ollama-decision
+echo 'FROM ./basal-1.0-1.5B-F16.gguf' > Modelfile
+ollama create basal-1.0-1.5b -f Modelfile
+curl -s localhost:11434/v1/systemone -d '{"model": "basal-1.0-1.5b", "state": "Klient: od wczoraj nie mogę zalogować się do bankowości internetowej.", "questions": {"dept": {"type": "choice", "instructions": "Do którego działu skierować zgłoszenie?", "criteria": {"cards": "Reklamacje kart", "online": "Wsparcie bankowości elektronicznej"}}}}'
+```
+
+Measured on an Apple M1 Max, 50 private triage items (30 PL / 20 EN; four questions each: a 2-way `choice`, two
+`noul`, a 4-level `score`), against `basal-serve --mode eager` (MPS, bf16, both orders, calibrated) on the same items.
+*TV*: total-variation distance per question between the two servers' probabilities (mean / max over 200 questions);
+latency per item (4 questions).
+
+| model | file | portfolio (`choice`) | escalate (`noul`) | data class (`noul`) | urgency (`score`) | TV mean / max | s per item |
+|---|---|---|---|---|---|---|---|
+| 1.5B | `basal-serve` reference | 0.92 | 0.86 | 0.70 | 0.38 | – | 1.65 |
+| | Ollama F16 | 0.94 | 0.84 | 0.68 | 0.38 | 0.008 / 0.038 | 0.58 |
+| | Ollama Q8_0 | 0.94 | 0.86 | 0.68 | 0.38 | 0.010 / 0.041 | 0.63 |
+| 4.5B | `basal-serve` reference | 0.96 | 0.88 | 0.60 | 0.46 | – | 4.76 |
+| | Ollama F16 | 0.96 | 0.88 | 0.62 | 0.46 | 0.008 / 0.164 | 1.61 |
+| | Ollama Q8_0 | 0.96 | 0.88 | 0.60 | 0.46 | 0.010 / 0.168 | 1.71 |
+
+The reference ran in `eager` mode (no compilation), so the speed column compares engines on this machine only.
+
+Without the encoding, Ollama's generic decision prompt (a JSON schema, one option order, no calibration) costs
+basal-1.0-1.5B (Q8_0, fixed tokenizer, ChatML template with basal's system prompt) up to 0.24 accuracy on the same items (data-class `noul` 0.70 → 0.46, `score`
+0.38 → 0.18): the models are trained on one prompt format.
+
 ## Other llama.cpp front ends: send token ids
 
 llama.cpp tokenizes text with the vocabulary stored in the GGUF file, and for basal that tokenization differs from the
@@ -95,6 +149,13 @@ words, e.g. `wybierają|c` instead of `wybiera|jąc`). Front ends that send text
 the 1.5B F16 file, `llama-server` with text prompts: mean total-variation distance to fp32 0.061 (max 0.35), with
 the Hugging Face token ids: 0.0005 (max 0.002). Ollama (GGUF import) and LM Studio, which accept only text, show the
 same shift (0.049 / 0.31 on the 1.5B, 0.061 / 0.63 for LM Studio on the 4.5B).
+Files written by `basal-export-gguf` remove the difference for basal prompts: on 200 prompts of the item set above
+(50 items × 4 questions), the `/tokenize` endpoint of llama-server returns exactly the Hugging Face token ids for every
+prompt, for both 1.5B and 4.5B (a file from the converter alone: for none). This holds for text that starts with a
+special token, as every basal prompt does with `<s>`; at the very start of plain text Hugging Face adds a word-boundary
+marker and llama.cpp does not. The converter writes basal's BPE vocabulary as a SentencePiece vocabulary with one constant score for every
+token and with a word-boundary prefix; `basal-export-gguf` sets each token's score from the rank of the BPE merge that
+creates it (llama.cpp merges the highest score first) and turns the prefix off.
 `--mode gguf` always passes token ids. If you call `llama-server` yourself, tokenize with the Hugging Face tokenizer,
 send `"prompt": [ids...]` to `/completion` with `n_predict: 1`, `n_probs: 20` and read the letter ids from
 `completion_probabilities[0].top_logprobs`.
