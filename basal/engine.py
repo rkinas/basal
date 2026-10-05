@@ -20,6 +20,7 @@ Backends:
                     llama.cpp sequences
   OllamaBackend     Ollama with the GGUF exports (1.5): raw prompt, one token, top log-probabilities of the letters
   LlamaCppBackend   llama.cpp server with the GGUF exports (1.5): token-id prompt, `n_probs` log-probabilities
+  TPUBackend        (basal/tpu.py) the same packing in JAX on Google TPU, one XLA executable per shape
 """
 import json
 from pathlib import Path

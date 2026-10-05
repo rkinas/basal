@@ -50,11 +50,13 @@ MODES = {
     "gguf": ("gguf", None, False),          # llama.cpp in process on a GGUF file (--gguf; Metal, CUDA or CPU)
     "ollama": ("ollama", None, False),      # Ollama with the GGUF exports (1.5); --ollama-url, --ollama-model
     "llamacpp": ("llamacpp", None, False),  # llama.cpp server with the GGUF exports (1.5); --llamacpp-url
+    "tpu": ("tpu", None, False),            # Google TPU: JAX / XLA + shared prefix, one executable per shape
 }
 
 
 def default_mode():
-    """fast on CUDA, mlx on Apple Silicon when mlx and mlx-lm are installed, mps otherwise there, else eager."""
+    """fast on CUDA, mlx on Apple Silicon when mlx and mlx-lm are installed, mps otherwise there, tpu on a TPU VM
+    with JAX, else eager."""
     if torch.cuda.is_available():
         return "fast"
     if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
@@ -64,6 +66,9 @@ def default_mode():
             return "mlx"
         except ImportError:
             return "mps"
+    from .tpu import tpu_available
+    if tpu_available():
+        return "tpu"
     return "eager"
 
 
@@ -255,6 +260,9 @@ class Server:
             self.backend = OllamaBackend(md, a.ollama_url, a.ollama_model, parallel=a.http_parallel)
         elif kind == "llamacpp":
             self.backend = LlamaCppBackend(md, a.llamacpp_url, parallel=a.http_parallel)
+        elif kind == "tpu":
+            from .tpu import TPUBackend
+            self.backend = TPUBackend(md, a.dtype, shared=a.orders == 2, max_len=a.max_len)
         else:
             self.backend = GraphBackend(md, a.dtype, quant, compile=comp, shared=a.orders == 2)
         self.tok = self.backend.tok
@@ -427,7 +435,8 @@ def parser():
     ap.add_argument("--revision", default=None)
     ap.add_argument("--name", default=None, help="model name reported in responses (default: last part of --model)")
     ap.add_argument("--mode", choices=list(MODES), default=None,
-                    help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx / mlx-lm), eager otherwise")
+                    help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx / mlx-lm), tpu on a TPU VM, "
+                         "eager otherwise")
     ap.add_argument("--quant", choices=["fp8", "nvfp4", "q8"], default=None,
                     help="override the quantisation of the mode (fp8 / nvfp4: CUDA graph modes, q8: mlx)")
     ap.add_argument("--dtype", default="bfloat16")
@@ -445,7 +454,8 @@ def parser():
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
     ap.add_argument("--gpu-memory", dest="gpu_memory", type=float, default=0.6, help="vLLM memory fraction")
     ap.add_argument("--max-len", dest="max_len", type=int, default=4096,
-                    help="--mode vllm / sglang: context length in tokens (longer states are refused; raise it for long documents)")
+                    help="--mode vllm / sglang / tpu: context length in tokens (longer states are refused; raise it for "
+                         "long documents)")
     ap.add_argument("--gguf", default=None, help="--mode gguf: GGUF weights (a -GGUF file or one converted from --model)")
     ap.add_argument("--ollama-url", dest="ollama_url", default="http://127.0.0.1:11434", help="--mode ollama")
     ap.add_argument("--ollama-model", dest="ollama_model", default=None,

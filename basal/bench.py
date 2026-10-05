@@ -41,6 +41,9 @@ def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="h
         if not path:
             raise SystemExit("mode gguf needs --gguf <file.gguf> (or gguf@<file.gguf>)")
         return GGUFBackend(md, path)
+    if mode in ("tpu", "tpu-fp32"):
+        from .tpu import TPUBackend
+        return TPUBackend(md, "float32" if mode == "tpu-fp32" else "bfloat16", warm=False)
     kind, quant, comp = MODES[mode]
     if kind == "eager":
         return EagerBackend(md, "bfloat16")
@@ -70,7 +73,9 @@ def default_modes():
     return ["eager-fp32", mode]
 
 
-def device_name():
+def device_name(be=None):
+    if hasattr(be, "device_name"):
+        return be.device_name()
     if torch.cuda.is_available():
         return torch.cuda.get_device_name(0)
     import platform
@@ -94,10 +99,12 @@ def reset_memory():
 
 
 def memory_gb(be):
-    """Peak allocated memory (CUDA, MLX); for MPS the memory held by the Metal driver at the end of the run; NaN for
-    backends without memory tracking (GGUF, Ollama, llama.cpp server, CPU)."""
+    """Peak allocated memory (CUDA, MLX, TPU); for MPS the memory held by the Metal driver at the end of the run; NaN
+    for backends without memory tracking (GGUF, Ollama, llama.cpp server, CPU)."""
     if isinstance(be, MLXBackend):
         return be.mx.get_peak_memory() / 2**30
+    if hasattr(be, "memory_gb"):
+        return be.memory_gb()
     dev = getattr(be, "dev", None)
     if dev is not None:
         kind = torch.device(dev).type
@@ -208,7 +215,8 @@ def main():
                     help="default: eager-fp32 and the serving default (fast on CUDA); on Apple Silicon bf16 mps and mlx "
                          "(--modes eager-fp32 mps mlx for fp32 agreement if memory allows). Modes: eager-fp32, eager, "
                          "fast, fast-nocompile, fp8, nvfp4, vllm, sglang, fast-exit@off|0.999|0.995|0.99|0.98; Apple "
-                         "Silicon: mlx, mlx-q8, mps; GGUF: gguf, gguf@<file.gguf>, ollama, llamacpp")
+                         "Silicon: mlx, mlx-q8, mps; GGUF: gguf, gguf@<file.gguf>, ollama, llamacpp; "
+                         "Google TPU: tpu, tpu-fp32")
     ap.add_argument("--questions", nargs="+", default=DEFAULT_QUESTIONS,
                     help="JSONL file(s) with simple items (default: the bundled examples, 44 items)")
     ap.add_argument("--n", type=int, default=500)
@@ -228,7 +236,7 @@ def main():
         groups = groups_for(be.tok, qs)
         dec, r = measure(be, groups, min(a.lat_n, len(groups) - 5))
         top = [max(range(len(d)), key=d.__getitem__) for d in dec]
-        r = dict(mode=mode, reference_mode=a.modes[0], gpu=device_name(), n=len(groups), load_s=round(load_s, 1),
+        r = dict(mode=mode, reference_mode=a.modes[0], gpu=device_name(be), n=len(groups), load_s=round(load_s, 1),
                  **r, mem_gb=memory_gb(be))
         if all("gold" in g[0] for g in groups):
             r["acc"] = sum(t == g[0]["gold"] for t, g in zip(top, groups)) / len(groups)

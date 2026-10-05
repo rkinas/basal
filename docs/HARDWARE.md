@@ -47,6 +47,7 @@ measurements):
 | Batched high-throughput serving with vLLM | `vllm` + the `-FP8` checkpoint on Hopper / Ada, the `-NVFP4` checkpoint on Blackwell (RTX 50xx, RTX PRO 6000, B200, DGX Spark); see [QUANTIZATION](QUANTIZATION.md#basal-15-the-modelopt-checkpoints) | basal-1.0 NVFP4: 3.2× throughput on the DGX Spark, but −3 accuracy points; the basal-1.5 checkpoints' agreement and speed: FP8 agrees with the bf16 model on 0.979–0.989 of decisions; NVFP4 on 0.979 for max and 0.937 for basal-1.5 (−2.8 points); no NVFP4 for mini |
 | A100 and other GPUs without FP8 (not measured) | `fast` | the bf16 path runs on any sm80+ GPU |
 | Apple Silicon (M-series) | MLX port: `-MLX-8bit` (decisions as with bf16); `-MLX-fp4` for 8 GB Macs (about 1.4 accuracy points less on basal-1.5, 2.0 on max, 3.6 on mini: for mini prefer `-MLX-8bit` or GGUF); without MLX: `gguf` (a `-GGUF` file in process) or `mps` (PyTorch, evidence spans) | see [Apple Silicon](#apple-silicon) |
+| Google TPU (v5e measured) | `tpu` (bf16) | XLA-compiled JAX with the SOAM packing; basal-1.5 (4.5B) fits one 16 GB v5e chip and agrees 1.000 with fp32 |
 
 With basal-1.0 models (which ship exit heads), add `--mode fast-exit` to let requests choose `"early_exit": "0.99"`
 (about 1.15× faster, agreement ≥ 0.99). The basal-1.5 models do not ship exit heads; serve them with `fast`.
@@ -340,6 +341,44 @@ cool-down; *TV*: mean / max total-variation distance to fp32, *changed*: decisio
 
 Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurements in `docs/figures/apple_engines.json`.
 
+## Google TPU
+
+`--mode tpu` on a Colab TPU v5e-1 (`TPU v5 lite`), JAX 0.11.1, the 44 bundled examples (`basal-bench`; reference:
+`eager-fp32` transformers on the VM's CPU).
+
+| model | mode | 2 orders (ms) | 1 order (ms) | dec/s | agreement | accuracy |
+|---|---|---|---|---|---|---|
+| basal-1.5 (4.5B) | `eager-fp32` (CPU) | 4719.6 | 2788.4 | 0.2 | reference | 0.795 |
+| | `tpu` (bf16) | **17.7** | 16.0 | **49.5** | 1.000 | 0.795 |
+| | HTTP `tpu` (p50, 32 clients) | 19.0 | – | 36.1 | – | – |
+| basal-1.5-mini | `eager-fp32` (CPU) | 1388.7 | 871.7 | 0.7 | reference | 0.705 |
+| | `tpu-fp32` | 29.5 | 22.9 | 26.9 | 1.000 | 0.705 |
+| | `tpu` (bf16) | **6.7** | 6.2 | **146.1** | 1.000 | 0.705 |
+| | HTTP `tpu` (p50, 32 clients) | 7.9 | – | 111.7 | – | – |
+| basal-1.0-4.5B | `tpu` (bf16) | 17.9 | 16.2 | 49.3 | 1.000 | 0.795 |
+| basal-1.0-1.5B | `tpu` (bf16) | 6.6 | 6.1 | 145.5 | 0.977 | 0.750 |
+
+Many questions about one state (HTTP, one request, a 464-token state, p50): basal-1.5 23.5 / 46.9 / 110.3 ms and
+basal-1.5-mini 9.0 / 18.0 / 37.9 ms for 1 / 5 / 12 questions, about 2.5× faster than one request per question; every
+answer equals the same question asked alone (12/12, max |Δp| 0.016 in bf16).
+
+Long prompts (`--max-len`; blocked attention above 3,072 tokens, one prompt per forward, both option orders):
+
+| model | 3.4k tokens | 5.9k | 7.9k | 11.9k | 15.9k | 23.9k | 31.9k |
+|---|---|---|---|---|---|---|---|
+| basal-1.5 (4.5B) | 0.65 s | 0.99 s | 1.46 s | 2.62 s | 4.09 s | 7.66 s | 12.53 s |
+| basal-1.5-mini | 0.21 s | 0.35 s | 0.53 s | – | – | – | – |
+
+The blocked attention equals the full softmax (max |Δp| 1.5e-6 against the fp32 CPU reference at 5.9k tokens, both in
+fp32); HBM stays at about 9 GB for basal-1.5 up to 32k tokens. XLA's full-row softmax is not used there because on a
+v5e it hits a cliff at some lengths (6,144 / 8,192 keys: 128 / 291 ms per attention for mini shapes, against 2.1 /
+3.6 ms with blocks of 1,024 queries and keys).
+
+A TPU is compute-bound already at batch 1, because a single prompt sends hundreds of rows through every matmul.
+Batching adds about 1.25× (basal-on-tpu-dev, batch scaling), so tight length buckets matter more than large batches.
+Start-up compiles every bucket shape (about 3 minutes, cached for later starts). The bf16 weights take 3.2 GB (mini)
+and 9.6 GB (4.5B) of HBM; basal-1.5-max (22 GB) does not fit one v5e chip. The `GB` column of `basal-bench` is the
+process-wide peak, so after a `tpu-fp32` run in the same invocation it still shows the fp32 peak.
 
 ## Notes per platform
 
