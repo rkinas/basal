@@ -419,6 +419,49 @@ cool-down; *TV*: mean / max total-variation distance to fp32, *changed*: decisio
 Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurements in `docs/figures/apple_engines.json`.
 
 
+## Google TPU (experimental, community-maintained)
+
+`--mode tpu` (extra `basal[tpu]`, [install](INSTALL.md#google-tpu-experimental-community-maintained)) runs the bf16
+weights in JAX / XLA on one TPU chip with the same SOAM packing, option codes and calibration as the basal engine. It is
+maintained outside the core team; measured on a Colab TPU v5e-1 (`TPU v5 lite`, 16 GB HBM), JAX 0.11.1. basal-2.0-max
+(11B, 22 GB of bf16 weights) needs more HBM than one v5e chip has.
+
+`basal-bench` on the 44 bundled examples (the reference is `eager-fp32`, transformers on the VM's CPU; both option
+orders per decision):
+
+| model | mode | 2 orders (ms) | 1 order (ms) | dec/s | agreement | accuracy |
+|---|---|---|---|---|---|---|
+| basal-2.0 (4.5B) | `eager-fp32` (CPU) | 3884.7 | 2522.1 | 0.3 | reference | 0.795 |
+| | `tpu` (bf16) | **16.3** | 15.9 | **64.7** | 1.000 | 0.795 |
+| basal-2.0-mini | `eager-fp32` (CPU) | 1212.8 | 754.2 | 0.8 | reference | 0.750 |
+| | `tpu-fp32` | 23.1 | 22.8 | 33.5 | 1.000 | 0.750 |
+| | `tpu` (bf16) | **6.3** | 6.1 | **188.7** | 1.000 | 0.750 |
+
+Identity gate (the items and paths of `basal-bench --identity`, basal/identity.py: single questions over ~1.8k-token
+states, five-question requests over one state and 3.9-5.7k-token states, both option orders; the reference is every
+prompt alone in transformers fp32 on the CPU; 20 single questions, 6 requests and 2 long states per model):
+
+| model, `tpu` dtype | plain | plain-batch | orders2 | orders2-batch | soam | soam-batch | long-plain | long-tree |
+|---|---|---|---|---|---|---|---|---|
+| basal-2.0-mini, fp32 | 1.000 (1.7e-5) | 1.000 (1.7e-5) | 1.000 (1.7e-5) | 1.000 (1.7e-5) | 1.000 (1.4e-5) | 1.000 (1.2e-5) | 1.000 (1.3e-5) | 1.000 (1.3e-5) |
+| basal-2.0-mini, bf16 | 0.975 (0.023) | 1.000 (0.018) | 0.975 (0.022) | 0.975 (0.025) | 1.000 (0.037) | 1.000 (0.033) | 1.000 (0.011) | 1.000 (0.011) |
+| basal-2.0, bf16 | 1.000 (0.027) | 1.000 (0.049) | 1.000 (0.021) | 0.975 (0.049) | 1.000 (0.054) | 1.000 (0.030) | 1.000 (0.015) | 1.000 (0.017) |
+
+Readout agreement (max |Δp|); 40 readouts per single-question path, 60 per request path, 4 per long path. In fp32
+every path is exact (|Δp| ≤ 1.7e-5): the TPU packing (prefix trie, batching, blocked attention for long states) adds no
+error. In bf16 each 0.975 is one readout of 40, always at a reference top-2 gap ≤ 0.027 (the near ties of this
+sample); the decisions (both orders averaged) agree on 20/20 per path except mini orders2-batch, 19/20 (a decision
+with a reference gap ≤ 0.021). The sample is small: one flip moves a path below the 0.999 gate.
+
+
+Over HTTP (`basal-serve --mode tpu` with the 2.0 defaults: prompt format 2, one option order; `basal-loadtest`, 32
+clients): basal-2.0 17.1 ms p50, 59.6 decisions/s; basal-2.0-mini 7.3 ms p50, 165.5 decisions/s. One request with 1 / 5
+/ 12 questions over one state: 18.8 / 26.4 / 39.9 ms (basal-2.0) and 7.5 / 10.4 / 15.9 ms (mini). Start-up compiles
+every shape: 268 s (basal-2.0) and 180 s (mini) on a v5e, cached for later starts.
+
+Not on TPU: evidence spans, `--media`, early exit and quantisation. The 44 examples are a small sample; agreement and
+speed on your own items: `basal-bench --modes eager-fp32 tpu --questions <file.jsonl>`.
+
 ## Notes per platform
 
 - **DGX Spark (GB10, aarch64, CUDA 13).** In the README install steps use the CUDA 13 build of PyTorch

@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from basal.server import calibration_name, check_calibration, temperature
+from basal.server import calibration_file, calibration_name, check_calibration, temperature
 from tests.test_prompt2 import choice, fmt2_server
 
 CAL2 = {"prompt": 2,
@@ -35,9 +35,18 @@ def test_bad_files_are_refused_at_startup():
 def test_per_engine_file_names():
     assert calibration_name("graph", None) is None and calibration_name("eager", None) is None
     assert calibration_name("graph", "fp8") == "fp8" and calibration_name("exit", "nvfp4") == "nvfp4"
-    assert [calibration_name(k, None) for k in ("vllm", "sglang", "mlx", "ollama", "llamacpp")] == \
-        ["vllm", "sglang", "mlx", "ollama", "llamacpp"]
+    assert [calibration_name(k, None) for k in ("vllm", "sglang", "mlx", "ollama", "llamacpp", "tpu")] == \
+        ["vllm", "sglang", "mlx", "ollama", "llamacpp", "tpu"]
     assert calibration_name("mlx", "q8") == "mlx" and calibration_name("mps", None) is None
+
+
+def test_per_engine_file_when_shipped(tmp_path):
+    (tmp_path / "CALIBRATION.json").write_text("{}")
+    assert calibration_file(tmp_path, "tpu") == tmp_path / "CALIBRATION.json"  # none for the engine: the default
+    (tmp_path / "CALIBRATION.tpu.json").write_text("{}")
+    assert calibration_file(tmp_path, "tpu") == tmp_path / "CALIBRATION.tpu.json"
+    assert calibration_file(tmp_path, "graph") == tmp_path / "CALIBRATION.json"
+    assert calibration_file(tmp_path, "tpu", path="X.json").name == "X.json"  # --calibration wins
 
 
 def tempered(p, T):

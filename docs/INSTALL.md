@@ -218,6 +218,30 @@ prompt cache of Ollama / llama.cpp computes the state once; `--http-parallel N` 
 `llama-server -np`) serves concurrent clients. GGUF is the slow path for batches: it is for desktops and laptops, not
 servers. Details: [PORTS.md](PORTS.md), [GGUF.md](GGUF.md).
 
+### Google TPU (experimental, community-maintained)
+
+`--mode tpu` runs the bf16 weights in JAX / XLA on one TPU chip (measured on a v5e-1, the Colab TPU runtime), with
+the same SOAM packing, option codes, calibration and API as the basal engine. basal-2.0-mini and basal-2.0 (4.5B) fit
+one 16 GB v5e chip; basal-2.0-max (11B) does not. Install a CPU build of torch (the tokenizer and the chat template
+use transformers), then the `tpu` extra (JAX and libtpu from PyPI; Python 3.12 or newer):
+
+```bash
+uv venv --python 3.12 --allow-existing ~/basal-tpu && source ~/basal-tpu/bin/activate
+uv pip install "torch>=2.11" --index-url https://download.pytorch.org/whl/cpu
+uv pip install "basal[tpu] @ https://github.com/rkinas/basal/archive/refs/tags/v2.0.0.tar.gz"
+basal-serve --model Remek/basal-2.0-4.5B --port 8000   # --mode tpu is the default on a TPU VM
+```
+
+- The server compiles one XLA program per shape before it accepts requests (3–5 minutes; cached in
+  `~/.cache/basal/jax`, or `$JAX_COMPILATION_CACHE_DIR`, for the next start).
+- `--max-len` (default 4,096 tokens) is the longest prompt; longer states are cut or refused (`--context-overflow`).
+  Above 3,072 tokens the attention runs in blocks, so long documents fit (basal-2.0 up to its 32k context).
+- On a Colab TPU runtime, install into the system Python as above and remove the torch add-ons Colab ships for its own
+  older torch (`pip uninstall torchvision torchaudio torchcodec torch-xla`): transformers fails to import next to them.
+  [`notebooks/tpu.ipynb`](../notebooks/tpu.ipynb) does all of this and runs the examples and benchmarks.
+- Not on TPU: evidence spans (they need the PyTorch model), `--media`, early exit and quantisation.
+  Measurements: [HARDWARE.md](HARDWARE.md#google-tpu-experimental-community-maintained).
+
 ### CPU
 
 `basal-serve --model Remek/basal-2.0-mini --mode eager --device cpu` runs everywhere, for tests and low volumes.

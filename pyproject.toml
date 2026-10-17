@@ -31,6 +31,9 @@ mlx = [  # Apple Silicon: --mode mlx / mlx-q8 (-MLX-8bit / -MLX-fp4 exports or b
 media = ["pillow", "soundfile", "scipy", "torchvision"]  # --media on (basal-omni): images and audio; Gemma 4 image processing needs torchvision (the build of the installed torch)
 gguf = ["llama-cpp-python>=0.3.35"]  # --mode gguf: a GGUF file in process (Metal, CUDA or CPU)
 mcp = ["mcp>=2.3,<3"]  # basal-serve --mcp on (MCP at /mcp) and the basal-mcp stdio bridge, for agents
+# --mode tpu (experimental, Google TPU VMs; docs/HARDWARE.md#google-tpu): JAX with libtpu (both from PyPI), pinned to
+# the version the backend was validated with
+tpu = ["jax[tpu]==0.11.1; python_version >= '3.12' and sys_platform == 'linux'"]
 test = [
   "pytest", "jsonschema", "mcp>=2.3,<3",
   "mlx>=0.32; sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11'",

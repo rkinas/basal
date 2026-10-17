@@ -72,11 +72,13 @@ MODES = {
     "gguf": ("gguf", None, False),          # llama.cpp in process on a GGUF file (--gguf; Metal, CUDA or CPU)
     "ollama": ("ollama", None, False),      # Ollama with the GGUF exports (1.5); --ollama-url, --ollama-model
     "llamacpp": ("llamacpp", None, False),  # llama.cpp server with the GGUF exports (1.5); --llamacpp-url
+    "tpu": ("tpu", None, False),            # Google TPU (experimental, basal[tpu]): JAX / XLA, SOAM, one program per shape
 }
 
 
 def default_mode():
-    """fast on CUDA, mlx on Apple Silicon when mlx and mlx-lm are installed, mps otherwise there, else eager."""
+    """fast on CUDA, mlx on Apple Silicon when mlx and mlx-lm are installed, mps otherwise there, tpu on a TPU VM
+    with basal[tpu] installed, else eager."""
     if torch.cuda.is_available():
         return "fast"
     if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
@@ -86,6 +88,9 @@ def default_mode():
             return "mlx"
         except ImportError:
             return "mps"
+    from .tpu import tpu_available
+    if tpu_available():
+        return "tpu"
     return "eager"
 
 
@@ -330,10 +335,10 @@ def calibration_name(kind, quant):
     and the engines other than the basal bf16 path; None = CALIBRATION.json."""
     if kind in ("graph", "exit") and quant in ("fp8", "nvfp4"):
         return quant
-    return kind if kind in ("vllm", "sglang", "mlx", "ollama", "llamacpp") else None
+    return kind if kind in ("vllm", "sglang", "mlx", "ollama", "llamacpp", "tpu") else None
 
 
-DETERMINISTIC_KINDS = ("graph", "exit", "eager", "mps", "mlx", "gguf")  # engines that run in this process
+DETERMINISTIC_KINDS = ("graph", "exit", "eager", "mps", "mlx", "gguf", "tpu")  # engines that run in this process
 
 
 def deterministic_setup(kind):
@@ -342,7 +347,7 @@ def deterministic_setup(kind):
     before the first cuBLAS call (the workspace setting is read when the handle is created)."""
     if kind not in DETERMINISTIC_KINDS:
         raise SystemExit("--deterministic needs an engine that runs in this process (fast, fast-nocompile, fast-exit, "
-                         "fp8, nvfp4, eager, mps, mlx, gguf); vLLM, SGLang, Ollama and llama.cpp server batch requests "
+                         "fp8, nvfp4, eager, mps, mlx, gguf, tpu); vLLM, SGLang, Ollama and llama.cpp server batch requests "
                          "their own way")
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.use_deterministic_algorithms(True)
@@ -609,6 +614,9 @@ class Server:
             self.backend = OllamaBackend(md, a.ollama_url, a.ollama_model, parallel=a.http_parallel)
         elif kind == "llamacpp":
             self.backend = LlamaCppBackend(md, a.llamacpp_url, parallel=a.http_parallel)
+        elif kind == "tpu":
+            from .tpu import TPUBackend
+            self.backend = TPUBackend(md, a.dtype, shared=shared, max_len=a.max_len)
         else:
             self.backend = GraphBackend(md, a.dtype, quant, compile=comp, shared=shared, attn=attn,
                                         state_cache_gb=getattr(a, "state_cache_gb", 0),
@@ -1178,7 +1186,8 @@ def add_engine_args(ap):
     ap.add_argument("--model", default="Remek/basal-1.5-4.5B", help="local directory or Hugging Face repo id")
     ap.add_argument("--revision", default=None)
     ap.add_argument("--mode", choices=list(MODES), default=None,
-                    help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx / mlx-lm), eager otherwise")
+                    help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx / mlx-lm), tpu on a TPU VM "
+                         "with basal[tpu], eager otherwise")
     ap.add_argument("--quant", choices=["fp8", "nvfp4", "q8"], default=None,
                     help="override the quantisation of the mode (fp8 / nvfp4: CUDA graph modes, q8: mlx)")
     ap.add_argument("--dtype", default="bfloat16")
@@ -1202,7 +1211,8 @@ def add_engine_args(ap):
                     help="on = the whole request (every question and option order) is one packed row over the state")
     ap.add_argument("--gpu-memory", dest="gpu_memory", type=float, default=0.6, help="vLLM memory fraction")
     ap.add_argument("--max-len", dest="max_len", type=int, default=4096,
-                    help="--mode vllm / sglang: context length in tokens (longer states are refused; raise it for long documents)")
+                    help="--mode vllm / sglang / tpu: context length in tokens (longer states are refused; raise it for "
+                         "long documents)")
     ap.add_argument("--gguf", default=None, help="--mode gguf: GGUF weights (a -GGUF file or one converted from --model)")
     ap.add_argument("--ollama-url", dest="ollama_url", default="http://127.0.0.1:11434", help="--mode ollama")
     ap.add_argument("--ollama-model", dest="ollama_model", default=None,
