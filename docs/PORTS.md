@@ -224,7 +224,9 @@ In such a file the certified confidence thresholds are copied from the bf16 mode
   user-defined) token, so it is matched whole: llama.cpp only marks the tokens that `tokenizer_config.json` lists as
   special, and the basal-1.5-max config lists none, which split `<|im_start|>` into characters. With the three fixes
   llama.cpp tokenizes the rendered prompts of both the 4.5B and the max tokenizer exactly like the Hugging Face
-  tokenizer (300 of 300 for max). The
+  tokenizer (300 of 300 for max). `basal-export-gguf` applies the three fixes to a new conversion or, with `--gguf`, to
+  an existing file ([GGUF.md](GGUF.md#convert-yourself)); its tokenizer fields equal those of the `-GGUF` files of
+  basal-1.5 and basal-2.0. The
   `ollama` mode strips the BOS text (Ollama adds BOS itself) and warns if Ollama's prompt token count differs from the
   engine's. `--mode llamacpp` sends token ids and does not depend on the vocabulary.
 

@@ -30,6 +30,7 @@ mlx = [  # Apple Silicon: --mode mlx / mlx-q8 (-MLX-8bit / -MLX-fp4 exports or b
 ]
 media = ["pillow", "soundfile", "scipy", "torchvision"]  # --media on (basal-omni): images and audio; Gemma 4 image processing needs torchvision (the build of the installed torch)
 gguf = ["llama-cpp-python>=0.3.35"]  # --mode gguf: a GGUF file in process (Metal, CUDA or CPU)
+gguf-export = ["gguf>=0.19"]  # basal-export-gguf: GGUF with the Hugging Face tokenization (docs/GGUF.md)
 mcp = ["mcp>=2.3,<3"]  # basal-serve --mcp on (MCP at /mcp) and the basal-mcp stdio bridge, for agents
 test = [
   "pytest", "jsonschema", "mcp>=2.3,<3",
@@ -42,6 +43,7 @@ basal-serve = "basal.server:main"
 basal-bench = "basal.bench:main"
 basal-loadtest = "basal.loadtest:main"
 basal-run = "basal.run:main"
+basal-export-gguf = "basal.gguf_export:main"
 basal-mcp = "basal.mcp_server:main"
 basal-calibrate = "basal.calibrate:main"
 

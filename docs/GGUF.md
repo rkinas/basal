@@ -89,23 +89,40 @@ Per-item deviations of every variant and of other engines:
 
 ## Convert yourself
 
-The converter lives in llama.cpp and needs transformers 5 to read the basal tokenizer config. Its current
-`requirements-convert_hf_to_gguf.txt` pins transformers 4, so install the needed converter packages directly:
+`basal-export-gguf` runs llama.cpp's converter and then applies the tokenizer fix of the `-GGUF` repositories
+([PORTS.md](PORTS.md#how-the-ports-are-made)), so llama.cpp and Ollama tokenize basal prompts exactly like the Hugging
+Face tokenizer. The converter lives in llama.cpp and needs transformers 5 to read the basal tokenizer config. Its
+current `requirements-convert_hf_to_gguf.txt` pins transformers 4, so install the needed converter packages directly,
+and basal from a clone with the `gguf-export` extra in the same environment (the tool runs the converter with its own
+Python):
 
 ```bash
 git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/llama.cpp
+git clone https://github.com/rkinas/basal ~/basal
 uv venv --python 3.12 --allow-existing ~/gguf-env
-uv pip install --python ~/gguf-env 'numpy~=2.2.6' 'sentencepiece>=0.1.98,<0.3.0' 'protobuf>=4.21,<5' gguf 'transformers==5.17.0' 'torch==2.11.0'
-hf download Remek/basal-1.0-4.5B --local-dir basal-1.0-4.5B
-~/gguf-env/bin/python ~/llama.cpp/convert_hf_to_gguf.py basal-1.0-4.5B --outtype f16  --outfile basal-1.0-4.5B-F16.gguf
-~/gguf-env/bin/python ~/llama.cpp/convert_hf_to_gguf.py basal-1.0-4.5B --outtype q8_0 --outfile basal-1.0-4.5B-Q8_0.gguf
-# other llama.cpp quantisations from the F16 file (llama-quantize: brew install llama.cpp, or build llama.cpp)
-llama-quantize basal-1.0-4.5B-F16.gguf basal-1.0-4.5B-Q4_K_M.gguf Q4_K_M
+uv pip install --python ~/gguf-env 'numpy~=2.2.6' 'sentencepiece>=0.1.98,<0.3.0' 'protobuf>=4.21,<5' 'transformers==5.17.0' 'torch==2.11.0'
+uv pip install --python ~/gguf-env -e "$HOME/basal[gguf-export]"
+hf download Remek/basal-2.0-4.5B --local-dir basal-2.0-4.5B
+~/gguf-env/bin/basal-export-gguf basal-2.0-4.5B basal-2.0-4.5B-F16.gguf  --outtype f16  --llama-cpp ~/llama.cpp
+~/gguf-env/bin/basal-export-gguf basal-2.0-4.5B basal-2.0-4.5B-Q8_0.gguf --outtype q8_0 --llama-cpp ~/llama.cpp
+# other llama.cpp quantisations from the F16 file keep the fix (llama-quantize: brew install llama.cpp, or build llama.cpp)
+llama-quantize basal-2.0-4.5B-F16.gguf basal-2.0-4.5B-Q5_K_M.gguf Q5_K_M
+```
+
+`--gguf` fixes an existing file instead of converting the model: a stock conversion, a `llama-quantize` output, or
+the basal-1.0 files of [Files](#files), which carry the stock tokenizer. The model then only supplies
+`tokenizer.json`, downloaded without the weights; `--llama-cpp` is not needed and the output must be a new file:
+
+```bash
+~/gguf-env/bin/basal-export-gguf Remek/basal-1.0-4.5B fixed/basal-1.0-4.5B-F16.gguf --gguf basal-1.0-4.5B-F16.gguf
 ```
 
 The attention and MLP biases of basal are converted and used by llama.cpp's Llama architecture. A stock conversion
 keeps llama.cpp's own tokenization of text (below): fine for `--mode gguf` and `--mode llamacpp`, which send token
-ids, not for Ollama, which takes text; for Ollama use the `-GGUF` repositories.
+ids, not for Ollama, which takes text. With the fix, `llama-tokenize` splits the bundled examples in both option
+orders exactly like the Hugging Face tokenizer (stock conversions: none of them). The fixed tokenizer fields of a
+stock conversion equal those of the `-GGUF` files for all three basal-2.0 and basal-1.5 models, and fixing a `-GGUF`
+file leaves it unchanged, byte for byte.
 
 ## Other llama.cpp front ends: send token ids
 
@@ -116,7 +133,8 @@ merges inside Polish words, e.g. `wybierają|c` instead of `wybiera|jąc`). Fron
 probabilities. On the basal-1.0-1.5B F16 file, `llama-server` with text prompts: mean total-variation distance to fp32
 0.061 (max 0.35), with the Hugging Face token ids: 0.0005 (max 0.002). Ollama (GGUF import) and LM Studio, which accept
 only text, show the same shift (0.049 / 0.31 on the 1.5B, 0.061 / 0.63 for LM Studio on the 4.5B). The basal-1.5
-`-GGUF` files carry the tokenizer fix, so text and token ids give the same tokens there.
+and basal-2.0 `-GGUF` files carry the tokenizer fix, so text and token ids give the same tokens there, as do files
+written by `basal-export-gguf` ([Convert yourself](#convert-yourself)).
 
 `--mode gguf` and `--mode llamacpp` always pass token ids. If you call `llama-server` yourself, tokenize with the
 Hugging Face tokenizer, send `"prompt": [ids...]` to `/completion` with `n_predict: 1`, `n_probs: 20` and read the

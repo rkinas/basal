@@ -216,7 +216,8 @@ overrides the Modelfile) and llama.cpp mode reads `llama-server -c`; longer stat
 Quantisations: `Q8_0` (recommended) and `Q5_K_M` (smaller). Requests of one state are sent one after another, so the
 prompt cache of Ollama / llama.cpp computes the state once; `--http-parallel N` (with `OLLAMA_NUM_PARALLEL` /
 `llama-server -np`) serves concurrent clients. GGUF is the slow path for batches: it is for desktops and laptops, not
-servers. Details: [PORTS.md](PORTS.md), [GGUF.md](GGUF.md).
+servers. Details: [PORTS.md](PORTS.md), [GGUF.md](GGUF.md). Other GGUF files with the same tokenizer fix (other
+quantisations, basal-1.0): `basal-export-gguf` ([GGUF.md](GGUF.md#convert-yourself)).
 
 ### CPU
 
