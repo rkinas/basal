@@ -44,6 +44,11 @@ about 5 points. Evidence spans never point into the facts block.
 Polish only (dates in Polish formats, amounts in zł / PLN / euro). The same code is importable:
 `from basal.facts import inject`.
 
+The facts are computed from the state only. Dates, durations and amounts written in a question's `instructions` or
+`criteria`, such as a rule "zwrot w ciągu 14 dni od doręczenia" placed in the question, are not seen, so the block
+cannot relate them to the dates of the state. Put such a rule in the state, after the facts of the case: the block
+reads the first dates of the text.
+
 ## `multi`: which labels apply?
 
 ```json

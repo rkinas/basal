@@ -251,7 +251,7 @@ document tree with these questions.
 whether it is a Saturday or a statutory day off, gaps between dates, date + stated durations, net/gross amounts for
 a stated VAT rate, euro × a stated exchange rate, budget remainders, quantity × price and list totals, and
 comparisons of amounts (as symbols only, never a verdict). Only arithmetic and calendar facts are added, never a rule
-or an answer.
+or an answer. The facts come from the state only ([FEATURES.md](FEATURES.md#facts-auto)).
 
 ## Using the confidence
 
