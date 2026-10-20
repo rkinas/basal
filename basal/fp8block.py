@@ -159,6 +159,8 @@ def sm90():
                         os.environ["PATH"] = os.path.join(d, "bin") + os.pathsep + os.environ.get("PATH", "")
                         break
         _SM90.append(ok)
+        if not ok and torch.cuda.is_available() and not _KERNEL:  # the Triton kernel, before any layer is compiled
+            _KERNEL.append(_build())
     return _SM90[0]
 
 
