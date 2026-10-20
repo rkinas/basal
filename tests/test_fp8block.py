@@ -50,7 +50,7 @@ def tiny(kind):
         kw.update(hidden_size_per_layer_input=0, attention_k_eq_v=True, num_global_key_value_heads=1)
     m = Gemma4ForCausalLM(Gemma4TextConfig(**kw)).eval()
     m.config._attn_implementation = "sdpa"
-    return m
+    return m.double()  # (float32: rounding differences of 1e-7 between the two forwards flip FP8 roundings)
 
 
 @pytest.mark.parametrize("kind", ["e4b", "31b"])
@@ -98,7 +98,19 @@ def test_kernel_equals_the_maths_and_ignores_the_other_rows(M):
     qa, sa = fp8block.act_quant(x)
     y = fp8block.gemm(qa, sa, q, s, torch.float32)
     ref = fp8block._reference(qa, sa, q, s, torch.float32)
-    assert torch.allclose(y, ref, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(y, ref, rtol=2e-3, atol=2e-3)  # Hopper's FP8 MMA accumulates in reduced precision
     alone = fp8block.gemm(qa[-1:], sa[-1:], q, s, torch.bfloat16)
     many = fp8block.gemm(torch.cat([qa, qa]), torch.cat([sa, sa]), q, s, torch.bfloat16)
     assert torch.equal(alone[0], many[M - 1]) and torch.equal(many[M - 1], many[2 * M - 1])
+
+
+@pytest.mark.skipif(not (torch.cuda.is_available() and fp8block.sm90()), reason="Hopper with flashinfer")
+def test_sm90_kernel_equals_the_triton_kernel():
+    """flashinfer's SM90 kernel (DeepGEMM's) and the Triton kernel compute the same block-scaled product."""
+    torch.manual_seed(0)
+    x = torch.randn(300, 1024, device="cuda", dtype=torch.bfloat16)
+    q, s = fp8block.quantize(torch.randn(768, 1024, device="cuda") / 32)
+    y = fp8block.linear(x, q, s).float()
+    qa, sa = fp8block.act_quant(x)
+    ref = fp8block._reference(qa, sa, q, s, torch.float32)
+    assert (y - ref).abs().max() <= 2e-2 * ref.abs().max()

@@ -262,7 +262,8 @@ class Gemma4Graph:
         so a merged weight's blocks are its parts' blocks; the parts become views of it and transformers' forward of
         the model still runs). The per-layer input projections (E2B / E4B), the embeddings and the head stay as loaded.
         Layer by layer, so the bf16 weights are freed as it goes (31B: 59 GB -> 31 GB). -> the number of GEMMs."""
-        from .fp8block import BLOCK, BlockFP8Linear, fits
+        from .fp8block import BLOCK, BlockFP8Linear, fits, sm90
+        sm90()  # which GEMM the layers run, decided before they are compiled
         n = 0
 
         def ok(merged):
