@@ -76,7 +76,9 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --por
   torch, which breaks `transformers` ("operator torchvision::nms does not exist"). The text models do not need
   torchvision (the `basal[media]` extra for basal-omni installs it).
 - The first start in mode `fast` compiles the model and captures CUDA graphs (several minutes); `--mode
-  fast-nocompile` starts in seconds. On Hopper, FlashAttention 3 is used when its wheel is installed
+  fast-nocompile` starts in seconds. The compiled code is cached in `~/.cache/basal/torchinductor` (set
+  `TORCHINDUCTOR_CACHE_DIR` to put it elsewhere), so later starts, after a reboot too, skip most of the compiling;
+  delete the directory to free its space. On Hopper, FlashAttention 3 is used when its wheel is installed
   (`uv pip install flash_attn_3 --extra-index-url https://download.pytorch.org/whl/cu128`); compact batching and
   the template cache use it. On other GPUs, `--batches compact` runs them through torch's varlen attention (about
   6 GB more GPU memory for mini and 7 GB for the 4.5B where the card has room, 2.4 GB on a full 16 GB card;

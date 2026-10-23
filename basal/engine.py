@@ -446,6 +446,40 @@ def compact_refused(why):
             f"torch's varlen attention ({why})")
 
 
+def persist_compile_cache():
+    """torch.compile's cache (Inductor's compiled graphs, and the Triton kernels it keeps under them) in
+    ~/.cache/basal/torchinductor, as --mode tpu keeps JAX's in ~/.cache/basal/jax. Inductor's default,
+    /tmp/torchinductor_<user>, is emptied by a reboot on most systems (/tmp a tmpfs or cleaned at boot), so the first
+    start after one compiled every forward again. A cached graph is the compiled code itself: the same kernels, the same
+    answers. A TORCHINDUCTOR_CACHE_DIR given before basal was imported, or set to another directory since, is kept;
+    Inductor writes its default there the first time it is asked (importing transformers' models already asks), and
+    that one is replaced, Inductor's memoised paths cleared after the switch as its temporary_cache_dir does (the
+    previous value back if that fails). Nothing changes without a usable home directory or a writable cache
+    directory."""
+    from torch._inductor.runtime.cache_dir_utils import default_cache_dir
+
+    from . import INDUCTOR_CACHE_DIR_GIVEN
+    set_to = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+    try:
+        if INDUCTOR_CACHE_DIR_GIVEN or (set_to and os.path.abspath(set_to) != os.path.abspath(default_cache_dir())):
+            return
+        path = Path.home() / ".cache" / "basal" / "torchinductor"
+        path.mkdir(parents=True, exist_ok=True)
+    except (OSError, RuntimeError, KeyError):  # no home directory (RuntimeError), no account (KeyError)
+        return
+    if not os.access(path, os.W_OK | os.X_OK):
+        return
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(path)
+    try:
+        from torch._inductor.utils import clear_caches
+        clear_caches()
+    except Exception:
+        if set_to is None:
+            del os.environ["TORCHINDUCTOR_CACHE_DIR"]
+        else:
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = set_to
+
+
 # config.json "layer_types" of attention layers; any other kind (Qwen3.5's linear_attention: Gated DeltaNet, Mamba,
 # conv) carries a recurrent state from token to token
 ATTENTION_LAYERS = {"full_attention", "sliding_attention", "chunked_attention"}
@@ -961,6 +995,8 @@ class GraphBackend(EagerBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto"):
+        if compile:
+            persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
         if what:
             from .gdn_graph import is_gdn

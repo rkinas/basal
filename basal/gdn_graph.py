@@ -33,7 +33,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .engine import GraphBackend, PREFILL, _copy_same, set_attention
+from .engine import GraphBackend, PREFILL, _copy_same, persist_compile_cache, set_attention
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -402,6 +402,8 @@ class GDNGraphBackend(GraphBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto"):
+        if compile:
+            persist_compile_cache()  # before anything compiles (GraphBackend.__init__)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)  # before loading
         if why:
             raise ValueError(f"{model_dir}: {why}")

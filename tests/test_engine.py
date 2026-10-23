@@ -243,3 +243,47 @@ def test_graph_engine_sets_the_small_cublas_workspace_unless_set(monkeypatch, tm
         except Exception:
             pass
         assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == want
+
+
+def test_graph_engine_keeps_the_compile_cache_across_reboots_unless_set(monkeypatch, tmp_path):
+    """A compiling graph engine moves torch.compile's cache to ~/.cache/basal/torchinductor (Inductor's default under
+    /tmp is emptied by a reboot) before anything compiles, Inductor's memoised paths with it: also when
+    TORCHINDUCTOR_CACHE_DIR holds Inductor's default, which Inductor writes there itself on import (basal-serve's case).
+    Kept: a value given before basal was imported (Inductor's default too), another directory set since, everything
+    without compile, and the old value when the cache directory is not writable."""
+    import os
+
+    from torch._inductor.codecache import CacheBase
+    from torch._inductor.runtime.cache_dir_utils import cache_dir, default_cache_dir
+    from torch._inductor.utils import clear_caches
+
+    import basal
+    from basal.engine import GraphBackend
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    mine, tmp_default = tmp_path / "mine", default_cache_dir()
+    default = tmp_path / "home" / ".cache" / "basal" / "torchinductor"
+    for given, preset, compile, want in ((False, None, True, default), (False, tmp_default, True, default),
+                                         (True, tmp_default, True, tmp_default), (False, mine, True, mine),
+                                         (False, tmp_default, False, tmp_default)):
+        monkeypatch.setattr(basal, "INDUCTOR_CACHE_DIR_GIVEN", given)
+        if preset is None:
+            monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+        else:
+            monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(preset))
+        clear_caches()  # as in a new process: Inductor's paths memoised under the value before
+        CacheBase.get_local_cache_path()
+        try:
+            GraphBackend(str(tmp_path), compile=compile)  # no model there: it stops after the environment is set
+        except Exception:
+            pass
+        assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(want) and cache_dir() == str(want)
+        assert CacheBase.get_local_cache_path().is_relative_to(want)
+    if os.geteuid() != 0:  # root writes anywhere
+        monkeypatch.setenv("HOME", str(tmp_path / "ro"))
+        (tmp_path / "ro" / ".cache" / "basal" / "torchinductor").mkdir(parents=True, mode=0o500)
+        monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", tmp_default)
+        try:
+            GraphBackend(str(tmp_path), compile=True)
+        except Exception:
+            pass
+        assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == tmp_default
