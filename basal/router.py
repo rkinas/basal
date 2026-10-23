@@ -4,7 +4,8 @@ A request goes to the replica its state is routed to, so the questions over one 
 state sharing (SOAM) and state cache: consistent hashing of the state's text over a ring of the ready replicas, with
 bounded load (a replica already holding more than LOAD_FACTOR x the mean in-flight requests passes the request on
 along the ring). Requests without a state go to the less loaded of two random replicas. Replicas are polled at
-/health; one answering 503 (starting) or not answering gets no requests until it is ready again.
+/health; one answering 503 (starting) or not answering gets no requests until it is ready again. With --gpus, the
+router exits (status 1) when every replica it started has exited.
 
   basal-router --replicas http://127.0.0.1:8001 http://127.0.0.1:8002 --port 8000
   basal-router --gpus 0,1,2,3 --port 8000 -- --model Remek/basal-2.0-mini --mode fast   (starts one basal-serve per
@@ -81,6 +82,7 @@ class Router:
         self.failed = {r: 0 for r in self.replicas}
         self.factor = factor
         self.rng = random.Random(seed)
+        self.dead = False
         self.client = httpx.AsyncClient(timeout=None, transport=transport,
                                         limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
@@ -137,7 +139,7 @@ class Router:
              [({"replica": r}, n) for r, n in self.failed.items()])])
 
 
-def app(router, poll_s=POLL_S):
+def app(router, poll_s=POLL_S, procs=(), on_dead=lambda: signal.raise_signal(signal.SIGTERM)):
     from contextlib import asynccontextmanager
 
     from starlette.applications import Starlette
@@ -171,6 +173,11 @@ def app(router, poll_s=POLL_S):
         async def loop():
             while True:
                 await router.poll()
+                if procs and all(p.poll() is not None for p in procs):
+                    router.dead = True
+                    print("basal-router: every replica exited", file=sys.stderr, flush=True)
+                    on_dead()  # SIGTERM: uvicorn shuts down, main exits with status 1
+                    return
                 await asyncio.sleep(poll_s)
         task = asyncio.get_running_loop().create_task(loop())
         yield
@@ -214,8 +221,9 @@ def main(argv=None):
         raise SystemExit("basal-router: no replicas (--replicas URL ... or --gpus 0,1 -- <basal-serve arguments>)")
     import uvicorn
     print(f"basal-router: {len(urls)} replicas, port {a.port}", flush=True)
+    router = Router(urls, factor=a.load_factor)
     try:
-        uvicorn.run(app(Router(urls, factor=a.load_factor)), host=a.host, port=a.port, log_level="warning")
+        uvicorn.run(app(router, procs=procs), host=a.host, port=a.port, log_level="warning")
     finally:
         for p in procs:
             p.send_signal(signal.SIGTERM)
@@ -224,6 +232,8 @@ def main(argv=None):
                 p.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 p.kill()
+    if router.dead:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

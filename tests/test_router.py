@@ -3,6 +3,7 @@ answers during start-up."""
 import asyncio
 import json
 import socket
+import time
 import urllib.error
 import urllib.request
 
@@ -68,6 +69,20 @@ def test_router_without_ready_replicas_answers_503():
         asyncio.run(rt.poll())
         assert c.get("/health").status_code == 503
         assert c.post("/v1/systemone", json={"state": "x", "questions": {}}).status_code == 503
+
+
+def test_router_stops_when_every_started_replica_exited():
+    class Gone:
+        def poll(self):
+            return 1
+    called = []
+    rt = R.Router(["http://r0"], transport=replicas_transport(["http://r0"], set()))
+    with TestClient(R.app(rt, poll_s=0.05, procs=[Gone()], on_dead=lambda: called.append(1))):
+        for _ in range(100):
+            if called:
+                break
+            time.sleep(0.02)
+    assert called == [1] and rt.dead
 
 
 def test_prometheus_text():
