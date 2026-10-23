@@ -96,7 +96,7 @@ def test_fast_exit_and_mps_refuse_qwen35_naming_fast(monkeypatch, qwen35, cls):
 
 @pytest.mark.parametrize("kw, words", [({"quant": "fp8"}, "--mode fp8"), ({"quant": "nvfp4"}, "--mode nvfp4"),
                                        ({"batches": "compact"}, "--batches compact"),
-                                       ({"prefix": True, "state_cache_gb": 1}, "--state-cache-gb, --prefix-cache on"),
+                                       ({"prefix": True, "state_cache_gb": 1}, "--prefix-cache on"),
                                        ({"lean": "pass2", "tree": "flex"}, "--lean, --tree flex"),
                                        ({"readout_layer": "on", "template": "on"},
                                         "--readout-layer on, --template-prefix on")])
@@ -121,7 +121,6 @@ def test_gdn_engine_needs_cuda_and_fla(monkeypatch, qwen35):
 
 @pytest.mark.parametrize("args, words", [(["--mode", "fast-exit"], "--mode fast-exit and --mode mps"),
                                          (["--mode", "fp8"], "--mode fp8"), (["--mode", "nvfp4"], "--mode nvfp4"),
-                                         (["--mode", "fast", "--state-cache-gb", "2"], "--state-cache-gb"),
                                          (["--mode", "fast", "--prefix-cache", "on"], "--prefix-cache on"),
                                          (["--mode", "fast", "--long-lane", "on"], "--long-lane"),
                                          (["--mode", "fast-nocompile", "--batches", "compact"], "--batches compact")])
@@ -269,6 +268,42 @@ def test_fast_equals_eager_on_a_tiny_qwen35(monkeypatch, tmp_path, v_heads):
                 assert torch.allclose(torch.tensor(p), want, atol=1e-5)
     alone = be.run([p for g in GROUPS for p in g[0]], [x for g in GROUPS for x in g[1]])  # single-prompt units
     assert max_dp([[p] for p in alone], [[p] for g in got for p in g]) < 1e-5
+
+
+def test_state_cache_keeps_full_state_checkpoints(monkeypatch, tmp_path):
+    """--state-cache-gb: a request cut at its state stores its root as a full-state checkpoint (attention keys / values,
+    then per Gated DeltaNet layer the recurrent state and convolution tail); the same state again skips pass 1 and
+    answers as before and as without the cache. A prompt that is the cut root itself still runs pass 1."""
+    tiny_qwen35(tmp_path / "tiny")
+    ref = gdn_backend(monkeypatch, tmp_path / "tiny").run_shared(GROUPS)
+    be = gdn_backend(monkeypatch, tmp_path / "tiny", state_cache_gb=0.01)
+    cut = [len(ROOT), len(ROOT), None, 30]
+    groups = [(p, ids, c) if c else (p, ids) for (p, ids), c in zip(GROUPS, cut)]
+    first = be.run_shared(groups)
+    assert max_dp(first, ref) < 1e-5
+    st = be.state_cache.stats()
+    assert st["entries"] == 2 and be.counts.get("pass1 cached eager") is None
+    n_att, n_gdn = len(be.kv_shapes), be.net.n_gdn
+    e = be.state_cache.get(be.state_cache.key(ROOT))
+    assert len(e) == n_att + n_gdn and e[0][0].shape[1] == len(ROOT)  # keys / values of the 71 state tokens
+    assert e[n_att][0].shape == be.net.state_shape and e[n_att][1].shape == be.net.tail_shape
+    again = be.run_shared(groups[:2])
+    assert be.counts.get("pass1 cached eager") == 1  # both units of the call from the cache, no pass 1
+    assert max_dp(again, first[:2]) < 1e-6
+    be.run_shared(groups[3:])  # its root is a prompt (read out in pass 1): computed again
+    assert be.counts.get("pass1 cached eager") == 1
+
+
+def test_state_cache_hit_needs_the_cached_state(monkeypatch, tmp_path):
+    """A cached checkpoint whose recurrent states are zeroed changes the answers: pass 2 reads the cached states."""
+    tiny_qwen35(tmp_path / "tiny")
+    be = gdn_backend(monkeypatch, tmp_path / "tiny", state_cache_gb=0.01)
+    groups = [(p, ids, len(ROOT)) for p, ids in GROUPS[:2]]
+    good = be.run_shared(groups)
+    for s, c in be.state_cache.get(be.state_cache.key(ROOT))[len(be.kv_shapes):]:
+        s.zero_()
+        c.zero_()
+    assert max_dp(good, be.run_shared(groups)) > 1e-4  # (untouched: < 1e-6, test above)
 
 
 def test_branches_continue_the_root_state(monkeypatch, tmp_path):

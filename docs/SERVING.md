@@ -33,9 +33,12 @@ benchmarking a GPU.
   (2.3.2 refused them): the graph engine keeps each request state's recurrent state beside its keys and values and
   continues every question from it (one row per question and option order in the branch pass), with fla
   (flash-linear-attention) for the Gated DeltaNet layers. Without `--mode` they run `fast` on Hopper (H100, the GPU
-  class the port was gated on) when fla is installed, `eager` elsewhere. Not with them yet: `fp8` / `nvfp4`, `fast-exit`,
-  `mps`, `--batches compact`, `--state-cache-gb`, `--prefix-cache`, `--template-prefix on`, `--readout-layer on`,
-  `--lean` and `--long-lane` (each refused before loading). `--mode vllm` and `--mode gguf` serve Qwen3.5 models
+  class the port was gated on) when fla is installed, `eager` elsewhere. `--state-cache-gb` (2.5) keeps a request's
+  state as a full-state checkpoint: the attention layers' keys and values and each Gated DeltaNet layer's recurrent
+  state and convolution tail after the state; the same state again runs only its questions. Only an identical state
+  is reused (a recurrent state cannot be cut inside the cached tokens). Not with them yet: `fp8` / `nvfp4`, `fast-exit`,
+  `mps`, `--batches compact`, `--prefix-cache`, `--template-prefix on`, `--readout-layer on`, `--lean` and
+  `--long-lane` (each refused before loading). `--mode vllm` and `--mode gguf` serve Qwen3.5 models
   too. Other models with recurrent-state layers (Qwen3-Next, Mamba and other hybrids) are refused by every
   shared-prefix engine and run `eager` without `--mode`.
 - **`--mode fp8` below compute capability 8.9** (Ampere, e.g. RTX 3090 / A100) stops before loading the model (2.3.2;

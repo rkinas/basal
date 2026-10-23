@@ -21,7 +21,11 @@ readout, and changes three things:
 
 The layers are transformers' own modules (projections, norms, MLP, rotary embedding); the Gated DeltaNet kernel is fla's
 (flash-linear-attention), as in the eager reference. Not here (refused before loading, with what to use instead): fp8 /
-nvfp4, compact rows, the state and prefix caches, template prefixes, --readout-layer on, --lean, the long lane.
+nvfp4, compact rows, the prefix cache, template prefixes, --readout-layer on, --lean, the long lane.
+- **State cache** (--state-cache-gb, 2.5): a request cut at its state boundary keeps its root as a full-state checkpoint:
+  the attention layers' keys and values of the state and, per Gated DeltaNet layer, the recurrent state and convolution
+  tail after its last token. A later request with the same state copies them where pass 1 would have written them and
+  runs pass 2 only. Exact states only: a recurrent state cannot be cut inside the cached tokens.
 """
 import inspect
 import json
@@ -33,7 +37,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .engine import GraphBackend, PREFILL, _copy_same, set_attention
+from .engine import GraphBackend, PREFILL, StateCache, _copy_same, set_attention
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -75,13 +79,13 @@ def refused(quant=None, state_cache_gb=0, prefix=False, batches="default", lean=
     if quant:
         return (f"--mode {quant} is not available for Qwen3.5 (Gated DeltaNet) models: the CUDA graph engine serves "
                 "them in bf16 (--mode fast); --mode vllm runs their FP8 checkpoints")
-    opts = [name for name, on in (("--state-cache-gb", state_cache_gb), ("--prefix-cache on", prefix),
+    opts = [name for name, on in (("--prefix-cache on", prefix),
                                   ("--batches compact", batches == "compact"), ("--lean", lean),
                                   ("--tree flex", tree == "flex"), ("--readout-layer on", readout_layer == "on"),
                                   ("--template-prefix on", template == "on")) if on]
     if opts:
         return (f"{', '.join(opts)}: not available for Qwen3.5 (Gated DeltaNet) models in the CUDA graph engine (basal "
-                "2.4 runs their plain and branched rows; the caches would have to keep recurrent states)")
+                "2.5 runs their plain and branched rows and the state cache)")
     if device and not torch.cuda.is_available():
         return "the CUDA graph engine needs a CUDA GPU; serve Qwen3.5 models with --mode eager here"
     if device and fla_rule() is None:
@@ -425,6 +429,8 @@ class GDNGraphBackend(GraphBackend):
         if batches == "fine":
             self.BATCHES = self.FINE_BATCHES
         self._alloc_kv()
+        # --state-cache-gb: roots cut at the state boundary, kept as full-state checkpoints (keys / values + states)
+        self.state_cache = StateCache(state_cache_gb * 2 ** 30) if state_cache_gb and shared else None
         self.template = []
         self.counts = {}  # forwards per kind: "plain" / "pass1" / "pass2", each "graph" or "eager" (gate scripts)
         self.pool = torch.cuda.graph_pool_handle() if cuda else None
@@ -610,18 +616,57 @@ class GDNGraphBackend(GraphBackend):
         reads = [(None, i) if i < P else (first[sg[i]][0], first[sg[i]][1] + i - start[sg[i]]) for i in last]
         return rows, reads
 
+    def _extend_states(self, units, keys, hits):
+        """No continuation of a cached state that a request's state only begins with: a recurrent state cannot be cut
+        inside the cached tokens (the state cache serves exact states here)."""
+
+    @staticmethod
+    def _entry(kv, st, r, p):
+        """The state-cache entry of root row r (p tokens): per attention layer (K, V) [kv heads, p, d], then per Gated
+        DeltaNet layer (recurrent state, convolution tail) after its last token."""
+        return ([(k[r, :, :p].clone(), v[r, :, :p].clone()) for k, v in kv]
+                + [(s[r].clone(), c[r].clone()) for s, c in st])
+
+    @staticmethod
+    def _load(kv, st, hits, P):
+        """Cached entries into root rows 0.. of the pass-1 outputs, where pass 1 would have written them."""
+        n = len(kv)
+        for r, (e, p) in enumerate(zip(hits, P)):
+            for (kb, vb), (ke, ve) in zip(kv, e[:n]):
+                kb[r, :, :p].copy_(ke, non_blocking=True)
+                vb[r, :, :p].copy_(ve, non_blocking=True)
+            for (sb, cb), (se, ce) in zip(st, e[n:]):
+                sb[r].copy_(se, non_blocking=True)
+                cb[r].copy_(ce, non_blocking=True)
+
     @torch.no_grad()
     def _tree_hidden(self, packs, idx, keys=None, hits=None):
         """Branched units -> hidden states at their readout positions. Pass 1: the roots in a plain graph that also
         writes their keys, values and recurrent states (beyond the largest graph: one uncaptured forward into fresh
         buffers). Pass 2: one row per leaf of each unit's trie, over its root, in pass-2 graphs of up to LEAF_ROWS[-1]
-        rows (uncaptured beyond them)."""
+        rows (uncaptured beyond them). keys / hits (--state-cache-gb): per unit, the state-cache key of its root and its
+        cached entry; when every root is cached and no prompt ends inside one, pass 1 is skipped (_load); roots computed
+        here are stored (_entry)."""
         P = [packs[k][2].index(1) for k in idx]  # block 0 (the root) comes first and is contiguous
         b = len(idx)
         roots = [packs[k][0][:p] for k, p in zip(idx, P)]
+        keys, hits = keys or [None] * b, hits or [None] * b
+        leaves = [self._leaves(packs[k], p) for k, p in zip(idx, P)]
+        # a prompt that is a root itself is read out in pass 1, so its unit needs pass 1
+        cached = all(e is not None for e in hits) and all(q is not None for _, reads in leaves for q, _ in reads)
         captured = self.pool is not None and max(P) <= self.PLAIN_LENS[-1] and b <= self.TREE_ROWS[-1]
-        self._count("pass1", captured)
-        if captured:
+        h1 = None
+        if cached:
+            self._count("pass1 cached", captured)
+            if captured:
+                L2 = self._root_len(self._bucket(max(P), self.PLAIN_LENS))
+                kv, st = self._root_views(L2), self._st
+            else:
+                L2 = max(P)
+                kv, st = self._fresh(b, L2)
+            self._load(kv, st, hits, P)
+        elif captured:
+            self._count("pass1", captured)
             L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(b, self.BATCHES)
             L2 = self._root_len(L)
             g, s_ids, s_lens, h1 = self._graph(B, L)
@@ -631,16 +676,21 @@ class GDNGraphBackend(GraphBackend):
             g.replay()
             kv, st = self._root_views(L2), self._st
         else:
+            self._count("pass1", captured)
             L2 = max(P)
             kv, st = self._fresh(b, L2)
             ids, lens = self._rows_in(roots, L2)
             h1 = self.fwd(self._to_dev(ids), self._to_dev(lens), kv, st)
+        if self.state_cache is not None and not cached:  # the roots computed here, as full-state checkpoints
+            for r, key in enumerate(keys):
+                if key is not None and hits[r] is None:
+                    self.state_cache.put(key, self._entry(kv, st, r, P[r]), tokens=roots[r])
         rows, sel = [], []  # rows: (unit, token indices); sel: per readout (pass, row, column), in unit order
-        for r, (k, p) in enumerate(zip(idx, P)):
-            leaf, reads = self._leaves(packs[k], p)
+        for r, (leaf, reads) in enumerate(leaves):
             sel += [(1, r, c) if q is None else (2, len(rows) + q, c) for q, c in reads]
             rows += [(r, ix) for ix in leaf]
-        out = torch.empty((len(sel), h1.shape[-1]), dtype=h1.dtype, device=self.dev)
+        width = h1.shape[-1] if h1 is not None else self._hidden_size
+        out = torch.empty((len(sel), width), dtype=self._dtype if h1 is None else h1.dtype, device=self.dev)
         j1 = [n for n, x in enumerate(sel) if x[0] == 1]
         if j1:
             out[self._to_dev(torch.tensor(j1))] = h1[self._to_dev(torch.tensor([sel[n][1] for n in j1])),
