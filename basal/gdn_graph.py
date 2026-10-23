@@ -159,6 +159,89 @@ def fla_conv1d():
     return causal_conv1d
 
 
+# fla's Triton kernels pick their launch config by timing the candidates at the first launch of every shape key
+# (triton.autotune), so two starts of the server could pick different configs, round differently and give different
+# probabilities (and a new shape stalled a request while it was timed). FLA_CONFIGS holds the configs an H100 picked for
+# the keys basal's pass shapes use (fla_record): with it every fla kernel takes the recorded config of its key, and
+# its most common one for any other key, without timing. Only on the GPU and fla version it was recorded with.
+FLA_CONFIGS = Path(__file__).parent / "fla_configs.json"
+
+
+def _fla_autotuners():
+    """fla's Triton autotuners: {"module.kernel": Autotuner}, after importing the modules basal's passes use (the
+    convolution's are imported only at its first call)."""
+    import gc
+    import importlib
+    from triton.runtime.autotuner import Autotuner
+    for name in ("fla.ops.gated_delta_rule", "fla.modules.conv.triton", "fla.modules.l2norm"):
+        try:
+            importlib.import_module(name)
+        except Exception:
+            pass
+    out = {}
+    for o in gc.get_objects():
+        if isinstance(o, Autotuner) and str(getattr(o.base_fn, "__module__", "")).startswith("fla."):
+            out[f"{o.base_fn.__module__}.{o.base_fn.__qualname__}"] = o
+    return out
+
+
+def _config_dict(c):
+    return dict(kwargs=c.kwargs, num_warps=c.num_warps, num_stages=c.num_stages, num_ctas=c.num_ctas,
+                maxnreg=c.maxnreg)
+
+
+def fla_record(path):
+    """Write the configs fla's autotuners picked so far (after a warm-up of every pass shape) as FLA_CONFIGS."""
+    import fla
+    from collections import Counter
+    kernels = {}
+    for name, t in sorted(_fla_autotuners().items()):
+        entries = [[list(k), _config_dict(c)] for k, c in t.cache.items()]
+        if entries:
+            common = Counter(json.dumps(c, sort_keys=True) for _, c in entries).most_common(1)[0][0]
+            kernels[name] = dict(default=json.loads(common), keys=entries)
+    Path(path).write_text(json.dumps(dict(gpu=torch.cuda.get_device_name(), fla=fla.__version__, kernels=kernels),
+                                     indent=1, sort_keys=True))
+    return len(kernels)
+
+
+class _PinnedCache(dict):
+    """An autotuner's cache that has every key: the recorded config, else the kernel's default (nothing is timed)."""
+
+    def __init__(self, entries, default):
+        super().__init__(entries)
+        self.default = default
+
+    def __contains__(self, key):
+        return True
+
+    def __missing__(self, key):
+        return self.default
+
+
+def fla_pin(path=FLA_CONFIGS):
+    """Give fla's autotuners the recorded configs (see FLA_CONFIGS) -> the number of kernels pinned, 0 when the table
+    is for another GPU or fla version (they autotune as before), or missing. BASAL_FLA_PIN=0 turns it off."""
+    if os.environ.get("BASAL_FLA_PIN", "1") != "1" or not Path(path).exists() or not torch.cuda.is_available():
+        return 0
+    import fla
+    from triton.runtime.autotuner import Config
+    table = json.loads(Path(path).read_text())
+    if table.get("gpu") != torch.cuda.get_device_name() or table.get("fla") != fla.__version__:
+        return 0
+    n = 0
+    for name, t in _fla_autotuners().items():
+        e = table["kernels"].get(name)
+        if e is not None:
+            cfg = lambda d: Config(d["kwargs"], num_warps=d["num_warps"], num_stages=d["num_stages"],  # noqa: E731
+                                   num_ctas=d["num_ctas"], maxnreg=d["maxnreg"])
+            t.cache = _PinnedCache({tuple(k): cfg(c) for k, c in e["keys"]}, cfg(e["default"]))
+        else:  # a kernel basal's passes never launched: its first candidate, so it is not timed either
+            t.cache = _PinnedCache({}, t.configs[0])
+        n += 1
+    return n
+
+
 def _gdn_out(h, o, z, gw, out_w, eps):
     """h + out_proj(Qwen3_5RMSNormGated(o, z)) over the value heads."""
     dt, shape = o.dtype, o.shape
@@ -418,6 +501,7 @@ class GDNGraphBackend(GraphBackend):
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL
         self.net = Qwen35Graph(self.model, compile=compile and cuda)
+        self.fla_pinned = fla_pin() if cuda else 0  # (after Qwen35Graph imported fla's kernels)
         self.fwd, self.fwd_sfx = self.net.forward, self.net.forward_suffix
         self.merged, self.lean, self.flex = len(self.net.args), None, False
         self.shared = shared

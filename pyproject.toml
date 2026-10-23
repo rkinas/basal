@@ -55,7 +55,7 @@ basal-viz = "basal.viz:main"
 packages = ["basal"]
 
 [tool.setuptools.package-data]
-basal = ["examples/*.jsonl", "examples/*.py", "viz.html"]
+basal = ["examples/*.jsonl", "examples/*.py", "viz.html", "fla_configs.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]  # tests import shared stubs from tests.test_server
