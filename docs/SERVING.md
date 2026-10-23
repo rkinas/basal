@@ -144,6 +144,31 @@ benchmarking a GPU.
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md).
 
+## Several GPUs, metrics and health (2.5)
+
+- **`basal-router`** puts several basal-serve replicas, one per GPU, behind one endpoint:
+
+  ```bash
+  basal-router --gpus 0,1,2,3 --port 8000 -- --model Remek/basal-2.0-mini --mode fast   # one replica per GPU
+  basal-router --replicas http://10.0.0.5:8000 http://10.0.0.6:8000 --port 8000          # replicas you run
+  ```
+
+  - **Routing:** a request goes to the replica its state is hashed to, so the questions over one document keep
+    sharing the state and its cache on one replica. The hash is consistent, so adding or removing a replica moves
+    few states.
+  - **Bounded load:** a replica holding more than 1.25 times the mean in-flight requests passes new ones on along
+    the ring (`--load-factor`).
+  - **Requests without a state** go to the less loaded of two random replicas.
+  - **Readiness:** a replica gets requests only while its `/health` answers 200.
+- **`GET /metrics`** (basal-serve and basal-router) is Prometheus text.
+  - **basal-serve:** requests waiting and running (also under vLLM's names `vllm:num_requests_waiting` /
+    `vllm:num_requests_running`, which routers such as llm-d read), requests served and failed with their time, and
+    the state cache when there is one.
+  - **basal-router:** per replica: readiness, requests in flight, requests routed by state and by load, failures.
+- **Start-up:** while the model loads and warms up, the port answers every request with HTTP 503
+  `{"status": "starting"}`. A start-up that fails exits with code 1, so a supervisor or the router never sees a
+  half-started server.
+
 ## Inference on a JSONL file
 
 `basal-run` sends every line of a JSONL file to a running server (concurrently; the server batches the requests) and
