@@ -58,7 +58,8 @@ benchmarking a GPU.
   probabilities (the default for basal-1.5 and basal-1.0); both orders share the state and the question text, so the
   second order costs only its options. `auto` asks order 1 and the reversed order only where order 1 is uncertain
   (`--auto-tau`, `--auto-band`). See [FORMATS.md](FORMATS.md#option-orders).
-- **SOAM** (`--soam on`, default): every question and option order of a request is one packed row over the state.
+- **SOAM** (`--soam on`, default; off for a two-way model, below): every question and option order of a request is one
+  packed row over the state.
   `--soam off` restores the per-question path of basal-1.0 (same answers in fp32). See [SOAM.md](SOAM.md).
 - **Start-up**: `fast` compiles and captures CUDA graphs for all input shapes before accepting requests (several
   minutes the first time, about half with a warm compile cache). A request with several branches (option orders,
@@ -82,6 +83,13 @@ benchmarking a GPU.
   one; with only the canonical file its temperatures are kept, its thresholds are not applied, and the answers are
   marked unvalidated. Without `--layout` a model is served in its basal.json `"layout"` (canonical when absent), and
   `/v1/models` reports a non-canonical layout. Images and audio are read in the canonical layout only.
+- **Two-way models** (2.5; basal.json `"two_way"`, a Gemma 4 model trained with two-way reading): the global layers
+  read each prompt whole, both ways, so the state is read knowing the question; the sliding-window layers stay
+  causal. `"two_way": true` takes the limits 4,096 / 8,192 tokens, or set `{"max_prompt": ..., "max_record": ...}`.
+  A prompt over `max_prompt` tokens, or every prompt of a request over `max_record` tokens (its shared prefix once,
+  then every prompt's own tokens), is read one way, as the model was trained. Nothing is shared between questions, so
+  such a model is served with `--mode eager` (the engine's own Gemma 4 forward), SOAM off (`--soam` defaults to off
+  for it; `--soam on` is refused) and without `--state-cache-gb` / `--prefix-cache`. `/v1/models` reports the limits.
 - **Long states**: `--context-overflow truncate` (the default) cuts the middle of a state that does not fit the
   context (the first 1/3 and the last 2/3 of the kept tokens, `--truncate-head`; the question and options stay whole)
   and says what was cut in `usage.truncated`; `--context-overflow refuse` returns HTTP 422 instead. The context is
