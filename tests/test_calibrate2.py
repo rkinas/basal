@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import basal.server as server_module
-from basal.calibrate import BUCKETS, ece, fit, is_cert, main, served
+from basal.calibrate import BUCKETS, buckets_cover, ece, fit, is_cert, main, served, table
 from basal.server import Server, parser, temper, temperature
 from tests.test_server import Tok
 
@@ -42,6 +42,31 @@ def test_bucket_temperatures_are_fitted_where_there_are_enough_decisions():
     assert set(report["buckets"]) == {name for name, _, _ in BUCKETS}
     one, _ = fit(data, {}, [0.05], 50, fmt=1)  # format 1: the 1.5 file, no buckets
     assert "temperature_per_bucket" not in one and "prompt" not in one
+
+
+def test_table_shows_the_temperatures_as_served():
+    """A format-2 file whose 2-10 bucket (1.861) differs from its choice type temperature (1.498): the bucket row shows
+    the shipped 1.861, the type row says the type temperature is not served where buckets cover every option count,
+    and a bucket the file lacks shows the type temperature that serves it."""
+    data = rows(600, 4, 2.0) + rows(300, 20, 2.0, seed=1)
+    full = {"prompt": 2, "temperature_per_prim": {"choice": 1.498},
+            "temperature_per_bucket": {"choice": {"2-10": 1.8607, "11-26": 1.9, "27-255": 2.1}}}
+    _, report = fit(data, full, [0.05], 50, fmt=2)
+    b = report["buckets"]["2-10"]
+    assert b["T_shipped"] == 1.8607 and not b["T_shipped_type"] and not b["T_type"]
+    assert report["types"]["choice"]["not_served"] == dict(shipped=True, fitted=True)
+    text = table(report)
+    assert "1.498 (not served: buckets) -> " in text
+    assert re.search(r"^  2-10 .* 1\.861 -> \d\.\d{3} ", text, re.M)
+    part = {"prompt": 2, "temperature_per_prim": {"choice": 1.498}, "temperature_per_bucket": {"choice": {"2-10": 1.8607}}}
+    _, report = fit(data, part, [0.05], 10 ** 9, fmt=2, min_blend=0)  # nothing fitted: the shipped file as it is
+    assert report["types"]["choice"]["not_served"] == dict(shipped=False, fitted=False)
+    b = report["buckets"]["11-26"]
+    assert b["T_shipped"] == 1.498 and b["T_shipped_type"] and b["T"] == 1.498 and b["T_type"]
+    assert re.search(r"^  11-26 .* 1\.498 \(type\) -> 1\.498 \(type\)", table(report), re.M)
+    assert "not served" not in table(report)
+    assert buckets_cover({"choice": {"2-10": 1, "11-26": 1, "27-255": 1}})
+    assert not buckets_cover({"choice": {"2-10": 1, "27-255": 1}}) and not buckets_cover({})
 
 
 def test_type_ece_uses_the_bucket_temperature_as_served():
