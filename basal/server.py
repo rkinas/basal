@@ -599,14 +599,17 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
 def two_way_refused(kind, a):
     """Why a two-way model (basal.json "two_way") cannot be served with these options, or None. It reads the state
     with each question: nothing is shared between questions (SOAM) or cached before the question (the state and prefix
-    caches), and only the engine's own eager Gemma 4 forward reads two-way in this version."""
+    caches); the engine's own eager Gemma 4 forward and the CUDA graph engine (fast, fast-nocompile) read two-way."""
     if a.soam == "on":
         return "--soam on: a two-way model reads the state with each question, so the questions cannot share it"
     if getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on":
         return ("--state-cache-gb and --prefix-cache keep a state read before its question; a two-way model reads it "
                 "with the question")
-    if kind != "eager":
-        return "a two-way model (basal.json \"two_way\") is served with --mode eager in this version"
+    if kind not in ("eager", "graph"):
+        return ("a two-way model (basal.json \"two_way\") is served with --mode eager, fast or fast-nocompile in this "
+                "version")
+    if kind == "graph" and getattr(a, "long_lane", "off") == "on":
+        return "--long-lane: not with a two-way model (its long prompts are read one way, like the others)"
     if getattr(a, "eager_forward", None) == "hf":
         return "a two-way model needs the engine's own Gemma 4 forward (--eager-forward basal)"
     return None

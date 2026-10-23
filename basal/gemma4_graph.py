@@ -385,15 +385,20 @@ class Gemma4Graph:
         sliding layer's last window + MARGIN only, as later rows see window - 1 tokens back at most."""
         return [min(L, self.window + self.MARGIN) if t == "sliding_attention" else L for t in self.types[: self.n_kv]]
 
-    def _plain_masks(self, L, qpos, dev):
+    def _plain_masks(self, L, qpos, dev, twl=None):
         """Boolean masks [b, 1, Lq, L] per layer type of plain causal rows (keys at positions 0..L-1) for queries at
-        qpos [b, Lq] (all positions, or the readout rows)."""
+        qpos [b, Lq] (all positions, or the readout rows). twl [b]: two-way rows (a model trained with two-way
+        reading): in the global layers every query of row b also sees the keys up to twl[b], its last real token
+        (-1: a row read one way); the sliding-window layers stay causal."""
         k = torch.arange(L, device=dev)[None, None, :]
         causal = k <= qpos[:, :, None]
         out = {}
         for t in set(self.types):
             W = self._window(t)
-            out[t] = (causal & (k > qpos[:, :, None] - W) if W else causal)[:, None]
+            if W:
+                out[t] = (causal & (k > qpos[:, :, None] - W))[:, None]
+            else:
+                out[t] = (causal if twl is None else causal | (k <= twl[:, None, None]))[:, None]
         return out
 
     def _suffix_masks(self, mask, pos, lens):
@@ -528,19 +533,21 @@ class Gemma4Graph:
             m_ro[t] = self._dense_block(1, ro.shape[1], T, rows, dev)
         return m_all, m_ro
 
-    def _masks(self, kernels, L, pos, prefix, mask, ro, pads):
+    def _masks(self, kernels, L, pos, prefix, mask, ro, pads, twl=None):
         """The attention masks of one forward per layer type, for every query and for the readout rows ro: boolean
         masks for "math", block masks for "flex" (reading pads), ("fa3", window) for FlashAttention 3 over plain
-        rows."""
+        rows. twl: the two-way rows of plain rows (_plain_masks; the global layers then need the math kernel)."""
         from .lean import TreeMask
         dev, types = pos.device, set(self.types)
         math = [t for t in types if kernels[t] == "math"]
         flex = [t for t in types if kernels[t] != "math"]  # fa3: FlashAttention 3 for every query of plain rows
         m_all, m_ro = {}, {}
         if prefix is None:
+            if twl is not None and any(kernels[t] != "math" for t in types if self._window(t) is None):
+                raise ValueError("two-way rows need the math kernel in the global layers")
             if math:
-                m_all = self._plain_masks(L, pos, dev)
-                m_ro = self._plain_masks(L, ro, dev) if ro is not None else {}
+                m_all = self._plain_masks(L, pos, dev, twl)
+                m_ro = self._plain_masks(L, ro, dev, twl) if ro is not None else {}
             for t in flex:
                 m_all[t] = ("fa3", self._window(t)) if kernels[t] == "fa3" else self._plain_block(L, t, dev)
                 if ro is not None:
@@ -565,20 +572,20 @@ class Gemma4Graph:
         return m_all, m_ro
 
     def _run(self, kernels, ids, pos, kv=None, prefix=None, mask=None, ro=None, between=None, pads=None,
-             compiled=False, cu=None):
+             compiled=False, cu=None, twl=None):
         """kernels: per layer type; ids / pos [b, L]; kv: per own layer (K, V) buffers [b, kv heads, L, d] that receive
         this pass's keys and values (pass 1; a shorter buffer receives the last ones: kv_lens); prefix: per own layer
         (K, V) [b, kv heads, P, d] (sliding layers: the last kv_lens of the root may be all there is) the rows continue
         (pass 2) with mask (the trie: additive, or a TreeMask for flex); ro [b, R]: readout positions -> final hidden states
         [b, R, D] (None: every position, [b, L, D]); between(i) is called before layer i (the long lane); pads: the
-        padded index tensors of the flex masks (_pads); compiled: the compiled layer functions. The masks of every
+        padded index tensors of the flex masks (_pads); compiled: the compiled layer functions; twl: two-way rows (_plain_masks). The masks of every
         query and of the readout rows are built here (_masks; the kernel follows the mask). A layer is two functions
         (_pre, _post), so the rows-only layers can split after the keys and values; a shared layer's keys and values
         are those its source layer kept."""
         if cu is not None:  # compact rows (forward_compact)
             m_all, m_ro = self._compact_masks(kernels, ids.shape[1], cu, ro, pads)
         else:
-            m_all, m_ro = self._masks(kernels, ids.shape[1], pos, prefix, mask, ro, pads or {})
+            m_all, m_ro = self._masks(kernels, ids.shape[1], pos, prefix, mask, ro, pads or {}, twl)
         pre, post, embed = (self.pre, self.post, self.embed) if compiled else (_pre, _post, self._embed)
         h, pli = embed(ids)
         types = set(self.types)
@@ -619,16 +626,18 @@ class Gemma4Graph:
         return {t: "math" for t in self.kernels}
 
     @torch.no_grad()
-    def forward(self, ids, kv=None, ro=None, between=None, compiled=True):
+    def forward(self, ids, kv=None, ro=None, between=None, compiled=True, twl=None):
         """Plain causal rows [b, L] from position 0 (right padding cannot reach a real token); kv: per own layer
         (K, V) buffers [b, kv heads, L, d] that receive the keys and values (pass 1); ro [b, R]: readout positions ->
         [b, R, D] (None: [b, L, D]); between(i) before layer i (the long lane: uncompiled, one layer at a time).
-        compiled: through the compiled forward (when the engine compiles; shapes without a graph run uncompiled)."""
+        compiled: through the compiled forward (when the engine compiles; shapes without a graph run uncompiled).
+        twl [b]: per row its last real token when it is read two-way, else -1 (a model trained with two-way
+        reading; the global layers' kernel is then math)."""
         L = ids.shape[1]
         pos = torch.arange(L, device=ids.device)[None].expand(ids.shape[0], L)
         compiled = compiled and between is None
         return self._run(self.kernels, ids, pos, kv=kv, ro=ro, between=between, pads=self._pads(pos, None, ro),
-                         compiled=compiled and self.compiled)
+                         compiled=compiled and self.compiled, twl=twl)
 
     @torch.no_grad()
     def forward_compact(self, ids, pos, cu, ro, compiled=True):

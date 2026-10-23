@@ -153,9 +153,76 @@ def test_server_refusals():
     assert two_way_refused("eager", a) is None
     assert "--soam on" in two_way_refused("eager", ap.parse_args(["--soam", "on"]))
     assert "state" in two_way_refused("graph", ap.parse_args(["--state-cache-gb", "4"]))
-    assert "--mode eager" in two_way_refused("graph", a)
-    assert "--mode eager" in two_way_refused("vllm", a)
+    assert two_way_refused("graph", a) is None  # the graph engine reads two-way since 2.5
+    assert "--mode eager, fast" in two_way_refused("exit", a)
+    assert "--mode eager, fast" in two_way_refused("vllm", a)
+    assert "--long-lane" in two_way_refused("graph", ap.parse_args(["--long-lane", "on"]))
     assert "forward" in two_way_refused("eager", ap.parse_args(["--eager-forward", "hf"]))
     entry = models_payload("m", "eager", {}, two_way=TWO_WAY)["models"][0]
     assert entry["two_way"] == TWO_WAY
     assert "two_way" not in models_payload("m", "eager", {})["models"][0]
+
+
+# -- the CUDA graph engine (GraphBackend over gemma4_graph.Gemma4Graph) ------------------------------------------------
+
+def graph_stub(m, caps):
+    """test_gemma4_graph's Stub (no loading, no CUDA graphs: every prompt is longer than its largest graph and runs the
+    uncompiled plain forward) of a two-way model."""
+    from test_gemma4_graph import Stub
+    be = Stub(m)
+    be.two_way, be.shared = caps, False
+    return be
+
+
+def test_graph_engine_reads_two_way():
+    """The graph engine's plain rows of a two-way model equal transformers' forward with the two-way masks where a
+    prompt is within the limits, and the one-way forward elsewhere (a prompt over max_prompt; a request over
+    max_record); the global layers take the math kernel."""
+    from test_gemma4_graph import tiny as gtiny
+    m = gtiny("e4b", torch.float32)
+    caps = {"max_prompt": 12, "max_record": 30}
+    be = graph_stub(m, caps)
+    g = torch.Generator().manual_seed(3)
+    r = lambda n: torch.randint(1, 60, (n,), generator=g).tolist()  # noqa: E731
+    state = r(8)
+    groups = [([state + [20, 21], state + [22, 23, 24]], [[7, 8], [9, 10]]),  # record 13: both two-way
+              ([r(14)], [[7, 8]]),                                             # over max_prompt: one way
+              ([state + [30 + q] for q in range(5)] + [state + r(6)], [[7, 8]] * 6)]  # record 8 + 5 + 6 = 19:
+    # two-way, except the 14-token prompt (over max_prompt)
+    big = [state + [40 + q, 41] for q in range(12)]                            # record 8 + 24 = 32 > 30: one way
+    groups.append((big, [[7, 8]] * 12))
+    got = be.run_shared(groups)
+    for (toks, lids), res in zip(groups, got):
+        tw = [len(t) <= 12 for t in toks] if toks is not big else [False] * len(toks)
+        for t, ids, p, two in zip(toks, lids, res, tw):
+            with torch.no_grad():
+                kw = {"attention_mask": ref_masks_g(m, len(t))} if two else {}
+                lp = torch.log_softmax(m(input_ids=torch.tensor([t]), **kw).logits[0, -1].float(), -1)
+            want = torch.softmax(lp[ids], -1)
+            assert torch.allclose(torch.tensor(p), want, atol=1e-5), (len(t), two)
+
+
+def ref_masks_g(m, n):
+    i = torch.arange(n)
+    causal = i[None] <= i[:, None]
+    return {"full_attention": torch.ones(1, 1, n, n, dtype=torch.bool),
+            "sliding_attention": (causal & (i[:, None] - i[None] < m.config.sliding_window))[None, None]}
+
+
+def test_graph_two_way_needs_math_in_global_layers():
+    from test_gemma4_graph import tiny as gtiny
+    from basal.gemma4_graph import Gemma4Graph
+    gg = Gemma4Graph(gtiny("e4b", torch.float32), kernels={"sliding_attention": "math", "full_attention": "flex"})
+    ids = torch.tensor([[1, 2, 3, 4]])
+    with pytest.raises(ValueError, match="math kernel in the global layers"):
+        gg.forward(ids, ro=torch.tensor([[3]]), compiled=False, twl=torch.tensor([3]))
+
+
+def test_graph_two_way_refusals(tmp_path):
+    from basal.engine import graph_two_way_refused
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    assert "Gemma 4" in graph_two_way_refused(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "gemma4_text"}))
+    assert graph_two_way_refused(tmp_path) is None
+    assert "--state-cache-gb, --batches compact" in graph_two_way_refused(tmp_path, state_cache_gb=1,
+                                                                            batches="compact")
