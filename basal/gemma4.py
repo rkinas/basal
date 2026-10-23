@@ -152,8 +152,12 @@ class Gemma4Forward:
     # x queries x keys; fp32 in the math kernel: 256 MB), as the graph engine's math kernel (Gemma4Graph.SCORES)
     SCORES = 2 ** 26
 
-    def __init__(self, model, answer_rows=True, attn=None):
+    def __init__(self, model, answer_rows=True, attn=None, two_way=None):
         self.model = model
+        # two-way reading (basal.json "two_way", prompt.model_two_way): {"max_prompt", "max_record"} or None. The
+        # global layers read a prompt's tokens both ways, the sliding-window layers stay causal; a prompt over
+        # max_prompt tokens, or every prompt of a request over max_record tokens, is read one way (two_way_rows)
+        self.two_way = dict(two_way) if two_way else None
         lm = self.lm = text_model(model)
         cfg = self.cfg = lm.config
         self.layers = list(lm.layers[: cfg.num_hidden_layers])
@@ -226,10 +230,10 @@ class Gemma4Forward:
         return torch.where(vis, start.long().cumsum(1) - 1, -1)
 
     # -- one forward --------------------------------------------------------------------------------------------------
-    def _mask(self, t, qpos, kc, pos, valid, qblk):
+    def _mask(self, t, qpos, kc, pos, valid, qblk, two_way=False):
         """Boolean attention mask [B, 1, Sq, Lc + S] of layer type t: keys of earlier passes (positions kc [B, Lc],
         -1 = none) then this pass's tokens (positions pos [B, S]; valid = real tokens, a padding query sees itself so
-        that no row is empty)."""
+        that no row is empty). two_way: whole prompts (no earlier keys) read both ways in the global layers."""
         sliding = t == "sliding_attention"
         d = qpos[:, :, None] - pos[:, None, :]
         m = d >= 0
@@ -243,6 +247,8 @@ class Gemma4Forward:
         if block is not None and self.unified_blocks:
             m = m | block  # unified: the whole image, past the window too
         m = m & (valid[:, None, :] | (d == 0))
+        if two_way and not sliding:
+            m = valid[:, None, :] | (d == 0)
         if kc is not None:  # (comparisons, not distances: over an 82k-token state those were 1.3 GB of int64)
             kq = kc[:, None, :]
             mc = (kq >= 0) & (kq <= qpos[:, :, None])
@@ -338,22 +344,25 @@ class Gemma4Forward:
             h = h + layer.post_per_layer_input_norm(layer.per_layer_projection(g))
         return h * layer.layer_scalar
 
-    def _pass(self, h, pli, pos, valid, ctx=None, grp=None, read=None, blk=None, split=False):
+    def _pass(self, h, pli, pos, valid, ctx=None, grp=None, read=None, blk=None, split=False, two_way=False):
         """One forward over token rows [B, S]: embeddings h [B, S, D], per-layer inputs pli [B, S, L, P] or None,
         positions pos [B, S], valid [B, S] (right padding), blk vision block ids or None. ctx: (kv, kpos) of earlier
         tokens, kv {own layer: (K, V) [G, kv heads, Lc, d]}, kpos {layer type: positions [G, Lc]}; row b continues
         ctx row grp[b]. read [B]: the index of each row's readout token, or None for a prefix part (it stops after the
         keys and values of the last layer that has its own). split: the global layers' attention in _split's parts.
         -> ({own layer: (K, V) of this pass's tokens}, final hidden state at `read` [B, D] or None). A readout pass
-        keeps no keys and values ({}): nothing reads them, and ultra's of a 16k-token batch were 14 GB."""
+        keeps no keys and values ({}): nothing reads them, and ultra's of a 16k-token batch were 14 GB. two_way: rows
+        of whole prompts read both ways in the global layers (_mask)."""
+        assert not (two_way and ctx is not None), "a two-way prompt is read whole, without earlier keys"
         B, S = valid.shape
         kv, kpos = ctx if ctx is not None else ({}, {})
         if ctx is not None and grp is None:
             grp = torch.zeros(B, dtype=torch.long, device=pos.device)
         types = set(self.types)
         rope = {t: self.lm.rotary_emb(h, pos, t) for t in types}
-        kinds = {t: self._kernel(t, h.dtype, blk) for t in types}
-        masks = {t: self._mask(t, pos, kpos[t][grp] if t in kpos else None, pos, valid, blk)
+        # a two-way forward's global layers take the masked SDPA kernel (a flash kernel's mask is causal only)
+        kinds = {t: "sdpa" if two_way and t != "sliding_attention" else self._kernel(t, h.dtype, blk) for t in types}
+        masks = {t: self._mask(t, pos, kpos[t][grp] if t in kpos else None, pos, valid, blk, two_way)
                  for t in types if kinds[t] in SDPA_KERNELS}
         kval = {t: torch.cat([kpos[t][grp] >= 0, valid], 1) if t in kpos else valid
                 for t in types if kinds[t] in VARLEN_KERNELS}
@@ -513,8 +522,9 @@ class Gemma4Forward:
                     out[g][j] = x
             cur = [r] if r is not None else []
 
-    def _singles(self, items, groups, out, media=None):
-        """Prompts without a shared prefix (each at most CHUNK tokens): batched by length, one forward each batch."""
+    def _singles(self, items, groups, out, media=None, two_way=False):
+        """Prompts without a shared prefix (each at most CHUNK tokens; two-way ones at most max_prompt): batched by
+        length, one forward each batch."""
         items = sorted(items, key=lambda x: len(groups[x[0]][x[1]]))
         cur = []
         for it in items + [None]:
@@ -524,16 +534,45 @@ class Gemma4Forward:
             if cur:
                 prompts = [groups[g][j] for g, j in cur]
                 h, pli, pos, valid, blk, lens = self._rows(prompts, [0] * len(cur), media, prompts)
-                _, hid = self._pass(h, pli, pos, valid, read=lens - 1, blk=blk)
+                _, hid = self._pass(h, pli, pos, valid, read=lens - 1, blk=blk, two_way=two_way)
                 for (g, j), x in zip(cur, hid):
                     out[g][j] = x
             cur = [it] if it is not None else []
+
+    def two_way_rows(self, toks):
+        """Which prompts of one request (token ids) are read two-way: those of at most max_prompt tokens, when the
+        request's record (its shared prefix once, then every prompt's own tokens) has at most max_record."""
+        if not self.two_way:
+            return [False] * len(toks)
+        P = len(os.path.commonprefix(toks))
+        record = P + sum(len(t) - P for t in toks)
+        return [record <= self.two_way["max_record"] and len(t) <= self.two_way["max_prompt"] for t in toks]
 
     @torch.no_grad()
     def hidden(self, groups, media=None):
         """groups: [[token ids of each prompt]] -> [[final hidden state of each prompt]] ([D] each). The prompts of a
         group share a prefix (the option orders of a question, or every question of a request); media ({kind: soft
-        tokens}, media_features) are those of every prompt (one request)."""
+        tokens}, media_features) are those of every prompt (one request). A two-way model: each group is a request;
+        its two-way prompts are read whole, one by one (nothing shared: their state depends on the question), the
+        others one way as below."""
+        if not self.two_way:
+            return self._one_way(groups, media)
+        out = [[None] * len(g) for g in groups]
+        both, rest = [], []
+        for gi, toks in enumerate(groups):
+            ok = self.two_way_rows(toks)
+            both += [(gi, j) for j, o in enumerate(ok) if o]
+            if not all(ok):
+                rest.append((gi, [j for j, o in enumerate(ok) if not o]))
+        if both:
+            self._singles(both, groups, out, media, two_way=True)
+        if rest:
+            for (gi, js), hs in zip(rest, self._one_way([[groups[gi][j] for j in js] for gi, js in rest], media)):
+                for j, h in zip(js, hs):
+                    out[gi][j] = h
+        return out
+
+    def _one_way(self, groups, media=None):
         out = [[None] * len(g) for g in groups]
         jobs, singles = [], []
         for gi, toks in enumerate(groups):

@@ -49,7 +49,7 @@ from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import tasks
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, RequestError, lang_of, letter_ids, max_options, media_messages,
-                     model_format, model_layout,
+                     model_format, model_layout, model_two_way,
                      reads_request, render)
 from .sets import label_set_id
 from .sets import select as select_set
@@ -570,11 +570,11 @@ def orders_for(orders, k):
 
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
-                   calibration_warning=None, vllm_preset=None, layout=None):
+                   calibration_warning=None, vllm_preset=None, layout=None, two_way=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
     model's prompt format, the option orders served, why the --calibration file may not belong to the model and the
-    --vllm-preset (--mode vllm)."""
+    --vllm-preset (--mode vllm), and the two-way limits of a model trained with two-way reading."""
     entry = {"name": name, "release_date": RELEASE_DATE,
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
@@ -591,7 +591,25 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
         entry["vllm_preset"] = vllm_preset
     if layout not in (None, "canonical"):  # the prompt layout served (2.4.1; basal-calibrate fits its file)
         entry["layout"] = layout
+    if two_way:
+        entry["two_way"] = dict(two_way)
     return {"models": [entry]}
+
+
+def two_way_refused(kind, a):
+    """Why a two-way model (basal.json "two_way") cannot be served with these options, or None. It reads the state
+    with each question: nothing is shared between questions (SOAM) or cached before the question (the state and prefix
+    caches), and only the engine's own eager Gemma 4 forward reads two-way in this version."""
+    if a.soam == "on":
+        return "--soam on: a two-way model reads the state with each question, so the questions cannot share it"
+    if getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on":
+        return ("--state-cache-gb and --prefix-cache keep a state read before its question; a two-way model reads it "
+                "with the question")
+    if kind != "eager":
+        return "a two-way model (basal.json \"two_way\") is served with --mode eager in this version"
+    if getattr(a, "eager_forward", None) == "hf":
+        return "a two-way model needs the engine's own Gemma 4 forward (--eager-forward basal)"
+    return None
 
 
 def refuse_layout_caches(layout, a):
@@ -777,8 +795,13 @@ class Server:
             raise SystemExit(f"layout {self.layout} needs a prompt-format-2 model (basal.json \"prompt\": 2)")
         if self.layout != "canonical":
             refuse_layout_caches(self.layout, a)
+        # two-way reading (basal.json "two_way"): each prompt read whole, so SOAM is off (its default) and no cache
+        self.two_way = model_two_way(md)
+        if self.two_way and two_way_refused(kind, a):
+            raise SystemExit(f"{a.model}: {two_way_refused(kind, a)}")
+        self.soam = (a.soam or ("off" if self.two_way else "on")) == "on"
         self.tau, self.band = a.auto_tau, tuple(a.auto_band)
-        shared = self.orders != 1 or a.soam == "on"  # prefix sharing: option orders, or the questions of a request
+        shared = self.orders != 1 or self.soam  # prefix sharing: option orders, or the questions of a request
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
         quant = a.quant or quant
         if getattr(a, "media", "off") == "on" and kind not in ("eager", "vllm"):
@@ -850,7 +873,6 @@ class Server:
                   "and max_error defers (fit a file for this serving with basal-calibrate, or serve with the file's "
                   "orders and layout)", flush=True)
         self.temps = self.cal.get("temperature_per_prim", {})
-        self.soam = a.soam == "on"
         self.log = open(a.log_decisions, "a", buffering=1, encoding="utf-8") if a.log_decisions else None
         self.letters = {}
         self.queue, self.max_batch, self.wait = asyncio.Queue(), a.max_batch, a.wait_ms / 1000
@@ -971,8 +993,10 @@ class Server:
         "long": the whole request is one entry of the long lane (--long-lane)."""
         loop = asyncio.get_running_loop()
         # SOAM: the whole request is one queue entry (one packed row: state once, every branch after it);
-        # otherwise one entry per branch (all option orders of one question share the prefix)
-        entries = [branches] if self.soam or lane == "long" else [[b] for b in branches]
+        # otherwise one entry per branch (all option orders of one question share the prefix). A two-way model: one
+        # entry, so the engine sees the request's record (its one-way fallback above max_record tokens)
+        entries = [branches] if self.soam or lane == "long" or getattr(self, "two_way", None) \
+            else [[b] for b in branches]
         futs, wait = [], [True]  # this call waits (queued) until one of its entries starts an engine call
         if self.waiting is None:
             self.waiting = {}
@@ -1484,8 +1508,9 @@ def add_engine_args(ap):
                     help="--orders auto: a second order when P(true) of a yes/no branch is inside this band")
     ap.add_argument("--early-exit", dest="early_exit", default="off", help="default policy for --mode fast-exit (basal-1.0 models, which ship exit heads)")
     ap.add_argument("--exit-heads", dest="exit_heads", default=None, help="exit heads dir (default: <model>/exit_heads)")
-    ap.add_argument("--soam", choices=["on", "off"], default="on",
-                    help="on = the whole request (every question and option order) is one packed row over the state")
+    ap.add_argument("--soam", choices=["on", "off"], default=None,
+                    help="on = the whole request (every question and option order) is one packed row over the state "
+                         "(default; off for a two-way model, basal.json \"two_way\")")
     ap.add_argument("--gpu-memory", dest="gpu_memory", type=float, default=0.6, help="vLLM memory fraction")
     ap.add_argument("--vllm-preset", dest="vllm_preset", choices=list(VLLM_PRESETS), default="default",
                     help="--mode vllm: default = as 2.2; deterministic = batch-invariant kernels without the prefix "
@@ -1637,7 +1662,7 @@ def http_app(srv, mode, mcp=None):
         return JSONResponse(models_payload(srv.name, mode, getattr(srv.backend, "policies", {}), srv.temps,
                                            srv.fmt, srv.orders, getattr(srv.backend, "media_kinds", ()),
                                            getattr(srv, "cal_mismatch", None), getattr(srv.backend, "preset", None),
-                                           getattr(srv, "layout", None)))
+                                           getattr(srv, "layout", None), getattr(srv, "two_way", None)))
 
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})

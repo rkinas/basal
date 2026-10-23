@@ -37,7 +37,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .prompt import PREFILL, RequestError
+from .prompt import PREFILL, RequestError, model_two_way
 
 
 METADATA_FILES = ["*.json", "*.jinja", "*.model", "*.txt", "*.md", "Modelfile*"]  # tokenizer, template, calibration
@@ -111,6 +111,7 @@ class EagerBackend:
 
     def __init__(self, model_dir, dtype="bfloat16", device=None, media=False, forward=None, ple_offload=False,
                  attn="math"):
+        two_way = model_two_way(model_dir)  # basal.json "two_way": read as the model was trained (Gemma 4 only)
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.padding_side = "left"
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
@@ -158,7 +159,10 @@ class EagerBackend:
                 raise ValueError(f"eager forward {forward!r} (one of {', '.join(EAGER_FORWARDS)})")
             if forward == "basal":
                 from .gemma4 import Gemma4Forward, attention_plan
-                self.g4 = Gemma4Forward(self.model, attn=attention_plan(attn))
+                self.g4 = Gemma4Forward(self.model, attn=attention_plan(attn), two_way=two_way)
+        if two_way and self.g4 is None:
+            raise SystemExit(f"{model_dir}: two-way reading (basal.json \"two_way\") runs in the engine's own Gemma 4 "
+                             "forward only (a Gemma 4 model, --eager-forward basal)")
         self.dev = dev
         self.sdpa_kernels = eager_sdpa_kernels(dev)
         self.prefill = PREFILL
