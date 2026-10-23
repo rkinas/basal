@@ -25,7 +25,9 @@ nvfp4, compact rows, the prefix cache, template prefixes, --readout-layer on, --
 - **State cache** (--state-cache-gb, 2.5): a request cut at its state boundary keeps its root as a full-state checkpoint:
   the attention layers' keys and values of the state and, per Gated DeltaNet layer, the recurrent state and convolution
   tail after its last token. A later request with the same state copies them where pass 1 would have written them and
-  runs pass 2 only. Exact states only: a recurrent state cannot be cut inside the cached tokens.
+  runs pass 2 only. A state that begins with a whole cached one (a growing agent trace) continues it
+  (forward_continue) and replaces it; one that differs inside the cached tokens runs again (a recurrent state cannot
+  be cut there).
 """
 import inspect
 import json
@@ -314,8 +316,10 @@ class Qwen35Graph:
         if out is not None:
             out[0].copy_(fs)
             n = w.shape[-1] - 1
-            ix = lens[:, None] - n + torch.arange(n, device=h.device)[None]  # tokens lens - n .. lens - 1
-            t = qkv.gather(1, ix.clamp_min(0)[..., None].expand(-1, -1, qkv.shape[-1]))
+            # tokens lens - n .. lens - 1; a row that continues a tail (c0) reads its first ones there
+            src = qkv if c0 is None else torch.cat([c0.to(qkv.dtype), qkv], 1)
+            ix = lens[:, None] - n + torch.arange(n, device=h.device)[None] + (0 if c0 is None else n)
+            t = src.gather(1, ix.clamp_min(0)[..., None].expand(-1, -1, src.shape[-1]))
             out[1].copy_(t * (ix >= 0)[..., None])  # before position 0: zeros (a root shorter than the tail)
         return f["gdn_out"](h, o, z.reshape(b, T, -1, a.head_v_dim), a.norm.weight, a.out_proj.weight)
 
@@ -387,6 +391,26 @@ class Qwen35Graph:
             h,
             lambda x, h, i: self._gdn(x, h, s0=states[i][0], c0=states[i][1]),
             lambda x, h, i: self._attention(x, h, cos, sin, prefix=(*roots[i], allow)))
+
+
+    @torch.no_grad()
+    def forward_continue(self, ids, n, kv0, st0, kv, st):
+        """Rows [b, T] that continue a cached state of n tokens (positions n ..): kv0 per attention layer (K, V)
+        [b, kv heads, n, d], st0 per Gated DeltaNet layer (state, tail); fills kv (K, V) [b, kv heads, T, d] with the
+        rows' own keys and values and st (state, tail) after their last token -> normalised hidden states [b, T, D]."""
+        b, T = ids.shape
+        dev = ids.device
+        h = self.m.embed_tokens(ids)
+        cos, sin = self._rope(h, torch.arange(n, n + T, device=dev)[None].expand(b, T))
+        G = self.heads // self.kv_shapes[0][0] if kv else 1
+        own = torch.ones(T, T, dtype=torch.bool, device=dev).tril()
+        allow = torch.cat([torch.ones(T, n, dtype=torch.bool, device=dev), own], -1)
+        allow = allow[None, None, None].expand(b, 1, G, T, n + T).reshape(b, 1, G * T, n + T)
+        lens = torch.full((b,), T, dtype=torch.long, device=dev)
+        return self._layers(
+            h,
+            lambda x, h, i: self._gdn(x, h, None, lens, st[i], s0=st0[i][0], c0=st0[i][1]),
+            lambda x, h, i: self._attention(x, h, cos, sin, kv[i], prefix=(*kv0[i], allow)))
 
 
 class GDNGraphBackend(GraphBackend):
@@ -616,9 +640,43 @@ class GDNGraphBackend(GraphBackend):
         reads = [(None, i) if i < P else (first[sg[i]][0], first[sg[i]][1] + i - start[sg[i]]) for i in last]
         return rows, reads
 
+    CONTINUE_MAX = 8192  # most new tokens a cached state is continued by (beyond: the whole state runs again)
+
     def _extend_states(self, units, keys, hits):
-        """No continuation of a cached state that a request's state only begins with: a recurrent state cannot be cut
-        inside the cached tokens (the state cache serves exact states here)."""
+        """A request state that begins with a whole cached one (a growing agent trace or chat history): its new tokens
+        continue the cached checkpoint (Qwen35Graph.forward_continue: the attention layers over the cached keys and
+        values, the Gated DeltaNet layers from the cached states and tails), and the extended checkpoint replaces the
+        old entry and serves as a hit. A state that differs inside the cached tokens runs again: a recurrent state
+        cannot be cut there."""
+        if not keys or self.state_cache is None:
+            return
+        na = len(self.kv_shapes)
+        for k, key in enumerate(keys):
+            if key is None or k in hits:
+                continue
+            pk = units[k][0]
+            root = list(pk[0][: pk[2].index(1)])
+            found = self.state_cache.longest(root)
+            if found is None:
+                continue
+            old, e, m, n = found
+            if old == key:  # cached by an earlier unit of this call
+                hits[k] = e
+                continue
+            if m != n or n >= len(root) or len(root) - n > self.CONTINUE_MAX:
+                continue
+            T, dt, dev = len(root) - n, self._dtype, self.dev
+            kv = [tuple(torch.empty((1, H, T, D), dtype=dt, device=dev) for _ in "kv") for H, D in self.kv_shapes]
+            st = [(torch.empty((1, *self.net.state_shape), dtype=torch.float32, device=dev),
+                   torch.empty((1, *self.net.tail_shape), dtype=dt, device=dev)) for _ in range(self.net.n_gdn)]
+            with self._launch:
+                self.net.forward_continue(self._to_dev(torch.tensor([root[n:]])), n,
+                                          [(ke[None], ve[None]) for ke, ve in e[:na]],
+                                          [(se[None], ce[None]) for se, ce in e[na:]], kv, st)
+            new = ([(torch.cat([ke, kn[0]], 1), torch.cat([ve, vn[0]], 1)) for (ke, ve), (kn, vn) in zip(e[:na], kv)]
+                   + [(s[0], c[0]) for s, c in st])
+            self.state_cache.put(key, new, tokens=root, replaces=old)
+            hits[k] = new
 
     @staticmethod
     def _entry(kv, st, r, p):

@@ -35,8 +35,9 @@ benchmarking a GPU.
   (flash-linear-attention) for the Gated DeltaNet layers. Without `--mode` they run `fast` on Hopper (H100, the GPU
   class the port was gated on) when fla is installed, `eager` elsewhere. `--state-cache-gb` (2.5) keeps a request's
   state as a full-state checkpoint: the attention layers' keys and values and each Gated DeltaNet layer's recurrent
-  state and convolution tail after the state; the same state again runs only its questions. Only an identical state
-  is reused (a recurrent state cannot be cut inside the cached tokens). Not with them yet: `fp8` / `nvfp4`, `fast-exit`,
+  state and convolution tail after the state; the same state again runs only its questions. A state that begins with
+  a whole cached one (a growing agent trace) continues it from there; one that differs inside the cached tokens runs
+  again (a recurrent state cannot be cut there). Not with them yet: `fp8` / `nvfp4`, `fast-exit`,
   `mps`, `--batches compact`, `--prefix-cache`, `--template-prefix on`, `--readout-layer on`, `--lean` and
   `--long-lane` (each refused before loading). `--mode vllm` and `--mode gguf` serve Qwen3.5 models
   too. Other models with recurrent-state layers (Qwen3-Next, Mamba and other hybrids) are refused by every

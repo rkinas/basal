@@ -306,6 +306,29 @@ def test_state_cache_hit_needs_the_cached_state(monkeypatch, tmp_path):
     assert max_dp(good, be.run_shared(groups)) > 1e-4  # (untouched: < 1e-6, test above)
 
 
+@pytest.mark.parametrize("grow", [1, 2, 40])
+def test_state_cache_continues_a_growing_state(monkeypatch, tmp_path, grow):
+    """A state that begins with a whole cached one (an agent trace that grew by `grow` tokens, fewer than the
+    convolution tail included) continues the cached checkpoint and replaces it: the answers equal an uncached engine's,
+    and the extended entry is then an exact hit. A state that differs inside the cached tokens runs again."""
+    tiny_qwen35(tmp_path / "tiny")
+    plain = gdn_backend(monkeypatch, tmp_path / "tiny")
+    be = gdn_backend(monkeypatch, tmp_path / "tiny", state_cache_gb=0.01)
+    be.state_cache.BLOCK = 16  # (256-token blocks in serving; the tiny model's states are short)
+    qs = lambda root: ([root + [20 + q, 30, 31] for q in range(3)], [[40, 41, 42]] * 3, len(root))  # noqa: E731
+    be.run_shared([qs(ROOT)])
+    longer = ROOT + [14, 15, 16, 17, 18] * 8
+    longer = ROOT + longer[len(ROOT): len(ROOT) + grow]
+    got = be.run_shared([qs(longer)])
+    assert max_dp(got, plain.run_shared([qs(longer)[:2]])) < 1e-5
+    stats = be.state_cache.stats()
+    assert stats["prefix_hits"] == 1 and stats["entries"] == 1  # the extended entry replaced the old one
+    assert be.state_cache.get(be.state_cache.key(longer))[0][0].shape[1] == len(longer)
+    edited = ROOT[:40] + [19] + ROOT[41:] + [14]
+    assert max_dp(be.run_shared([qs(edited)]), plain.run_shared([qs(edited)[:2]])) < 1e-5
+    assert be.state_cache.stats()["entries"] == 2
+
+
 def test_branches_continue_the_root_state(monkeypatch, tmp_path):
     """Pass 2 from zero state (2.3.1's error) moves the answers; the port carries the root's state and tail."""
     tiny_qwen35(tmp_path / "tiny")
