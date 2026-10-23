@@ -1326,7 +1326,7 @@ class GraphBackend(EagerBackend):
         new = copy.copy(self)
         new.graphs, new.pool = {}, torch.cuda.graph_pool_handle()
         new._out, new._side, new._deferred = None, None, None
-        new._launch, new.frozen = threading.Lock(), False
+        new._launch, new.frozen, new.stream = threading.Lock(), False, None
         new._kv_buffers()
         new.warm()
         self.frozen = new.frozen = True
