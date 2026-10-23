@@ -23,12 +23,14 @@ Backends:
   LlamaCppBackend   llama.cpp server with the GGUF exports (1.5): token-id prompt, `n_probs` log-probabilities
   TPUBackend        (basal/tpu.py, extra basal[tpu]; experimental) the same SOAM packing in JAX / XLA on Google TPU
 """
+import copy
 import functools
 import json
 import os
 import re
 import threading
 import traceback
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -511,6 +513,18 @@ def _copy_same(dst, src):
     return dst.copy_(src)
 
 
+class _EagerGraph:
+    """Stands in for a graph that a serving lane lacks (GraphBackend.lane: no capture while other lanes replay):
+    replay() runs the forward on the current stream into the output of its first call."""
+
+    def __init__(self, fn, static):
+        self.fn, self.static = fn, static
+        self.out = fn(*static)
+
+    def replay(self):
+        _copy_same(self.out, self.fn(*self.static))
+
+
 def _graph_tokens(key):
     """A graph's size for the capture order: (tokens it runs, pass 2: query-key pairs). key: ("p", rows, length),
     ("c", tokens) or ("x", rows, branch length, root length)."""
@@ -947,6 +961,8 @@ class GraphBackend(EagerBackend):
     _out = None                   # Llama graphs: the output buffers their captures share (_shared_out)
     _side = None                  # the stream the captures warm up on (one: each new stream pins a cuBLAS workspace)
     _deferred = None              # warm(): graphs warmed up, captured the largest first (_capture_deferred)
+    stream = None                 # a lane's own CUDA stream (lane(); None: every thread's current stream)
+    frozen = False                # a serving lane: a graph missing at run time runs eagerly instead of being captured
 
     def __new__(cls, model_dir=None, *args, **kwargs):
         """GraphBackend(model_dir, ...) of a Qwen3.5 model (Gated DeltaNet and attention layers, from its config.json)
@@ -1121,6 +1137,10 @@ class GraphBackend(EagerBackend):
             D = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
             self.kv_shapes = [(H, D)] * len(self.model.model.layers)
         self.kv_shape = self.kv_shapes[0]
+        self._kv_buffers()
+
+    def _kv_buffers(self):
+        """The key / value buffer for the grid as it is (_alloc_kv; a lane's own, the same size as its backend's)."""
         n = self._kv_tokens()
         dt = self._dtype
         # zeros, not empty: below a cached root the masked tail of its rows is never written, and a masked NaN still
@@ -1293,6 +1313,27 @@ class GraphBackend(EagerBackend):
                                                              if self.shared else []))
             if self.gemma is not None and self.flex and self.shared:
                 self._warm_pass2(n)
+
+    def lane(self):
+        """A copy of this backend for basal-serve --deterministic --lanes N: it shares the weights, the tokenizer, the
+        compiled forwards and the grid, and has its own graphs (captured here, in its own graph pool), key / value and
+        output buffers and CUDA stream, so its calls run at the same time as the other lanes'. Under --deterministic a
+        call is one request, whose shapes do not depend on other requests, and a graph replays the same kernels on any
+        stream: N requests at once get the answers each gets alone. The grid is not refitted to the memory left (that
+        would change shapes); afterwards neither lane captures (frozen: a missing graph runs eagerly)."""
+        if self.dev.type != "cuda":
+            raise ValueError("--lanes needs a CUDA GPU")
+        new = copy.copy(self)
+        new.graphs, new.pool = {}, torch.cuda.graph_pool_handle()
+        new._out, new._side, new._deferred = None, None, None
+        new._launch, new.frozen = threading.Lock(), False
+        new._kv_buffers()
+        new.warm()
+        self.frozen = new.frozen = True
+        new.stream = torch.cuda.Stream(self.dev)
+        if self.stream is None:
+            self.stream = torch.cuda.Stream(self.dev)
+        return new
 
     def _warm_long_sfx(self):
         """Gemma 4: pass-2 graphs over the roots of the plain graphs longer than LENS (states of 3k-8k tokens: the
@@ -1589,6 +1630,9 @@ class GraphBackend(EagerBackend):
                 self._warm_up(fn, static)
                 self._deferred[key] = (fn, static)
             return None
+        if self.frozen:  # a capture would collide with the other lanes' work on the GPU
+            eager = _EagerGraph(fn, static)
+            return (eager, *static, eager.out)
         self._warm_up(fn, static)
         return self._record(key, fn, static)
 
@@ -2330,6 +2374,10 @@ class GraphBackend(EagerBackend):
         """All forwards of the call are launched first; each one's option probabilities are copied to pinned host
         memory behind it, so the readouts are collected in launch order while later forwards still run. done(k, res)
         (optional) is called for group k as soon as all its units are read out."""
+        with torch.cuda.stream(self.stream) if self.stream is not None else nullcontext():
+            return self._run_shared(groups, done)
+
+    def _run_shared(self, groups, done):
         units = self._units(groups)
         packs = [u[0] for u in units]
         cuda = self.dev.type == "cuda"

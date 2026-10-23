@@ -417,6 +417,24 @@ def deterministic_setup(kind):
     set_fp8_fast_accum(False)  # FP8 GEMMs with full accumulation (fast accumulation rounds by kernel choice)
 
 
+def lanes_refused(a, kind):
+    """Why basal-serve --lanes N cannot run as asked (None: it can; Qwen3.5 models are refused where they are found)."""
+    n = getattr(a, "lanes", 1)
+    if n < 1:
+        return "--lanes must be at least 1"
+    if n == 1:
+        return None
+    if not a.deterministic:
+        return "--lanes needs --deterministic (without it, concurrent requests share forwards)"
+    if kind != "graph":
+        return "--lanes needs the CUDA graph engine (--mode fast, fast-nocompile, fp8, nvfp4)"
+    if getattr(a, "long_lane", "off") == "on":
+        return "--lanes is not combined with --long-lane"
+    if lean_arg(getattr(a, "lean", "off")):
+        return "--lanes is not combined with --lean"
+    return None
+
+
 def _answer(fut, res):
     if not fut.done():
         fut.set_result(res)
@@ -724,6 +742,9 @@ class Server:
             raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
         if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
             raise SystemExit(f"--calibration {a.calibration}: no such file")  # a typo must not serve uncalibrated
+        why = lanes_refused(a, kind)  # before any model is read
+        if why:
+            raise SystemExit(why)
         if a.deterministic:
             deterministic_setup(kind)
         elif getattr(a, "fp8_accum", "fast") == "full":  # FP8 checkpoints: the same GEMM arithmetic as --deterministic
@@ -762,6 +783,8 @@ class Server:
                                   getattr(a, "readout_layer", "off"), getattr(a, "template_prefix", "off"))
                 if not why and getattr(a, "long_lane", "off") == "on":
                     why = "--long-lane is not available for Qwen3.5 (Gated DeltaNet) models"
+                if not why and getattr(a, "lanes", 1) > 1:
+                    why = "--lanes is not available for Qwen3.5 (Gated DeltaNet) models"
                 if why:
                     raise SystemExit(f"{a.model}: {why}")
         if kind in ("graph", "exit") and (a.quant or quant) == "fp8" and fp8_refused():
@@ -828,6 +851,13 @@ class Server:
                                         readout_layer=getattr(a, "readout_layer", "off"),
                                         template=getattr(a, "template_prefix", "off"),
                                         gemma_attn=getattr(a, "gemma_attn", "auto"))
+        self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
+        if getattr(a, "lanes", 1) > 1:
+            t = time.time()
+            self.lanes = [self.backend] + [self.backend.lane() for _ in range(a.lanes - 1)]
+            self.free_lanes = list(self.lanes)
+            print(f"basal: --lanes {a.lanes}: {a.lanes - 1} more copies of the graphs in {time.time() - t:.0f} s",
+                  flush=True)
         self.tok = self.backend.tok
         self.states_cached = bool(getattr(a, "state_cache_gb", 0))  # --state-cache-gb: requests are cut at their state
         model = getattr(self.backend, "model", None)  # evidence head: needs the in-process HF model
@@ -1077,7 +1107,8 @@ class Server:
     async def worker(self):
         loop = asyncio.get_running_loop()
         # engine calls in flight: 2 for the CUDA graph engine (one call's host work overlaps the other's forwards)
-        slots = asyncio.Semaphore(max(1, getattr(self.backend, "inflight", 1)))
+        slots = asyncio.Semaphore(len(self.lanes) if getattr(self, "lanes", None)
+                                  else max(1, getattr(self.backend, "inflight", 1)))
         last = 1  # queue entries in the previous call
         while True:
             await slots.acquire()
@@ -1188,22 +1219,26 @@ class Server:
             slots.release()
             return
         self.started(batch)
+        lanes = getattr(self, "lanes", None)
+        backend = self.free_lanes.pop() if lanes else self.backend  # (slots: never more calls than lanes)
         try:
             for pol in {b[3] for b in batch}:  # requests with the same early-exit policy run together
                 ix = [i for i, b in enumerate(batch) if b[3] == pol]
                 kw = {}
-                if getattr(self.backend, "streams", False):
+                if getattr(backend, "streams", False):
                     kw["done"] = lambda j, res, ix=ix: loop.call_soon_threadsafe(_answer, batch[ix[j]][2], res)
                 groups = []
                 for i in ix:  # (prompts, code ids[, state prefix length for the state cache])
                     cut = batch[i][4] if len(batch[i]) > 4 else None
                     groups.append((batch[i][0], batch[i][1]) + ((cut,) if cut else ()))
-                out = await loop.run_in_executor(None, functools.partial(self.backend.run_shared, groups, pol, **kw))
+                out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
                 for i, o in zip(ix, out):
                     _answer(batch[i][2], o)
         except Exception as e:  # noqa: BLE001
             _fail([b[2] for b in batch], e)
         finally:
+            if lanes:
+                self.free_lanes.append(backend)
             slots.release()
             if getattr(self, "gate", None) is not None:
                 self.gate.main_done(len(batch), time.perf_counter() - t_call)
@@ -1576,6 +1611,10 @@ def add_engine_args(ap):
     ap.add_argument("--deterministic", action="store_true",
                     help="answers independent of load: one request per forward, deterministic kernels, FP8 GEMMs with "
                          "full accumulation (lower throughput under concurrency; in-process engines only)")
+    ap.add_argument("--lanes", type=int, default=1,
+                    help="--deterministic with the CUDA graph engine: N requests at once, each in its own copy of the "
+                         "graphs on its own CUDA stream; the answers stay those of one request at a time (GPU memory "
+                         "and start-up grow with N)")
     ap.add_argument("--max-batch", dest="max_batch", type=int, default=64)
     ap.add_argument("--wait-ms", dest="wait_ms", type=float, default=0.0,
                     help="extra time to wait for more requests before a forward (default 0: adaptive batching)")
