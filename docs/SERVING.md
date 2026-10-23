@@ -82,6 +82,12 @@ benchmarking a GPU.
   one; with only the canonical file its temperatures are kept, its thresholds are not applied, and the answers are
   marked unvalidated. Without `--layout` a model is served in its basal.json `"layout"` (canonical when absent), and
   `/v1/models` reports a non-canonical layout. Images and audio are read in the canonical layout only.
+- **Second read of uncertain answers** (2.5, `--reread <threshold>`, prompt-format-2 models, off by default): a choice
+  or yes / no answer of a short request (`--reread-max-tokens`, 2,048) whose calibrated top probability is below the
+  threshold is read again with the state twice (the `state_twice` layout), and the two readouts are combined: the
+  mean of their log-probabilities (`--reread-combine mean`, the default) or the second read alone (`second`), then
+  the type's temperature. Such answers carry `"reread": true`, and `usage.reread_branches` counts them. Off, nothing
+  changes.
 - **Long states**: `--context-overflow truncate` (the default) cuts the middle of a state that does not fit the
   context (the first 1/3 and the last 2/3 of the kept tokens, `--truncate-head`; the question and options stay whole)
   and says what was cut in `usage.truncated`; `--context-overflow refuse` returns HTTP 422 instead. The context is

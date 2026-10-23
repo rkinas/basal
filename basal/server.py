@@ -594,6 +594,18 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
     return {"models": [entry]}
 
 
+def reread_refused(threshold, fmt):
+    """Why --reread cannot be used (None: it can): a probability threshold, and the state_twice layout of format 2."""
+    if threshold is None:
+        return None
+    if not 0 < threshold <= 1:
+        return "--reread takes a probability threshold in (0, 1]"
+    if fmt == 1:
+        return ("--reread reads the state twice (the state_twice layout of prompt format 2); this model uses prompt "
+                "format 1")
+    return None
+
+
 def refuse_layout_caches(layout, a):
     """--state-cache-gb and --prefix-cache cache the prompt up to the end of the state, which only the canonical layout
     starts with."""
@@ -778,6 +790,13 @@ class Server:
         if self.layout != "canonical":
             refuse_layout_caches(self.layout, a)
         self.tau, self.band = a.auto_tau, tuple(a.auto_band)
+        # --reread T (2.5): a choice or yes / no answer of a short request whose top probability is below T is read again
+        # in the state_twice layout and the two readouts are combined (reread_pass, combined)
+        self.reread = getattr(a, "reread", None)
+        self.reread_combine = getattr(a, "reread_combine", "mean")
+        self.reread_max = getattr(a, "reread_max_tokens", 2048)
+        if reread_refused(self.reread, self.fmt):
+            raise SystemExit(reread_refused(self.reread, self.fmt))
         shared = self.orders != 1 or a.soam == "on"  # prefix sharing: option orders, or the questions of a request
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
         quant = a.quant or quant
@@ -877,8 +896,9 @@ class Server:
         self.long_tokens, self.gate = tokens, LaneGate(slice_s, cuda, share)
         self.long_entries, self.long_ready, self.long_rate = [], asyncio.Event(), 1 / 30000  # s per token, updated
 
-    def jobs_for(self, q, question=None, options=None, perms=None):
-        """Prompts of one branch in every option order of the first pass (or in `perms`): [(perm, prompt, code ids)]."""
+    def jobs_for(self, q, question=None, options=None, perms=None, layout=None):
+        """Prompts of one branch in every option order of the first pass (or in `perms`), in the served layout (or
+        `layout`): [(perm, prompt, code ids)]."""
         question = q["question"] if question is None else question
         options = q["options"] if options is None else options
         k = len(options)
@@ -887,13 +907,13 @@ class Server:
         jobs = []
         for perm in perms:
             prompt = render(self.tok, q["state"], question, [options[c] for c in perm], q["lang"], self.fmt,
-                            getattr(self, "layout", "canonical"))
+                            layout or getattr(self, "layout", "canonical"))
             jobs.append((perm, prompt, self.code_ids(prompt, k)))
         return jobs
 
-    def branch(self, i, bi, q, perms=None):
+    def branch(self, i, bi, q, perms=None, layout=None):
         """Branch bi of question i -> (i, bi, perms, prompts, code ids)."""
-        jobs = self.jobs_for(q, *q["branches"][bi], perms)
+        jobs = self.jobs_for(q, *q["branches"][bi], perms, layout)
         if any(ids is None for _, _, ids in jobs):
             raise ValueError("option letters are not single tokens for this tokenizer")
         return (i, bi, [j[0] for j in jobs], [j[1] for j in jobs], [j[2] for j in jobs])
@@ -1211,17 +1231,52 @@ class Server:
                 tokens = sum(max(map(len, b[0]), default=0) for b in batch)
                 self.sched_rate = 0.8 * self.sched_rate + 0.2 * (time.perf_counter() - t_call) / max(tokens, 1)
 
-    def canonical(self, q_type, perms, outs):
-        """Position probabilities of every option order -> mean in the canonical order, then the type temperature."""
+    @staticmethod
+    def order_mean(perms, outs):
+        """Position probabilities of every option order -> their mean in the canonical order (a tensor)."""
         canon = []
         for perm, p_pos in zip(perms, outs):
             c = [0.0] * len(perm)
             for k, j in enumerate(perm):
                 c[j] = p_pos[k]
             canon.append(c)
-        p = torch.tensor([sum(x) / len(canon) for x in zip(*canon)])
+        return torch.tensor([sum(x) / len(canon) for x in zip(*canon)])
+
+    def canonical(self, q_type, perms, outs):
+        """Position probabilities of every option order -> mean in the canonical order, then the type temperature."""
+        p = self.order_mean(perms, outs)
         T = temperature(self.cal, q_type, len(p))  # calibrated temperature per question type (and option count)
         return temper(p, T).tolist()
+
+    def combined(self, q_type, perms, outs, perms2, outs2):
+        """--reread: the first and the second (state_twice) readout -> one distribution, then the type temperature:
+        the mean of their log-probabilities (renormalised), or the second read alone (--reread-combine second)."""
+        p2 = self.order_mean(perms2, outs2)
+        if self.reread_combine == "second":
+            p = p2
+        else:
+            p = torch.softmax((self.order_mean(perms, outs).clamp_min(1e-12).log() + p2.clamp_min(1e-12).log()) / 2, -1)
+        return temper(p, temperature(self.cal, q_type, len(p))).tolist()
+
+    async def reread_pass(self, qs, branches, outs, longest, pol, lane):
+        """--reread T: the single-branch choice and yes / no questions of a request whose longest prompt has at most
+        --reread-max-tokens tokens and whose calibrated top probability is below T, read again in the state_twice
+        layout (in the option orders read so far) -> ({branch index: (perms, position probabilities)}, prompt tokens)."""
+        if max(longest, default=0) > self.reread_max:
+            return {}, 0
+        redo = []
+        for j, (b, o) in enumerate(zip(branches, outs)):
+            q = qs[b[0]]
+            if q["type"] in ("choice", "noul") and not q.get("multi") and len(q["branches"]) == 1 \
+                    and max(self.canonical(q["type"], b[2], o)) < self.reread:
+                redo.append(j)
+        if not redo:
+            return {}, 0
+        again = [self.branch(branches[j][0], branches[j][1], qs[branches[j][0]], list(branches[j][2]), "state_twice")
+                 for j in redo]
+        n_tok = self.encode(again)[0]
+        o2 = await self.ask(again, pol, None, lane)  # (no state-cache cut: the state comes twice)
+        return {j: (b2[2], o) for j, b2, o in zip(redo, again, o2)}, n_tok
 
     async def decide(self, body):
         t0 = time.perf_counter()
@@ -1274,7 +1329,12 @@ class Server:
                     o2 = await self.ask(second, pol, cut, lane)
                 for j, b2, o in zip(redo, second, o2):
                     branches[j][2].extend(b2[2]); outs[j] = outs[j] + o
-        out = await self.assemble(body, qs, branches, outs, m, n_tok, n_media, longest, second, truncation, lane, t0)
+        reread = None
+        if getattr(self, "reread", None) is not None and m is None:  # a second read of the uncertain short answers
+            reread, n2 = await self.reread_pass(qs, branches, outs, longest, pol, lane)
+            n_tok += n2
+        out = await self.assemble(body, qs, branches, outs, m, n_tok, n_media, longest, second, truncation, lane, t0,
+                                  reread)
         if plans:  # the task answers from their decision answers; extract's spans need a second round of decisions
             r2, a2 = tasks.second_round(out, orig, plans, self.max_options), None
             if r2 is not None:
@@ -1355,20 +1415,27 @@ class Server:
         outs = await self.ask(branches, pol, cut, lane)
         return qs, branches, outs, n_tok, longest, truncation, cut, lane
 
-    async def assemble(self, body, qs, branches, outs, m, n_tok, n_media, longest, second, truncation, lane, t0):
-        """Answers and usage of a request from the position probabilities of its branches."""
+    async def assemble(self, body, qs, branches, outs, m, n_tok, n_media, longest, second, truncation, lane, t0,
+                       reread=None):
+        """Answers and usage of a request from the position probabilities of its branches (and of the second reads of
+        --reread: {branch index: (perms, position probabilities)})."""
         loop = asyncio.get_running_loop()
-        per_q = [[] for _ in qs]
-        for b, o in zip(branches, outs):
+        per_q, again = [[] for _ in qs], {}
+        for j, (b, o) in enumerate(zip(branches, outs)):
             per_q[b[0]].append((b[2], o))
+            if reread and j in reread:
+                again[b[0]] = reread[j]
         answers = {}
-        for q, brs in zip(qs, per_q):
+        for qi, (q, brs) in enumerate(zip(qs, per_q)):
             if q["type"] == "multi" or q.get("multi"):
                 ans = multi_answer(q, [self.canonical("noul", perms, o)[0] for perms, o in brs])
                 answers[q["name"]] = tool_set_answer(q, ans) if q["type"] == "tool" else ans
                 continue
             perms, o = brs[0]
-            pl = self.canonical(q.get("base", q["type"]), perms, o)
+            if qi in again:
+                pl = self.combined(q.get("base", q["type"]), perms, o, *again[qi])
+            else:
+                pl = self.canonical(q.get("base", q["type"]), perms, o)
             probs = {k: float(v) for k, v in zip(q["keys"], pl)}
             conf = float(max(pl))
             if q["type"] == "act":
@@ -1382,6 +1449,8 @@ class Server:
                        "legend": dict(zip(q["keys"], q["options"])), "probabilities": probs, "confidence": conf}
             else:
                 ans = {"type": "choice", "choice": max(probs, key=probs.get), "probabilities": probs, "confidence": conf}
+            if qi in again:
+                ans["reread"] = True
             answers[q["name"]] = ans
         ev_q = [q for q in qs if body["questions"][q["name"]].get("evidence")]
         if ev_q and truncation:
@@ -1409,6 +1478,8 @@ class Server:
                                      "detail": m["detail"]}
         if self.orders == "auto":
             out["usage"]["second_order_branches"] = len(second)
+        if getattr(self, "reread", None) is not None:
+            out["usage"]["reread_branches"] = len(reread or {})
         out["usage"]["longest_prompt_tokens"] = max(longest, default=0)
         if truncation:
             out["usage"]["truncated"] = truncation
@@ -1482,6 +1553,15 @@ def add_engine_args(ap):
                     help="--orders auto: a second order when the top probability is below this (choice, score)")
     ap.add_argument("--auto-band", dest="auto_band", type=float, nargs=2, default=[0.2, 0.8],
                     help="--orders auto: a second order when P(true) of a yes/no branch is inside this band")
+    ap.add_argument("--reread", type=float, default=None,
+                    help="a second read of uncertain answers (prompt format 2): a choice or yes/no answer of a short "
+                         "request (--reread-max-tokens) whose calibrated top probability is below this is read again "
+                         "with the state twice (the state_twice layout) and the two readouts are combined. Off by "
+                         "default")
+    ap.add_argument("--reread-combine", dest="reread_combine", choices=["mean", "second"], default="mean",
+                    help="--reread: mean of the two readouts' log-probabilities (default), or the second read alone")
+    ap.add_argument("--reread-max-tokens", dest="reread_max_tokens", type=int, default=2048,
+                    help="--reread: only requests whose longest first-read prompt has at most this many tokens")
     ap.add_argument("--early-exit", dest="early_exit", default="off", help="default policy for --mode fast-exit (basal-1.0 models, which ship exit heads)")
     ap.add_argument("--exit-heads", dest="exit_heads", default=None, help="exit heads dir (default: <model>/exit_heads)")
     ap.add_argument("--soam", choices=["on", "off"], default="on",
