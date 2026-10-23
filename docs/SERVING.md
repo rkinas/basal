@@ -87,7 +87,9 @@ benchmarking a GPU.
   threshold is read again with the state twice (the `state_twice` layout), and the two readouts are combined: the
   mean of their log-probabilities (`--reread-combine mean`, the default) or the second read alone (`second`), then
   the type's temperature. Such answers carry `"reread": true`, and `usage.reread_branches` counts them. Off, nothing
-  changes.
+  changes. With `--media on`, `--reread-image <budget>` does the same for a request with an image: its uncertain
+  answers are read again with every image at that many soft tokens (Gemma 4: 70, 140, 280, 560 or 1120; the
+  request's `"detail"` sets the first read's), and the two reads are combined the same way.
 - **Long states**: `--context-overflow truncate` (the default) cuts the middle of a state that does not fit the
   context (the first 1/3 and the last 2/3 of the kept tokens, `--truncate-head`; the question and options stay whole)
   and says what was cut in `usage.truncated`; `--context-overflow refuse` returns HTTP 422 instead. The context is

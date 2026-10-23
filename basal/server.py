@@ -594,8 +594,19 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
     return {"models": [entry]}
 
 
-def reread_refused(threshold, fmt):
-    """Why --reread cannot be used (None: it can): a probability threshold, and the state_twice layout of format 2."""
+IMAGE_BUDGETS = (70, 140, 280, 560, 1120)  # soft tokens per image Gemma 4's vision tower takes
+
+
+def reread_refused(threshold, fmt, image=None, media=False):
+    """Why --reread / --reread-image cannot be used (None: they can): a probability threshold, the state_twice layout
+    of format 2; an image budget of Gemma 4's vision tower, for a server that takes media."""
+    if image is not None:
+        if threshold is None:
+            return "--reread-image needs --reread <threshold> (the answers it reads again)"
+        if image not in IMAGE_BUDGETS:
+            return f"--reread-image takes an image token budget ({', '.join(map(str, IMAGE_BUDGETS))})"
+        if not media:
+            return "--reread-image needs --media on (a server that reads images)"
     if threshold is None:
         return None
     if not 0 < threshold <= 1:
@@ -795,8 +806,11 @@ class Server:
         self.reread = getattr(a, "reread", None)
         self.reread_combine = getattr(a, "reread_combine", "mean")
         self.reread_max = getattr(a, "reread_max_tokens", 2048)
-        if reread_refused(self.reread, self.fmt):
-            raise SystemExit(reread_refused(self.reread, self.fmt))
+        # --reread-image B: a request with an image re-reads its uncertain answers with the image at B soft tokens
+        self.reread_image = getattr(a, "reread_image", None)
+        why = reread_refused(self.reread, self.fmt, self.reread_image, getattr(a, "media", "off") == "on")
+        if why:
+            raise SystemExit(why)
         shared = self.orders != 1 or a.soam == "on"  # prefix sharing: option orders, or the questions of a request
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
         quant = a.quant or quant
@@ -1249,7 +1263,8 @@ class Server:
         return temper(p, T).tolist()
 
     def combined(self, q_type, perms, outs, perms2, outs2):
-        """--reread: the first and the second (state_twice) readout -> one distribution, then the type temperature:
+        """--reread: the first and the second (state_twice, or the image at --reread-image tokens) readout -> one
+        distribution, then the type temperature:
         the mean of their log-probabilities (renormalised), or the second read alone (--reread-combine second)."""
         p2 = self.order_mean(perms2, outs2)
         if self.reread_combine == "second":
@@ -1258,18 +1273,37 @@ class Server:
             p = torch.softmax((self.order_mean(perms, outs).clamp_min(1e-12).log() + p2.clamp_min(1e-12).log()) / 2, -1)
         return temper(p, temperature(self.cal, q_type, len(p))).tolist()
 
-    async def reread_pass(self, qs, branches, outs, longest, pol, lane):
-        """--reread T: the single-branch choice and yes / no questions of a request whose longest prompt has at most
-        --reread-max-tokens tokens and whose calibrated top probability is below T, read again in the state_twice
-        layout (in the option orders read so far) -> ({branch index: (perms, position probabilities)}, prompt tokens)."""
-        if max(longest, default=0) > self.reread_max:
-            return {}, 0
+    def to_reread(self, qs, branches, outs):
+        """The branches --reread reads again: single-branch choice and yes / no questions whose calibrated top
+        probability is below the threshold."""
         redo = []
         for j, (b, o) in enumerate(zip(branches, outs)):
             q = qs[b[0]]
             if q["type"] in ("choice", "noul") and not q.get("multi") and len(q["branches"]) == 1 \
                     and max(self.canonical(q["type"], b[2], o)) < self.reread:
                 redo.append(j)
+        return redo
+
+    async def reread_image_pass(self, qs, branches, outs, m):
+        """--reread-image B: a request with an image whose uncertain answers (to_reread) were read with fewer image
+        tokens reads them again with every image at B soft tokens (canonical layout, the option orders read so far)
+        -> ({branch index: (perms, position probabilities)}, prompt tokens, media tokens)."""
+        if not m["images"] or m["max_soft_tokens"] >= self.reread_image:
+            return {}, 0, 0
+        redo = self.to_reread(qs, branches, outs)
+        if not redo:
+            return {}, 0, 0
+        o2, n_tok, _, n_media = await self.ask_media(qs, [branches[j] for j in redo],
+                                                     dict(m, max_soft_tokens=self.reread_image))
+        return {j: (branches[j][2], o) for j, o in zip(redo, o2)}, n_tok, n_media
+
+    async def reread_pass(self, qs, branches, outs, longest, pol, lane):
+        """--reread T: the single-branch choice and yes / no questions of a request whose longest prompt has at most
+        --reread-max-tokens tokens and whose calibrated top probability is below T, read again in the state_twice
+        layout (in the option orders read so far) -> ({branch index: (perms, position probabilities)}, prompt tokens)."""
+        if max(longest, default=0) > self.reread_max:
+            return {}, 0
+        redo = self.to_reread(qs, branches, outs)
         if not redo:
             return {}, 0
         again = [self.branch(branches[j][0], branches[j][1], qs[branches[j][0]], list(branches[j][2]), "state_twice")
@@ -1333,6 +1367,9 @@ class Server:
         if getattr(self, "reread", None) is not None and m is None:  # a second read of the uncertain short answers
             reread, n2 = await self.reread_pass(qs, branches, outs, longest, pol, lane)
             n_tok += n2
+        elif getattr(self, "reread_image", None) is not None and m is not None:  # ... with the image at more tokens
+            reread, n2, nm2 = await self.reread_image_pass(qs, branches, outs, m)
+            n_tok, n_media = n_tok + n2, n_media + nm2
         out = await self.assemble(body, qs, branches, outs, m, n_tok, n_media, longest, second, truncation, lane, t0,
                                   reread)
         if plans:  # the task answers from their decision answers; extract's spans need a second round of decisions
@@ -1478,7 +1515,7 @@ class Server:
                                      "detail": m["detail"]}
         if self.orders == "auto":
             out["usage"]["second_order_branches"] = len(second)
-        if getattr(self, "reread", None) is not None:
+        if getattr(self, "reread", None) is not None and (m is None or getattr(self, "reread_image", None) is not None):
             out["usage"]["reread_branches"] = len(reread or {})
         out["usage"]["longest_prompt_tokens"] = max(longest, default=0)
         if truncation:
@@ -1562,6 +1599,10 @@ def add_engine_args(ap):
                     help="--reread: mean of the two readouts' log-probabilities (default), or the second read alone")
     ap.add_argument("--reread-max-tokens", dest="reread_max_tokens", type=int, default=2048,
                     help="--reread: only requests whose longest first-read prompt has at most this many tokens")
+    ap.add_argument("--reread-image", dest="reread_image", type=int, default=None,
+                    help="with --reread and --media on: a request with an image reads its uncertain answers again with "
+                         "every image at this many soft tokens (Gemma 4: 70, 140, 280, 560 or 1120; the request's "
+                         "\"detail\" sets the first read's) and combines the reads as --reread does. Off by default")
     ap.add_argument("--early-exit", dest="early_exit", default="off", help="default policy for --mode fast-exit (basal-1.0 models, which ship exit heads)")
     ap.add_argument("--exit-heads", dest="exit_heads", default=None, help="exit heads dir (default: <model>/exit_heads)")
     ap.add_argument("--soam", choices=["on", "off"], default="on",
