@@ -220,9 +220,11 @@ class _PinnedCache(dict):
         return self.default
 
 
-def fla_pin(path=FLA_CONFIGS):
-    """Give fla's autotuners the recorded configs (see FLA_CONFIGS) -> the number of kernels pinned, 0 when the table
-    is for another GPU or fla version (they autotune as before), or missing. BASAL_FLA_PIN=0 turns it off."""
+def fla_pin(path=None):
+    """Give fla's autotuners the recorded configs (see FLA_CONFIGS; a prepared start-up's own table replaces it,
+    prepared.load) -> the number of kernels pinned, 0 when the table is for another GPU or fla version (they autotune
+    as before), or missing. BASAL_FLA_PIN=0 turns it off."""
+    path = path or FLA_CONFIGS
     if os.environ.get("BASAL_FLA_PIN", "1") != "1" or not Path(path).exists() or not torch.cuda.is_available():
         return 0
     import fla

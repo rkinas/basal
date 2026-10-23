@@ -787,6 +787,17 @@ class Server:
             raise SystemExit("--ple-offload on needs --mode eager")
         if getattr(a, "eager_attn", "math") != "math" and kind != "eager":
             raise SystemExit("--eager-attn needs --mode eager (the CUDA graph engine takes --attn)")
+        self.prepared = None  # --prepared: the compiled kernels of an earlier start on this GPU class (basal-prepare)
+        if kind in ("graph", "exit") and comp and getattr(a, "prepared", "auto") != "off" and torch.cuda.is_available():
+            from . import prepared
+            fields = prepared.key_fields(md, a.mode, a.dtype, attn)
+            d = prepared.locate(md, fields, getattr(a, "prepared", "auto"))
+            if d is None and getattr(a, "prepared", "auto") not in ("auto", "off"):
+                raise SystemExit(f"--prepared {a.prepared}: no prepared start-up for this model, mode and GPU there "
+                                 f"(key {prepared.key(fields)}; basal-prepare writes one)")
+            self.prepared = prepared.load(d) if d is not None else None
+            print(f"basal: prepared start-up: {self.prepared or 'none for this GPU and version (basal-prepare writes it)'}",
+                  flush=True)
         if kind == "eager":
             self.backend = EagerBackend(md, a.dtype, device=a.device, media=getattr(a, "media", "off") == "on",
                                         forward=getattr(a, "eager_forward", None),
@@ -1484,6 +1495,10 @@ def add_engine_args(ap):
                     help="--orders auto: a second order when P(true) of a yes/no branch is inside this band")
     ap.add_argument("--early-exit", dest="early_exit", default="off", help="default policy for --mode fast-exit (basal-1.0 models, which ship exit heads)")
     ap.add_argument("--exit-heads", dest="exit_heads", default=None, help="exit heads dir (default: <model>/exit_heads)")
+    ap.add_argument("--prepared", default="auto",
+                    help="compiled modes: load the kernels of an earlier start on this GPU class (basal-prepare) before "
+                         "the engine compiles. auto (default) = the model's prepared/<key> or the user cache when the key "
+                         "matches; off; or a directory")
     ap.add_argument("--soam", choices=["on", "off"], default="on",
                     help="on = the whole request (every question and option order) is one packed row over the state")
     ap.add_argument("--gpu-memory", dest="gpu_memory", type=float, default=0.6, help="vLLM memory fraction")
