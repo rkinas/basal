@@ -1,3 +1,14 @@
+# What is new in basal 2.4.2 (not released yet)
+
+- **Less host work in the CUDA cascade** (`--mode fast`, basal-2.0): the pass 2 without a CUDA graph runs kernel by
+  kernel and waits on the CPU; the cascade (2.3.5) now merges its two attentions in one compiled kernel per layer
+  instead of ~15 small ones and calls FlashAttention's op directly, not through torch's `varlen_attn` (a Python
+  custom op that also allocated a random-number state per call). A100, basal-2.0-mini, one client, against the dense
+  pass: 40 questions over a 1.5k-token state 1.07x -> 1.11x, compress 1.15-1.37x -> 1.19-1.44x; pass 2 alone for 40
+  questions 62.4 -> 48.6 ms (basal-2.0-4.5B: 117 -> 99 ms); every probability bit-identical to 2.3.5.
+  `fast-nocompile` keeps the merge op by op. Contributed by Miłosz Kucharski (@Butterski),
+  [#44](https://github.com/rkinas/basal/pull/44).
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture

@@ -698,7 +698,7 @@ class _VarlenTree(NamedTuple):
     """The branch pass of B rows of S tokens on CUDA (_cascade_varlen), built by _varlen_tree. Root part: every token
     of row r over the first used[r] keys of its root buffer (cu_qr / cu_kr: S / Lk tokens per row). Branch part: per
     trie block, its queries (flat indices qi, cu_q) over its ancestors' and own tokens (flat indices ki, cu_k), causal
-    at the end; full: no padding tokens (qi is every token in order)."""
+    at the end; full: no padding tokens (qi is every token in order); fused: the merge compiled (_merge_fused)."""
     cu_qr: torch.Tensor
     cu_kr: torch.Tensor
     used: torch.Tensor
@@ -709,12 +709,14 @@ class _VarlenTree(NamedTuple):
     max_q: int
     max_k: int
     full: bool
+    fused: bool = False
 
 
-def _varlen_tree(seg, parents, roots, Lk, to_dev):
+def _varlen_tree(seg, parents, roots, Lk, to_dev, fused=False):
     """seg [B, S] numpy: the block of every token below the root (0..; contiguous, flattened depth first; -1 =
     padding), parents: per row the parent block of every block (-1 = the root), roots: the root's tokens per row, Lk:
-    the length of the root key / value buffers -> _VarlenTree on the device (to_dev: host array -> device)."""
+    the length of the root key / value buffers, fused: merge with _merge_fused -> _VarlenTree on the device (to_dev:
+    host array -> device)."""
     B, S = seg.shape
     qi, ki, cq, ck = [], [], [0], [0]
     for r in range(B):
@@ -735,17 +737,19 @@ def _varlen_tree(seg, parents, roots, Lk, to_dev):
     qi, ki = np.concatenate(qi), np.concatenate(ki)
     i32 = lambda x: to_dev(np.asarray(x, dtype=np.int32))  # noqa: E731
     return _VarlenTree(i32(np.arange(B + 1) * S), i32(np.arange(B + 1) * Lk), i32(roots), to_dev(qi), to_dev(ki),
-                       i32(cq), i32(ck), int(np.diff(cq).max()), int(np.diff(ck).max()), len(qi) == B * S)
+                       i32(cq), i32(ck), int(np.diff(cq).max()), int(np.diff(ck).max()), len(qi) == B * S, fused)
 
 
 def _varlen(q, k, v, cu_q, cu_k, max_q, max_k, scale, causal=False, used=None):
     """torch's varlen attention (FlashAttention 2 on packed sequences, grouped-query) with its log-sum-exp: q [Tq, H,
     d], k / v [Tk, Hkv, d], cu_q / cu_k cumulative lengths (int32), used: the keys each sequence uses (seqused_k) or
     None, causal: aligned at the end of each sequence -> (o [Tq, H, d], lse [Tq, H] fp32). The log-sum-exp comes as
-    [H, Tq] (torch 2.13, RTX 4090)."""
-    from torch.nn.attention.varlen import AuxRequest, varlen_attn
-    o, lse = varlen_attn(q, k, v, cu_q, cu_k, max_q, max_k, scale=scale, window_size=(-1, 0) if causal else (-1, -1),
-                         enable_gqa=True, seqused_k=used, return_aux=AuxRequest(lse=True))
+    [H, Tq] (torch 2.13, RTX 4090). The op varlen_attn (torch.nn.attention.varlen) runs, with the arguments it passes,
+    called directly: varlen_attn wraps it in a Python custom op and allocates a random-number state per call, host
+    time that an uncompiled pass 2 paid twice per layer (_cascade_varlen), more than the kernels took on a fast GPU."""
+    o, lse, *_ = torch.ops.aten._flash_attention_forward(
+        q, k, v, cu_q, cu_k, max_q, max_k, 0.0, causal, False, scale=scale, window_size_left=-1,
+        window_size_right=0 if causal else -1, seqused_k=used)
     return o, (lse.transpose(0, 1) if lse.shape == (q.shape[1], q.shape[0]) else lse).float()
 
 
@@ -765,7 +769,17 @@ def _cascade_varlen(q, k, v, kp, vp, tree, scale):
     if not tree.full:
         o_b = qf.new_zeros(B * S, H, d).index_copy_(0, tree.qi, o_b)
         l_b = torch.full((B * S, H), float("-inf"), device=q.device).index_copy_(0, tree.qi, l_b)
-    return _merge_attention(o_r, l_r, o_b, l_b).view(B, S, H, d)
+    return (_merge_fused() if tree.fused else _merge_attention)(o_r, l_r, o_b, l_b).view(B, S, H, d)
+
+
+@functools.cache
+def _merge_fused():
+    """_merge_attention compiled for _cascade_varlen (dynamic shapes; a GraphBackend that compiles, with Triton): one
+    kernel per layer instead of ~15 small ones (log-sum-exp, the two weights, casts, products, guards, sum, cast back),
+    which the uncompiled pass 2 launched one by one: on a fast GPU the GPU then waits for the host, and basal-2.0-mini's
+    40-question requests ran 0.90x as fast as the dense pass on an H100 (#39). The same operations in the same order in
+    fp32 (Inductor's exp is libdevice's, as ATen's). GraphBackend._warm_cascade compiles it at start-up."""
+    return torch.compile(_merge_attention, dynamic=True, fullgraph=True)
 
 
 def causal_sdpa(model):
@@ -947,6 +961,7 @@ class GraphBackend(EagerBackend):
     _out = None                   # Llama graphs: the output buffers their captures share (_shared_out)
     _side = None                  # the stream the captures warm up on (one: each new stream pins a cuBLAS workspace)
     _deferred = None              # warm(): graphs warmed up, captured the largest first (_capture_deferred)
+    fuse_merge = False            # the cascade's merge compiled (_merge_fused): with torch.compile on, Llama, Triton
 
     def __new__(cls, model_dir=None, *args, **kwargs):
         """GraphBackend(model_dir, ...) of a Qwen3.5 model (Gated DeltaNet and attention layers, from its config.json)
@@ -1095,6 +1110,8 @@ class GraphBackend(EagerBackend):
                     self.fwd = self.lean.forward
         # pass 2 with the lean layer: the trie as a FlexAttention mask (no dense mask, no repeated KV heads)
         self.flex = self.lean is not None and tree == "flex"
+        import importlib.util
+        self.fuse_merge = bool(compile) and importlib.util.find_spec("triton") is not None
         if compile and self.fwd == self._forward:  # fuse normalisation / rotary / activation kernels, capture graphs
             import torch._dynamo as dynamo
             dynamo.config.cache_size_limit = 64
@@ -1293,6 +1310,20 @@ class GraphBackend(EagerBackend):
                                                              if self.shared else []))
             if self.gemma is not None and self.flex and self.shared:
                 self._warm_pass2(n)
+        if self.shared and self.fuse_merge and self._cascade_why is None:
+            self._warm_cascade()
+
+    def _warm_cascade(self):
+        """Compile the cascade's merge (_merge_fused) at start-up, not in the first request that runs a cascade: on tiny
+        rows, without padding and with (the log-sum-exp of the branch part comes as the kernel returns it, or scattered
+        into a full-length one), the two layouts a cascade passes."""
+        H, (Hkv, d) = self.model.config.num_attention_heads, self.kv_shape
+        for seg in ([[0, 0, 1, 1]], [[0, 0, 1, 1], [0, 1, -1, -1]]):
+            seg = np.array(seg)
+            B, S = seg.shape
+            q = torch.zeros((B, H, S, d), dtype=self._dtype, device=self.dev)
+            k = torch.zeros((B, Hkv, S, d), dtype=self._dtype, device=self.dev)
+            _cascade_varlen(q, k, k, k, k, _varlen_tree(seg, [[-1, -1]] * B, [S] * B, S, self._to_dev, True), 1.0)
 
     def _warm_long_sfx(self):
         """Gemma 4: pass-2 graphs over the roots of the plain graphs longer than LENS (states of 3k-8k tokens: the
@@ -2099,7 +2130,8 @@ class GraphBackend(EagerBackend):
                     dst.copy_(src)
                 g2.replay()
         elif graph is None and self._cascades(n2):
-            h2 = self._forward_cascade(ids2, pos2, kv, _varlen_tree(seg2, par2, P, kv[0][0].shape[2], self._to_dev))
+            h2 = self._forward_cascade(ids2, pos2, kv, _varlen_tree(seg2, par2, P, kv[0][0].shape[2], self._to_dev,
+                                                                    self.fuse_merge))
         else:
             m2 = self._mask_from_seg(self._to_dev(seg2), par2)                             # [B, 1, S, S]
             Pr = self._to_dev(torch.tensor(P + [0] * (B - b)))
@@ -2395,7 +2427,8 @@ class GraphBackend(EagerBackend):
         seg2, par2 = np.array([[x - 1 for x in sg[P:]]]), [[-1 if q <= 0 else q - 1 for q in par[1:]]]
         if self._cascades(n):
             h2 = self._forward_cascade(np.array([t[P:]]), np.array([pp[P:]]), kv,
-                                       _varlen_tree(seg2, par2, [P], kv[0][0].shape[2], self._to_dev))[0]
+                                       _varlen_tree(seg2, par2, [P], kv[0][0].shape[2], self._to_dev,
+                                                    self.fuse_merge))[0]
         else:
             m2 = self._mask_from_seg(self._to_dev(torch.from_numpy(seg2)), par2)                # [1, 1, n, n]
             m2 = torch.cat([torch.zeros((1, 1, n, P), dtype=m2.dtype, device=self.dev), m2], -1)  # the root: visible
