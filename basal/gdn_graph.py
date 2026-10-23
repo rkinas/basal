@@ -196,7 +196,8 @@ def fla_record(path):
     from collections import Counter
     kernels = {}
     for name, t in sorted(_fla_autotuners().items()):
-        entries = [[list(k), _config_dict(c)] for k, c in t.cache.items()]
+        # (a key value JSON cannot hold is written as its str: that key then gets the kernel's default when pinned)
+        entries = [json.loads(json.dumps([list(k), _config_dict(c)], default=str)) for k, c in t.cache.items()]
         if entries:
             common = Counter(json.dumps(c, sort_keys=True) for _, c in entries).most_common(1)[0][0]
             kernels[name] = dict(default=json.loads(common), keys=entries)
