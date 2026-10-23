@@ -1,4 +1,4 @@
-"""Block-scaled FP8 (basal/fp8block.py, --mode fp8 --fp8-scaling block): 128 x 128 weight blocks and 1 x 128
+"""Block-scaled FP8 (basal/fp8block.py, --mode fp8 on basal-omni): 128 x 128 weight blocks and 1 x 128
 activation tiles with their own scales; on CPU the GEMM's maths dequantised, on CUDA the Triton kernel (equal to it,
 and the same output for a row whatever the rows around it)."""
 import pytest
@@ -6,6 +6,7 @@ import torch
 from transformers import Gemma4ForCausalLM, Gemma4TextConfig
 
 from basal import fp8block
+from basal.engine import FP8_BF16_LAYERS, fp8_scaling_of
 from basal.gemma4_graph import Gemma4Graph
 from basal.server import Server, parser
 
@@ -80,6 +81,37 @@ def test_gemma4_block_fp8_runs_close_to_bf16(kind, merge):
     # each FP8 product is off by 3-4% (e4m3 rounding of random weights); a random tiny model amplifies it layer after
     # layer (cosine with bf16 0.99 after the first layer, 0.88 after the sixth); a wrong scale would leave ~0
     assert torch.nn.functional.cosine_similarity(out.flatten(), ref.flatten(), 0) > 0.85
+
+
+@pytest.mark.parametrize("keep", [1, 2])
+def test_gemma4_block_fp8_keeps_the_edge_layers_in_bf16(keep):
+    """--fp8-bf16-layers: the first and the last `keep` layers keep their bf16 linears, the others are block FP8."""
+    m = tiny("31b")
+    g = Gemma4Graph(m, fp8="block", fp8_bf16_layers=keep)
+    fp8 = [isinstance(layer.mlp.down_proj, fp8block.BlockFP8Linear) for layer in m.model.layers]
+    assert fp8 == [keep <= i < 6 - keep for i in range(6)]
+    assert all(type(m.model.layers[i].self_attn.q_proj) is torch.nn.Linear for i in (0, 5))
+    every = Gemma4Graph(tiny("31b"), fp8="block").fp8
+    assert 0 < g.fp8 < every
+    ids = torch.randint(0, 64, (2, 13), generator=torch.Generator().manual_seed(1))
+    with torch.no_grad():
+        hf = m.model(input_ids=ids).last_hidden_state
+    assert torch.allclose(g.forward(ids), hf, atol=1e-4, rtol=1e-4)
+
+
+def test_fp8_scaling_auto_is_block_for_basal_omni_only():
+    assert fp8_scaling_of("auto", "fp8", True, False) == "block"
+    assert fp8_scaling_of("auto", "fp8", False, False) == "row"  # Llama: torchao's per-row FP8
+    assert fp8_scaling_of("auto", "fp8", True, True) == "row"  # an -FP8 checkpoint keeps its stored weights
+    assert fp8_scaling_of("auto", None, True, False) == "row"
+    assert fp8_scaling_of("row", "fp8", True, False) == "row" and fp8_scaling_of("block", "fp8", True, False) == "block"
+    a = parser().parse_args(["--mode", "fp8"])
+    assert a.fp8_scaling == "auto" and a.fp8_bf16_layers == FP8_BF16_LAYERS
+
+
+def test_negative_bf16_layers_refused():
+    with pytest.raises(SystemExit, match="--fp8-bf16-layers"):
+        Server(parser().parse_args(["--mode", "fp8", "--fp8-bf16-layers", "-1"]))
 
 
 def test_block_scaling_only_with_mode_fp8():

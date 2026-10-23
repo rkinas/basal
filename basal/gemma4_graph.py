@@ -168,7 +168,7 @@ class Gemma4Graph:
     BLOCK = 128   # "flex": block size of the block masks
     SMEM = None   # shared memory per block of the GPU (flex's tiles, _flex)
 
-    def __init__(self, model, kernels="math", compile=False, merge=False, fp8=None):
+    def __init__(self, model, kernels="math", compile=False, merge=False, fp8=None, fp8_bf16_layers=0):
         lm = self.lm = text_model(model)
         cfg = self.cfg = lm.config
         n = cfg.num_hidden_layers
@@ -205,7 +205,8 @@ class Gemma4Graph:
         self.flex = any(k != "math" for k in kernels.values())  # fa3 is flex where a mask is needed
         self.qkv, self.gu = {}, {}  # merged projections per layer: (linear, output sizes)
         self.merged = self._merge() if merge else 0
-        self.fp8 = self._fp8_block() if fp8 == "block" else 0  # after merging: a merged weight's parts are its blocks
+        # after merging: a merged weight's parts are its blocks
+        self.fp8 = self._fp8_block(fp8_bf16_layers) if fp8 == "block" else 0
         if compile or self.flex:  # flex: uncompiled code calls one compiled flex_attention (_flex_attention), an
             # entry per mask kind, head size and rows-only pass: 13 for mini's long states, past the default 8, after
             # which flex_attention runs its unfused reference (fast-nocompile, 2026-10-20)
@@ -256,12 +257,13 @@ class Gemma4Graph:
         return n
 
     @torch.no_grad()
-    def _fp8_block(self):
+    def _fp8_block(self, keep=0):
         """Block-scaled FP8 weights (basal/fp8block.py: 128 x 128 blocks, activations in 1 x 128 tiles) for the
         projections the layers run: q / k / v / o and gate / up / down, merged or not (every size is a multiple of 128,
         so a merged weight's blocks are its parts' blocks; the parts become views of it and transformers' forward of
         the model still runs). The per-layer input projections (E2B / E4B), the embeddings and the head stay as loaded.
-        Layer by layer, so the bf16 weights are freed as it goes (31B: 59 GB -> 31 GB). -> the number of GEMMs."""
+        Layer by layer, so the bf16 weights are freed as it goes (31B: 59 GB -> 31 GB). The first `keep` and the last
+        `keep` layers stay bf16 (--fp8-bf16-layers). -> the number of GEMMs."""
         from .fp8block import BLOCK, BlockFP8Linear, fits, sm90
         sm90()  # which GEMM the layers run, decided before they are compiled
         n = 0
@@ -277,6 +279,8 @@ class Gemma4Graph:
             return f
 
         for i, layer in enumerate(self.layers):
+            if i < keep or i >= len(self.layers) - keep:
+                continue
             a, m = layer.self_attn, layer.mlp
             names = ["q_proj"] + (["k_proj"] + (["v_proj"] if a.v_proj is not None else []) if self.own[i] else [])
             if ok(self.qkv.get(i)):

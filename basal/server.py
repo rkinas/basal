@@ -42,8 +42,8 @@ from pathlib import Path
 import torch
 
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
-                     MLXBackend, MPSBackend, OllamaBackend, SGLangBackend, VLLM_PRESETS, VLLMBackend, fp8_refused,
-                     gemma_fast_kernels, recurrent_layers, recurrent_refused, resolve, set_fp8_fast_accum)
+                     FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend, VLLM_PRESETS, VLLMBackend,
+                     fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused, resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .facts import inject as inject_facts
 from . import tasks
@@ -699,8 +699,10 @@ class Server:
         refuse_lean_flex(a.lean, a.tree)
         if getattr(a, "batches", "default") not in ("default", "auto") and kind not in ("graph", "exit"):
             raise SystemExit("--batches needs the CUDA graph engine (fast, fast-nocompile, fast-exit, fp8, nvfp4)")
-        if getattr(a, "fp8_scaling", "row") == "block" and (a.quant or quant) != "fp8":
+        if getattr(a, "fp8_scaling", "auto") == "block" and (a.quant or quant) != "fp8":
             raise SystemExit("--fp8-scaling block needs --mode fp8")
+        if getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS) < 0:
+            raise SystemExit("--fp8-bf16-layers: give 0 or more layers")
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
         attn = getattr(a, "attn", "auto")
@@ -773,7 +775,8 @@ class Server:
                                         readout_layer=getattr(a, "readout_layer", "off"),
                                         template=getattr(a, "template_prefix", "off"),
                                         gemma_attn=getattr(a, "gemma_attn", "auto"),
-                                        fp8_scaling=getattr(a, "fp8_scaling", "row"))
+                                        fp8_scaling=getattr(a, "fp8_scaling", "auto"),
+                                        fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS))
         self.tok = self.backend.tok
         self.states_cached = bool(getattr(a, "state_cache_gb", 0))  # --state-cache-gb: requests are cut at their state
         model = getattr(self.backend, "model", None)  # evidence head: needs the in-process HF model
@@ -1482,9 +1485,13 @@ def add_engine_args(ap):
                     help="CUDA graph engine with compact rows: the template prefix of the prompts (chat template, system "
                          "prompt, the user header up to the state) is computed once at start-up and every prompt runs "
                          "only its own tokens over its keys and values (auto: on)")
-    ap.add_argument("--fp8-scaling", dest="fp8_scaling", choices=["row", "block"], default="row",
+    ap.add_argument("--fp8-scaling", dest="fp8_scaling", choices=["auto", "row", "block"], default="auto",
                     help="--mode fp8: row = torchao, one scale per token and per weight row; block = scales per 128 x "
-                         "128 weight block and per 128 features of each token, one Triton GEMM (basal-omni only)")
+                         "128 weight block and per 128 features of each token (basal-omni only); auto: block for "
+                         "basal-omni, row otherwise")
+    ap.add_argument("--fp8-bf16-layers", dest="fp8_bf16_layers", type=int, default=FP8_BF16_LAYERS,
+                    help="--mode fp8 with block scaling: the first and the last this many decoder layers keep bf16 "
+                         f"weights (default {FP8_BF16_LAYERS}; 0 = every layer in FP8)")
     ap.add_argument("--fp8-accum", dest="fp8_accum", choices=["fast", "full"], default="fast",
                     help="FP8 checkpoints in the CUDA graph engine: cuBLAS fast accumulation (rounding depends on the "
                          "batch's kernel) or full accumulation (decisions independent of batching, as --deterministic)")
