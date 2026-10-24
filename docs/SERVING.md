@@ -144,6 +144,27 @@ benchmarking a GPU.
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md).
 
+## Attach a model that was not trained on basal
+
+`basal-attach` (2.5) serves a chat model that was never trained on basal decisions, a Gemma 4 or Qwen model for
+example, without retraining:
+
+```bash
+basal-attach Qwen/Qwen3-4B --out qwen3-4b-basal          # links the model's files, writes basal.json + CALIBRATION.json
+basal-serve --model qwen3-4b-basal --mode eager
+basal-calibrate labelled.jsonl --model qwen3-4b-basal --mode eager --out CALIBRATION.custom.json
+basal-serve --model qwen3-4b-basal --mode eager --calibration CALIBRATION.custom.json
+```
+
+- `basal.json` gets prompt format 1 by default (options A-J with an answer instruction, which a model not trained on
+  basal follows best), or 2 with `--format 2` (up to 255 options). basal-attach checks that every option code of the
+  format is one token at the answer position of the model's chat template, and refuses the format otherwise.
+- A tokenizer without a chat template gets a plain one (`chat_template.jinja`), or yours with `--chat-template`.
+- The model starts uncalibrated: temperatures 1.0 and no certified thresholds, so `max_error` defers every automatic
+  action and `act` answers say `"calibration": "unvalidated"`. `basal-calibrate` on a few hundred of your labelled
+  requests fits its temperatures and certifies its thresholds ([CALIBRATION.md](CALIBRATION.md)).
+- Expect lower accuracy than a basal model of the same size: the model reads the options zero-shot.
+
 ## Inference on a JSONL file
 
 `basal-run` sends every line of a JSONL file to a running server (concurrently; the server batches the requests) and

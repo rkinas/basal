@@ -49,6 +49,7 @@ basal-run = "basal.run:main"
 basal-export-gguf = "basal.gguf_export:main"
 basal-mcp = "basal.mcp_server:main"
 basal-calibrate = "basal.calibrate:main"
+basal-attach = "basal.attach:main"
 basal-viz = "basal.viz:main"
 
 [tool.setuptools]
