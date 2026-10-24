@@ -16,7 +16,9 @@ Backends:
   VLLMBackend       vLLM: bf16 checkpoints, ModelOpt FP8 / NVFP4 ports, a repeatable preset, basal-omni media
   SGLangBackend     SGLang offline engine (1.5): the same letter readout from the log-probabilities of the option tokens
   MLXBackend        Apple Silicon, MLX / mlx-lm (1.5): MLX fp8 / fp4 exports or bf16 weights (optional 8-bit at load
-                    time); shared-prefix KV cache
+                    time); shared-prefix KV cache; opt-in (2.5, --mlx-forward basal) for Llama and Gemma 4:
+                    basal/mlx_forward.py, the last layers at the readout rows only, merged projections checked bit for
+                    bit at load
   GGUFBackend       a GGUF file in process through llama.cpp (llama-cpp-python; Metal, CUDA or CPU); shared prefix as
                     llama.cpp sequences
   OllamaBackend     Ollama with the GGUF exports (1.5): raw prompt, one token, top log-probabilities of the letters
@@ -2852,7 +2854,14 @@ class MLXBackend:
     and its own earlier tokens only, so every readout equals a separate forward of its prompt; the packed row sums in a
     different order, so in bf16 / quantised weights its probabilities differ slightly from the KV-cache path (identical
     decisions in fp32) and the shipped CALIBRATION.mlx.json was fitted on the KV-cache path. All MLX work runs on one
-    dedicated thread (the server calls the backend from an executor)."""
+    dedicated thread (the server calls the backend from an executor).
+
+    forward="mlx-lm" (the default) is mlx-lm's forward, as before 2.5. forward="basal" (opt-in, basal-serve --mlx-forward
+    basal, 2.5): Llama and Gemma 4 decoders run through basal/mlx_forward.py, which reads the same modules and weights
+    but runs the layers from the last one with its own keys and values on at the readout rows only (a prefix stops
+    after that layer's keys and values), starts the GPU early (mx.async_eval) and merges the projections that read one
+    input where a self-check at load finds the same bits; the probabilities equal mlx-lm's forward up to float rounding
+    (not bit for bit). Other architectures keep mlx-lm's forward."""
 
     MAX_ROWS = 16      # suffix rows per forward
     TOKEN_BUDGET = 8192  # rows x padded length per forward without a shared prefix
@@ -2862,24 +2871,29 @@ class MLXBackend:
     # (TOKEN_BUDGET) gave 9-11% fewer decisions/s than chunks of 2,048 tokens (44 bench examples, two orders)
     CACHE_BYTES = 2 << 30  # MLX buffer cache limit (and wired headroom above the weights)
 
-    def __init__(self, model_dir, max_rows=None, quant=None, packed=False):
+    FORWARDS = ("mlx-lm", "basal")
+
+    def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm"):
         from concurrent.futures import ThreadPoolExecutor
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
         self.max_rows = max_rows or self.MAX_ROWS
-        self.pool.submit(self._load, Path(model_dir), quant, packed).result()
+        self.pool.submit(self._load, Path(model_dir), quant, packed, forward).result()
 
-    def _load(self, md, quant=None, packed=False):
+    def _load(self, md, quant=None, packed=False, forward="mlx-lm"):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
-        load time from bf16 weights (the embeddings and the LM head stay bf16); the -MLX-8bit exports need no quant."""
+        load time from bf16 weights (the embeddings and the LM head stay bf16); the -MLX-8bit exports need no quant.
+        forward: "mlx-lm" or "basal" (basal/mlx_forward.py where the architecture allows)."""
         import mlx.core as mx
         from mlx_lm.utils import load_model
         self.mx = mx
         cfg = json.loads((md / "config.json").read_text(encoding="utf-8"))
         if quant not in (None, "q8"):
             raise ValueError(f"unknown MLX quantisation {quant!r} (q8)")
+        if forward not in self.FORWARDS:
+            raise ValueError(f"unknown MLX forward {forward!r} ({', '.join(self.FORWARDS)})")
         # lazy for q8: the weights are materialised once, after quantisation (never the full bf16 copy)
         self.model, self.config = load_model(md, lazy=bool(quant), model_config=mlx_config_overrides(cfg))
         # the final logit softcap of the decoder (Gemma) is applied to the fp32 code logits
@@ -2903,6 +2917,11 @@ class MLXBackend:
             rec = mx.device_info().get("max_recommended_working_set_size", weights)
             mx.set_wired_limit(min(rec, weights + self.CACHE_BYTES))
         mx.set_cache_limit(self.CACHE_BYTES)
+        self.fwd = None  # basal/mlx_forward.py, before the packed rows wrap the RoPE layers
+        if forward == "basal":
+            from .mlx_forward import MLXForward
+            self.fwd = MLXForward.build(self.lm)
+        self.forward = f"basal ({self.fwd.describe()})" if self.fwd else "mlx-lm"
         self.packed = bool(packed) and self._position_rope()
 
     @staticmethod
@@ -2993,6 +3012,8 @@ class MLXBackend:
         B, S = len(rows), max(map(len, rows))
         pad = self.tok.pad_token_id
         ids = mx.array([list(r) + [pad] * (S - len(r)) for r in rows])
+        if self.fwd is not None:
+            return self.fwd.hidden(ids, mx.array([[len(r) - 1] for r in rows]), past=prefix)[:, 0]
         cache = None
         if prefix is not None:
             cache = []
@@ -3008,6 +3029,10 @@ class MLXBackend:
         from mlx_lm.models.cache import KVCache, make_prompt_cache
         # plain caches: a sliding-window layer (Gemma 4) gets a rotating cache from mlx-lm, which keeps only the last
         # window of the prefix; here every layer keeps the whole prefix and the window is applied by the mask
+        if self.fwd is not None:
+            kv = self.fwd.prefix(mx.array([toks]))
+            mx.eval(kv)
+            return kv
         cache = [KVCache() for _ in make_prompt_cache(self.model)]
         self.lm.model(mx.array([toks]), cache=cache)
         kv = [(c.keys[..., : c.offset, :], c.values[..., : c.offset, :]) for c in cache]
@@ -3038,6 +3063,12 @@ class MLXBackend:
         si, sj = seg[:, :, None], seg[:, None, :]
         mask = mx.tril(mx.ones((L, L), dtype=mx.bool_)) & (sj >= 0) & ((sj == 0) | (sj == si))
         mask = mask | mx.eye(L, dtype=mx.bool_)
+        if self.fwd is not None:  # every row's readouts, padded with its last one
+            R = max(len(r[3]) for r in rows)
+            h = self.fwd.hidden(ids, mx.array([r[3] + r[3][-1:] * (R - len(r[3])) for r in rows]), pos=pos,
+                                mask=mask[:, None])
+            return h[mx.array([b for b, r in enumerate(rows) for _ in r[3]]),
+                     mx.array([k for r in rows for k in range(len(r[3]))])]
         h = self.lm.model(ids, cache=[_PackedRow(pos, mask[:, None])] * len(self.lm.model.layers))
         return h[mx.array([b for b, r in enumerate(rows) for _ in r[3]]), mx.array([j for r in rows for j in r[3]])]
 

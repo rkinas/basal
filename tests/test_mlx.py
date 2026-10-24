@@ -1,11 +1,14 @@
 """MLX backend: equals the PyTorch readout (tiny random Llama with the basal layout: attention and MLP biases, untied
 head, grouped KV heads, transformers-5 `rope_parameters`), with a shared prefix (SOAM group), for unrelated prompts and
-with 8-bit weights made at load time (mlx-q8)."""
+with 8-bit weights made at load time (mlx-q8); through mlx-lm's forward (the default) and basal's own
+(basal/mlx_forward.py, --mlx-forward basal)."""
 import pytest
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from basal.engine import MLXBackend, mlx_config_overrides
+
+FORWARDS = pytest.mark.parametrize("forward", MLXBackend.FORWARDS)
 
 
 def tiny_llama(path, rope=None):
@@ -38,11 +41,12 @@ class _Tok:
     pad_token_id = 0
 
 
-def mlx_stub(path, quant=None, packed=False):
+def mlx_stub(path, quant=None, packed=False, forward="mlx-lm"):
     from concurrent.futures import ThreadPoolExecutor
     be = MLXBackend.__new__(MLXBackend)  # no tokenizer files in the tiny model directory
     be.pool, be.tok, be.max_rows = ThreadPoolExecutor(max_workers=1), _Tok(), 3
-    be.pool.submit(be._load, path, quant, packed).result()
+    be.pool.submit(be._load, path, quant, packed, forward).result()
+    assert be.forward.split()[0] == ("mlx-lm" if be.fwd is None else "basal")
     return be
 
 
@@ -60,10 +64,12 @@ TOKS = [STATE + [5, 6, 10, 11], STATE + [5, 6, 11, 10], STATE + [7, 8, 9, 10, 11
 LIDS = [[10, 11], [10, 11], [10, 11, 12], [10, 11, 12], [10, 11, 12, 13]]
 
 
-def test_mlx_equals_torch(tmp_path):
+@FORWARDS
+def test_mlx_equals_torch(tmp_path, forward):
     pytest.importorskip("mlx.core")
     m = tiny_llama(tmp_path)
-    be = mlx_stub(tmp_path)
+    be = mlx_stub(tmp_path, forward=forward)
+    assert (be.fwd is None) is (forward == "mlx-lm")
     ref = reference(m, TOKS, LIDS)
     got = be.run_shared([(TOKS, LIDS)])[0]
     for r, g in zip(ref, got):
@@ -80,14 +86,17 @@ def test_mlx_equals_torch(tmp_path):
     assert max(abs(x - y) for x, y in zip(mixed[1][1], ref[1])) < 2e-4
 
 
-def test_mlx_without_override_differs(tmp_path):
+@FORWARDS
+def test_mlx_without_override_differs(tmp_path, forward):
     """Guard for the override: with mlx-lm's default rope_theta (10000) the readout changes."""
     pytest.importorskip("mlx.core")
     from mlx_lm.utils import load_model
+    from basal.mlx_forward import MLXForward
     m = tiny_llama(tmp_path)
     toks, lids = [list(range(21, 61)) * 3 + [5]], [[10, 11, 12, 13]]
-    be = mlx_stub(tmp_path)
+    be = mlx_stub(tmp_path, forward=forward)
     be.model, _ = load_model(tmp_path)  # no override
+    be.fwd = MLXForward.build(be.lm) if be.fwd else None
     assert max(abs(x - y) for x, y in zip(reference(m, toks, lids)[0], be.run(toks, lids)[0])) > 1e-3
 
 
@@ -108,7 +117,8 @@ def test_mlx_q8_quantises_decoder_blocks_only(tmp_path):
         mlx_stub(tmp_path, "q4")
 
 
-def test_mlx_reads_255_format2_codes(tmp_path):
+@FORWARDS
+def test_mlx_reads_255_format2_codes(tmp_path, forward):
     """Prompt format 2: up to 255 option codes, read from the head's logits at the prefill position (the code ids of the
     255-option test vector, docs/format2_vectors.jsonl), for a SOAM group of a 255-option question in two orders and a
     2-option question over the same state, against the PyTorch readout."""
@@ -131,7 +141,7 @@ def test_mlx_reads_255_format2_codes(tmp_path):
                 p.normal_(0, 0.1)
         m.lm_head.weight.mul_(20.0)  # spread the code logits, so that a wrong column or order would show
     m.save_pretrained(tmp_path)
-    be = mlx_stub(tmp_path)
+    be = mlx_stub(tmp_path, forward=forward)
     state = list(range(100, 400))
     toks = [state + list(range(500, 760)) + [7], state + list(range(760, 500, -1)) + [7], state + [9, 8, 7]]
     lids = [codes, codes, codes[:2]]
@@ -168,20 +178,22 @@ def test_mlx_code_logits_in_fp32(tmp_path):
     assert np.abs(z16[0, [10, 11]] - W[[10, 11]] @ hf[0]).max() > 1e-3  # the bf16 head output is coarser
 
 
-def tiny_gemma4(path):
+def tiny_gemma4(path, **kw):
     """A tiny random Gemma 4 decoder with the parts of basal-omni (Gemma 4 E4B): sliding-window and global layers
     (wider global heads, partial "proportional" rotary), per-layer inputs, KV sharing of the last layers, tied head and
-    the final logit softcap; the head is scaled so that the softcap changes the code probabilities."""
+    the final logit softcap; the head is scaled so that the softcap changes the code probabilities. kw: other config
+    values (the 31B layout: attention_k_eq_v=True, no per-layer inputs, no KV sharing)."""
     from transformers import Gemma4ForCausalLM, Gemma4TextConfig
     torch.manual_seed(0)
-    cfg = Gemma4TextConfig(vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=6,
-                           num_attention_heads=4, num_key_value_heads=2, head_dim=16, global_head_dim=32,
-                           sliding_window=16, layer_types=["sliding_attention", "sliding_attention", "full_attention"] * 2,
-                           vocab_size_per_layer_input=64, hidden_size_per_layer_input=8, num_kv_shared_layers=2,
-                           final_logit_softcapping=30.0, max_position_embeddings=1024,
-                           rope_parameters={"full_attention": {"rope_type": "proportional", "partial_rotary_factor": 0.25,
-                                                               "rope_theta": 1000000.0},
-                                            "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0}})
+    cfg = Gemma4TextConfig(**{**dict(
+        vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=6, num_attention_heads=4,
+        num_key_value_heads=2, head_dim=16, global_head_dim=32, sliding_window=16,
+        layer_types=["sliding_attention", "sliding_attention", "full_attention"] * 2, vocab_size_per_layer_input=64,
+        hidden_size_per_layer_input=8, num_kv_shared_layers=2, final_logit_softcapping=30.0,
+        max_position_embeddings=1024,
+        rope_parameters={"full_attention": {"rope_type": "proportional", "partial_rotary_factor": 0.25,
+                                            "rope_theta": 1000000.0},
+                         "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0}}), **kw})
     m = Gemma4ForCausalLM(cfg).eval()
     with torch.no_grad():
         m.model.embed_tokens.weight.mul_(300.0)  # tied head: large code logits, which the softcap bends
@@ -189,12 +201,18 @@ def tiny_gemma4(path):
     return m
 
 
-def test_mlx_gemma4_equals_torch(tmp_path):
+GEMMA_31B = dict(attention_k_eq_v=True, hidden_size_per_layer_input=0, num_kv_shared_layers=0)
+
+
+@FORWARDS
+@pytest.mark.parametrize("layout", ["e4b", "31b"])
+def test_mlx_gemma4_equals_torch(tmp_path, forward, layout):
     """Gemma 4 (basal-omni): the readout applies the final logit softcap, and a shared prefix longer than the sliding
-    window (120 tokens, window 16) keeps every position (mlx-lm's rotating cache would keep the last window only)."""
+    window (120 tokens, window 16) keeps every position (mlx-lm's rotating cache would keep the last window only). The
+    E4B layout and the 31B one (keys as values in the global layers, no per-layer inputs, no KV sharing)."""
     pytest.importorskip("mlx.core")
-    m = tiny_gemma4(tmp_path)
-    be = mlx_stub(tmp_path)
+    m = tiny_gemma4(tmp_path, **(GEMMA_31B if layout == "31b" else {}))
+    be = mlx_stub(tmp_path, forward=forward)
     assert be.softcap == 30.0
     ref = reference(m, TOKS, LIDS)
     got = be.run_shared([(TOKS, LIDS)])[0]
@@ -204,6 +222,8 @@ def test_mlx_gemma4_equals_torch(tmp_path):
     sl = [[10, 11], [12, 13, 14], [10, 15]]
     for r, g in zip(reference(m, singles, sl), be.run(singles, sl)):
         assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
+    if layout == "31b":
+        return
     be.softcap = None  # guard: without the softcap the probabilities differ
     assert max(abs(x - y) for r, g in zip(ref, be.run_shared([(TOKS, LIDS)])[0]) for x, y in zip(r, g)) > 1e-2
 
@@ -219,14 +239,15 @@ def test_gemma4_per_layer_config_override():
     assert mlx_config_overrides({"text_config": {**t, "global_head_dim": 512}}) == {}
 
 
-def test_mlx_packed_rows_equal_kv_cache(tmp_path):
+@FORWARDS
+def test_mlx_packed_rows_equal_kv_cache(tmp_path, forward):
     """--mlx-packed, Llama: a group whose prefix and suffixes fit in PACK_TOKENS runs as one packed row (explicit
     positions, block mask), several groups of different lengths in one padded batch; the readouts equal the KV-cache
     path (PACK_TOKENS = 0) and the PyTorch readout. Without the flag (the default) and for Gemma 4 the KV cache stays."""
     pytest.importorskip("mlx.core")
     m = tiny_llama(tmp_path)
-    assert not mlx_stub(tmp_path).packed  # opt-in
-    be = mlx_stub(tmp_path, packed=True)
+    assert not mlx_stub(tmp_path, forward=forward).packed  # opt-in
+    be = mlx_stub(tmp_path, packed=True, forward=forward)
     assert be.packed
     q2 = [list(range(30, 60)) + [4, 10, 11], list(range(30, 60)) + [4, 11, 10]]  # a shorter question, two orders
     groups = [(TOKS, LIDS), (q2, LIDS[:2]), (TOKS[2:4], LIDS[2:4])]
@@ -274,9 +295,126 @@ def test_mlx_packed_needs_static_rope(tmp_path, rope, packed):
     readouts as PyTorch."""
     pytest.importorskip("mlx.core")
     m = tiny_llama(tmp_path, rope)
-    be = mlx_stub(tmp_path, packed=True)
+    be = mlx_stub(tmp_path, packed=True, forward="basal")
     assert be.packed is packed
+    assert (be.fwd is not None) is packed  # basal's forward needs the same static RoPE
     groups = [(TOKS[:2], LIDS[:2])]
     got = be.run_shared(groups)
     for r, x in zip(reference(m, *groups[0]), got[0]):
         assert max(abs(a - b) for a, b in zip(r, x)) < 2e-4
+
+
+MODELS = {"llama": tiny_llama, "gemma4": tiny_gemma4, "gemma4-31b": lambda path: tiny_gemma4(path, **GEMMA_31B)}
+
+
+def mlx_decoder(path):
+    """The mlx-lm decoder of a model directory, as MLXBackend loads it."""
+    import json
+    from mlx_lm.utils import load_model
+    model, _ = load_model(path, model_config=mlx_config_overrides(json.loads((path / "config.json").read_text())))
+    return model, getattr(model, "language_model", model)
+
+
+SINGLES = [list(range(1, 40)), list(range(5, 64)) * 2, [9, 8, 7, 6, 5, 4, 3, 2]]
+
+
+def padded(rows):
+    import mlx.core as mx
+    S = max(map(len, rows))
+    return mx.array([r + [0] * (S - len(r)) for r in rows]), mx.array([[len(r) - 1] for r in rows])
+
+
+@pytest.mark.parametrize("arch", MODELS)
+@pytest.mark.parametrize("dtype", ["fp32", "bf16"])
+def test_mlx_forward_equals_mlx_lm(tmp_path, arch, dtype):
+    """basal/mlx_forward.py with separate projections: every layer at every position (full=True) is mlx-lm's forward
+    bit for bit, for right-padded rows, for a shared prefix's keys and values and for rows that continue it; the
+    readout rows (the last layers at those rows only) are within float rounding of it."""
+    mx = pytest.importorskip("mlx.core")
+    from mlx_lm.models.cache import KVCache, make_prompt_cache
+    from basal.mlx_forward import MLXForward, bits_equal
+    m = MODELS[arch](tmp_path)
+    if dtype == "bf16":
+        m.to(torch.bfloat16).save_pretrained(tmp_path)
+    model, lm = mlx_decoder(tmp_path)
+    fwd = MLXForward(lm, merge=False)
+    assert fwd.last == (3 if arch == "gemma4" else len(fwd.layers) - 1)  # E4B layout: the last 2 of 6 share keys
+    tol = 1e-6 if dtype == "fp32" else 2 ** -7  # bf16: one rounding step (equal bits on an M4 Pro)
+
+    def close(a, b):
+        a, b = a.astype(mx.float32), b.astype(mx.float32)
+        return mx.all(mx.abs(a - b) <= tol * (1 + mx.abs(b))).item()
+
+    ids, ro = padded(SINGLES)
+    ref = lm.model(ids)[mx.arange(len(SINGLES)), ro[:, 0]]
+    assert bits_equal(fwd.hidden(ids, ro, full=True)[:, 0], ref)
+    assert close(fwd.hidden(ids, ro)[:, 0], ref)
+    state = TOKS[0][:120]
+    cache = [KVCache() for _ in make_prompt_cache(model)]
+    lm.model(mx.array([state]), cache=cache)
+    kv_ref = [(c.keys[..., : c.offset, :], c.values[..., : c.offset, :]) for c in cache]
+    kv = fwd.prefix(mx.array([state]))
+    assert len(kv) == len(kv_ref) and all(bits_equal(a, b) for x, y in zip(kv, kv_ref) for a, b in zip(x, y))
+    ids, ro = padded([t[120:] for t in TOKS])
+    B = len(TOKS)
+    cache = []
+    for k, v in kv_ref:
+        c = KVCache()
+        c.keys, c.values, c.offset = mx.repeat(k, B, axis=0), mx.repeat(v, B, axis=0), k.shape[2]
+        cache.append(c)
+    ref = lm.model(ids, cache=cache)[mx.arange(B), ro[:, 0]]
+    assert bits_equal(fwd.hidden(ids, ro, past=kv, full=True)[:, 0], ref)
+    assert close(fwd.hidden(ids, ro, past=kv)[:, 0], ref)
+
+
+@pytest.mark.parametrize("arch", MODELS)
+def test_mlx_forward_merges_checked_projections(tmp_path, arch, monkeypatch):
+    """Merged projections: the separate layers keep views of the merged arrays (the loaded weights, bit for bit), the
+    merged forward equals the separate one bit for bit, and a self-check that finds other bits keeps the separate
+    layers (and says so in the start-up line)."""
+    mx = pytest.importorskip("mlx.core")
+    from mlx.utils import tree_flatten
+    import basal.mlx_forward as mf
+    m = MODELS[arch](tmp_path)
+    m.to(torch.bfloat16).save_pretrained(tmp_path)
+    _, lm = mlx_decoder(tmp_path)
+    loaded = dict(tree_flatten(lm.parameters()))
+    fwd = mf.MLXForward(lm)
+    assert set(fwd.checks) == {"q/k/v", "k/v", "gate/up"} - ({"k/v"} if arch == "gemma4-31b" else set())
+    merged = [g for g in fwd.qkv + fwd.gu if g is not None and g.cat is not None]
+    assert merged and fwd.checks["gate/up"] == "merged"
+    assert all(mf.bits_equal(loaded[k], v) for k, v in tree_flatten(lm.parameters()))
+    for g in merged:
+        for mod, (a, b) in zip(g.mods, zip([0] + g.cuts, g.cuts + [None])):
+            assert mf.bits_equal(mod.weight, g.cat.weight[a:b])
+    _, lm0 = mlx_decoder(tmp_path)
+    sep = mf.MLXForward(lm0, merge=False)
+    assert sep.checks == {} and "readout rows from layer" in sep.describe()
+    ids, ro = padded(SINGLES)
+    for full in (False, True):
+        assert mf.bits_equal(fwd.hidden(ids, ro, full=full), sep.hidden(ids, ro, full=full))
+    monkeypatch.setattr(mf, "bits_equal", lambda a, b: False)
+    _, lm1 = mlx_decoder(tmp_path)
+    kept = mf.MLXForward(lm1)
+    assert all(g is None or g.cat is None for g in kept.qkv + kept.gu)
+    assert set(kept.checks.values()) == {"kept (bits differ at 1 x 1)"} and "gate/up kept" in kept.describe()
+    monkeypatch.undo()
+    assert all(mf.bits_equal(loaded[k], v) for k, v in tree_flatten(lm1.parameters()))
+
+
+def test_mlx_forward_flag(monkeypatch, tmp_path):
+    """--mlx-forward: mlx-lm by default, basal on request (needs --mode mlx); an unknown value is refused at load."""
+    import sys
+    from basal import server as server_module
+    assert server_module.parser().parse_args([]).mlx_forward == "mlx-lm"
+    assert server_module.parser().parse_args(["--mlx-forward", "basal"]).mlx_forward == "basal"
+    with pytest.raises(SystemExit):
+        server_module.parser().parse_args(["--mlx-forward", "fast"])
+    monkeypatch.setattr(sys, "argv", ["basal-serve", "--mode", "eager", "--mlx-forward", "basal"])
+    monkeypatch.setattr(server_module, "resolve", lambda *_, **__: pytest.fail("must reject before loading a model"))
+    with pytest.raises(SystemExit, match="--mlx-forward needs --mode mlx"):
+        server_module.main()
+    pytest.importorskip("mlx.core")
+    tiny_llama(tmp_path)
+    with pytest.raises(ValueError, match="unknown MLX forward"):
+        mlx_stub(tmp_path, forward="fast")
