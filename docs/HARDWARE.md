@@ -562,6 +562,82 @@ cool-down; *TV*: mean / max total-variation distance to fp32, *changed*: decisio
 
 Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurements in `docs/figures/apple_engines.json`.
 
+### Apple M4 (state cache on `--mode mlx`)
+
+`--state-cache-gb N` and `--prefix-cache on` work on `--mode mlx` the same way as on the CUDA graph engine. The keys
+and values of a request's state (or of the template prefix) are kept across requests. A state that begins with a cached
+one computes only its new tokens.
+
+Measured on a MacBook Air (Apple M4, 8-core GPU, 16 GB, fanless), macOS 26.5.2, MLX 0.32.4, mlx-lm 0.32.2, mains power.
+Setup: the `-MLX-8bit` ports, two option orders, served over HTTP, one client, requests in dataset order after a
+warm-up. Every workload ran in ABBA order (off, cache, cache, off), because the fanless M4 slows down within a long run.
+Four public datasets:
+
+- **BAN-PL** (NASK, CC BY 4.0, `BAN-PL_1`): a moderation policy of 2,083 tokens, then one short Wykop.pl comment
+  (median 113 characters), and one `choice`: remove or keep. Every state begins with the same policy, so each comment
+  continues the cached entry of the previous one. 100 comments, half of them harmful.
+- **MultiRC** (SuperGLUE, validation): one request per question about a paragraph, with its candidate answers as
+  `noul` questions over the paragraph, so the state repeats across requests. 4.5B: 10 paragraphs, 100 requests, 451
+  decisions. mini: 20 paragraphs, 222 requests, 1,153 decisions.
+- **MultiWOZ 2.2** (dev): one request per user turn. The state is the dialogue so far, so each state begins with the
+  previous one (an agent trace or chat history). One `choice` of the service the last message concerns. 4.5B: 10
+  dialogues, 79 requests. mini: 15 dialogues, 120 requests.
+- **MASSIVE pl-PL** (test): short Polish voice-assistant commands, one `choice` of the scenario (18 options). Only the
+  template prefix repeats. 4.5B: 100 requests. mini: 200.
+
+p50 of the client's wall time per request (the median over both runs of each configuration):
+
+| model | workload | off | cache | speed-up | top answers same | at margin >= 0.2 | \|dp\| median / p99 / max |
+|---|---|---|---|---|---|---|---|
+| basal-2.0 (4.5B) | BAN-PL `--state-cache-gb 1` | 13,724 ms | **907 ms** | **15.1x** | 100 / 100 | 1.000 | 0.002 / 0.029 / 0.034 |
+| | MultiRC `--state-cache-gb 1` | 4,217 ms | **1,601 ms** | **2.6x** | 451 / 451 | 1.000 | 0.002 / 0.019 / 0.115 |
+| | MultiWOZ `--state-cache-gb 1` | 2,697 ms | **1,748 ms** | **1.5x** | 79 / 79 | 1.000 | 0.000 / 0.012 / 0.023 |
+| | MASSIVE pl `--prefix-cache on` | 980 ms | 873 ms | 1.12x | 100 / 100 | 1.000 | 0.000 / 0.015 / 0.047 |
+| basal-2.0-mini | BAN-PL `--state-cache-gb 1` | 3,995 ms | **292 ms** | **13.7x** | 100 / 100 | 1.000 | 0.002 / 0.019 / 0.022 |
+| | MultiRC `--state-cache-gb 1` | 1,376 ms | **509 ms** | **2.7x** | 1,147 / 1,153 | 1.000 | 0.002 / 0.018 / 0.037 |
+| | MultiWOZ `--state-cache-gb 1` | 831 ms | **571 ms** | **1.5x** | 119 / 120 | 1.000 | 0.000 / 0.013 / 0.022 |
+| | MASSIVE pl `--prefix-cache on` | 316 ms | 278 ms | 1.13x | 196 / 200 | 1.000 | 0.000 / 0.016 / 0.058 |
+
+The speed-up follows the share of a request's work that comes from the cache. In BAN-PL the policy is almost the whole
+prompt, so only the comment and the question are computed. In MultiRC the 4-7 questions of a request, in two orders,
+are about half the work of the request even without the state: five of these requests with the state replaced by "."
+took 44-60% of their full time on 4.5B. The cache cannot remove that half.
+
+MultiWOZ by the length of the dialogue so far (state tokens). A state shares a cached prefix only from one full block of
+the prefix index (256 tokens) on. Shorter dialogues cannot hit, and they pay the cache's extra work (the state stored, a
+second forward over it): 0.96x. Above that, a cached step costs about the same whatever the length of the dialogue,
+while without the cache it grows with it:
+
+| model | state tokens | turns | off | cache | speed-up |
+|---|---|---|---|---|---|
+| basal-2.0 (4.5B) | < 256 | 36 | 1,970 ms | 2,056 ms | 0.96x |
+| | 256-511 | 36 | 3,125 ms | 1,711 ms | 1.83x |
+| | >= 512 | 7 | 4,368 ms | 1,605 ms | **2.7x** |
+| basal-2.0-mini | < 256 | 56 | 619 ms | 641 ms | 0.96x |
+| | 256-511 | 53 | 1,002 ms | 530 ms | 1.89x |
+| | >= 512 | 11 | 1,382 ms | 554 ms | **2.5x** |
+
+- Each configuration is deterministic: its two runs give bit-identical probabilities. A cached state gives the same
+  probabilities as its first, uncached request with the cache on, in any order of the requests.
+- Against the server without the cache, the probabilities are not bit-identical. The shared prefix is computed in two
+  forwards (the state, then the rest over it) instead of one, and bf16 / 8-bit kernels round differently for other row
+  counts. In fp32 the two paths agree:
+  - the tiny model of `tests/test_mlx_state_cache.py`: max |dp| 6e-8;
+  - the worst decision above (4.5B MultiRC, 0.288 -> 0.403, with the same top answer), recomputed on the server's own
+    prompts with the decoder cast to fp32: |dp| 0.0000, against 0.178 in bf16.
+- The top answers that changed were near ties (margin below 0.08 without the cache).
+- **Short continuations.** A state that continues a cached entry by a few tokens never runs 2-8 tokens:
+  `MIN_CONTINUE`, the forward starts earlier. MLX's fused attention (`mx.fast.scaled_dot_product_attention`, MLX
+  0.32.4) loses bf16 precision when 2-8 queries times the query heads per KV head exceed 32. Against an fp32
+  reference the max error is 4-6e-2 instead of 5-8e-3, for 6-8 queries on basal-2.0-mini (6 query heads per KV head)
+  and 5-8 on 4.5B (8 per KV head). Before this guard, one BAN-PL decision on mini went from 0.46 to 0.16 when a comment
+  continued the cached policy by 8 tokens, and BAN-PL's max |dp| was 0.30 (mini) and 0.14 (4.5B).
+- `--prefix-cache` helps little on MLX, because the template prefix of prompt format 2 is 34-45 tokens. On the CUDA
+  graph engine it also keeps short requests on pass-2 graphs. The state cache is the one worth turning on.
+- Memory: an entry is a copy of the state's keys and values (`mx.contiguous`, not a slice of mlx-lm's 256-token cache
+  buffers), counted against the budget. One 2.1k-token BAN-PL state is about 126 MB on 4.5B (60 layers, 2 KV heads of
+  128). The wired limit is raised by the budget.
+
 
 ## AMD Strix Halo (experimental, community-maintained)
 
