@@ -298,3 +298,6 @@ how the file you would otherwise serve does on your data.
 *ECE* is the expected calibration error of the top answer (10 bins), with the temperatures as basal-serve applies them
 (in calibration file 2, a `choice` question gets its option-count bucket temperature, so the `choice` row covers all
 its buckets); *bound* is the one-sided 95% upper bound of the error on CERT.
+The temperatures in the table are also the ones basal-serve applies: a bucket row shows the bucket's temperature, or
+the `choice` type temperature marked `(type)` when the file has no such bucket, and when the buckets cover every option
+count (2–255) the `choice` row marks its type temperature `(not served: buckets)`.

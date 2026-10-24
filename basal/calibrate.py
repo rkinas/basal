@@ -475,6 +475,16 @@ def fit_temperature(rows):
     return float(grid[int(np.argmin(nll))])
 
 
+def buckets_cover(buckets, prim="choice", lo=2, hi=255):
+    """Whether the bucket temperatures of `prim` cover every option count lo..hi, so that basal-serve never applies its
+    type temperature (server.temperature: the bucket first)."""
+    seen = set()
+    for b in (buckets or {}).get(prim) or {}:
+        a, z = (int(x) for x in b.split("-"))
+        seen.update(range(a, z + 1))
+    return seen >= set(range(lo, hi + 1))
+
+
 def served(rows, temps, buckets=None):
     """(confidence, correct) of every row as basal-serve returns it with these temperatures (same float32 maths):
     temps per type, buckets {type: {"lo-hi": T}} (calibration file 2) before them."""
@@ -897,6 +907,8 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
                                   T_shipped=shipped_T.get(t), T=temps.get(t), source=source.get(t, "default 1.0"),
                                   ece_shipped=ece(served(cert, shipped_T, shipped_B)),
                                   ece=ece(served(cert, temps, buckets)))
+        if fmt == 2 and t == "choice":  # format 2: a choice question takes its bucket's temperature first
+            report["types"][t]["not_served"] = dict(shipped=buckets_cover(shipped_B), fitted=buckets_cover(buckets))
     gates = dict(ece_lofo=lofo(fit_rows, cert_rows, shipped_T, shipped_B, min_per_type, fmt, min_family, reference,
                                min_blend=min_blend),
                  automated_at=automated, automated_error=automated_error, automated_at_pooled=automated_pooled,
@@ -913,8 +925,14 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
             rs = [r for r in rows if r["prim"] == "choice" and lo <= len(r["p"]) <= hi]
             if rs:
                 cert = [r for r in rs if is_cert(r["group"])]
+                old = (shipped_B.get("choice") or {}).get(name)
+                new = (buckets.get("choice") or {}).get(name)
+                # as served: the bucket's temperature, else the type's (T_*_type: the type's stands in)
                 report["buckets"][name] = dict(n=len(rs), n_cert=len(cert),
-                                               T=(buckets.get("choice") or {}).get(name), source=bsource[name],
+                                               T_shipped=old if old is not None else shipped_T.get("choice"),
+                                               T_shipped_type=old is None,
+                                               T=new if new is not None else temps.get("choice"), T_type=new is None,
+                                               source=bsource[name],
                                                ece_shipped=ece(served(cert, shipped_T, shipped_B)),
                                                ece=ece(served(cert, temps, buckets)))
         cal = {"prompt": 2, "temperature_per_prim": temps, "temperature_per_bucket": buckets,
@@ -1028,16 +1046,20 @@ def num(x, f="{:.3f}"):
 
 
 def table(report):
-    lines = ["", f"{'type':<7}{'n':>6}{'FIT':>6}{'CERT':>6}{'accuracy':>10}   {'temperature shipped -> fitted':<32}"
+    w = 52
+    lines = ["", f"{'type':<7}{'n':>6}{'FIT':>6}{'CERT':>6}{'accuracy':>10}   {'temperature shipped -> fitted':<{w}}"
                  f"ECE on CERT shipped -> fitted"]
     for t, r in report["types"].items():
-        temp = f"{num(r['T_shipped'])} -> {num(r['T'])}" + (
+        ns = r.get("not_served") or {}  # format 2, choice: buckets cover every option count
+        temp = (f"{num(r['T_shipped'])}{' (not served: buckets)' if ns.get('shipped') else ''} -> {num(r['T'])}"
+                f"{' (not served)' if ns.get('fitted') else ''}") + (
             "" if r["source"].startswith("fitted") else " (blended)" if r["source"].startswith("blended") else " (kept)")
-        lines.append(f"{t:<7}{r['n']:>6}{r['n_fit']:>6}{r['n_cert']:>6}{r['accuracy']:>10.3f}   {temp:<32}"
+        lines.append(f"{t:<7}{r['n']:>6}{r['n_fit']:>6}{r['n_cert']:>6}{r['accuracy']:>10.3f}   {temp:<{w}}"
                      f"{num(r['ece_shipped'])} -> {num(r['ece'])}")
     for name, r in (report.get("buckets") or {}).items():  # calibration file 2: choice per option-count bucket
-        lines.append(f"  {name:<9}{r['n']:>6}{'':>6}{r['n_cert']:>6}{'':>10}   "
-                     f"{('-> ' + num(r['T'])) if r['T'] is not None else '(type temperature)':<32}"
+        temp = (f"{num(r.get('T_shipped'))}{' (type)' if r.get('T_shipped_type') else ''} -> "
+                f"{num(r['T'])}{' (type)' if r.get('T_type') else ''}")
+        lines.append(f"  {name:<9}{r['n']:>6}{'':>6}{r['n_cert']:>6}{'':>10}   {temp:<{w}}"
                      f"{num(r['ece_shipped'])} -> {num(r['ece'])}")
     lines += ["", f"max_error on CERT   {'shipped: threshold':>18}{'coverage':>10}{'error':>8}   "
                   f"{'fitted: threshold':>17}{'coverage':>10}{'error':>8}{'bound':>8}"]
