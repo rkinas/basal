@@ -90,8 +90,9 @@ def build(decide, model="basal"):
                                  Field(description="name -> question, as in the basal HTTP API: {\"type\": \"choice\" "
                                                    "| \"noul\" | \"score\" | \"multi\" | \"act\" | \"tool\", "
                                                    "\"instructions\": ..., \"criteria\": ...} plus the type's fields "
-                                                   "(multi: threshold, min, max, objective; act: costs, max_error; "
-                                                   "tool: tools, extra, rank, max_error; any: option_keys).")],
+                                                   "(choice / noul / score: coverage, max_error; multi: threshold, "
+                                                   "min, max, objective; act: costs, max_error; tool: tools, extra, "
+                                                   "rank, max_error; any: option_keys).")],
             lang: Lang = None,
             facts: Annotated[Literal["off", "auto"] | None,
                              Field(description="auto: append computed calendar and money facts to a Polish "

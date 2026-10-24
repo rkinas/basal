@@ -27,6 +27,9 @@ URL (the official SDK was not tested). `POST /v1/basal` is the same endpoint; th
     // optional on every question:
     //   "option_keys": "show" | "hide"   (default "show": options are shown as "key: description")
     //   "evidence": true                 (models with an evidence head, basal-1.5; not for multi; experimental)
+    // optional on choice, noul and score questions:
+    //   "coverage": 0.9                  (the answer set at this coverage; basal-calibrate --conformal)
+    //   "max_error": 0.05                ("abstain" below the threshold certified for this target)
   },
   "facts": "off" | "auto",                          // optional, default "off" (Polish calendar / money facts)
   "think": "auto" | "off" | "force",                // optional, --think auto servers only (basal-2.0 4.5B)
@@ -61,6 +64,8 @@ one shared state (SOAM); asking them in one request is faster than separate requ
                  "confidence": p, "ranking": [{"tool": "<name>", "probability": p}, ...]},  // ranking with "rank"
                  // with max_error: "deferred" (true: "tool" is null, "refused" names the model's choice)
                  // with "multi": true: "tools": [...] instead of "tool", and the fields of a multi answer
+    // with "coverage": L, a choice / noul / score answer also has "answer_set": ["<key>", ...] (most probable
+    //   first) and "coverage": L; with "max_error": "abstain": true | false
     // with "evidence": true, any of the above (except multi) also has
     //   "evidence": [{"text": "...", "start": 102, "end": 153, "probability": 0.93}, ...]
   },
@@ -124,6 +129,15 @@ optional parameter; descriptions are cut at 300 characters (`"description_chars"
 options. `"multi": true` returns the set of tools to call, using the `multi` objectives and constraints. `max_error`
 defers to a person, as in `act`. See [FEATURES.md](FEATURES.md#tool-which-tool-next), which also shows a
 [step of an agent loop](FEATURES.md#a-step-of-an-agent-loop) in one request.
+
+**Answer sets and abstain** (`choice`, `noul`, `score`). `"coverage": 0.9` adds `answer_set`: the keys whose
+calibrated probability reaches the type's threshold for that coverage level, the most probable first (and always in).
+The set holds the correct answer for at least 90% of requests like the labelled ones the threshold was fitted on
+(split conformal prediction). The levels come from a calibration fitted with `basal-calibrate --conformal 0.8,0.9,0.95`.
+For a level or type the file does not have, the set is every option and `coverage_note` says why. `"max_error": 0.05`
+adds `"abstain": true` when the confidence is below the threshold certified for that error and the question's type,
+as `act` defers. Without a certified threshold every answer abstains, and `max_error` in the answer says so. Neither
+field changes the answer itself. See [CALIBRATION.md](CALIBRATION.md#answer-sets-coverage).
 
 **Option keys.** By default every described option is shown to the model as `key: description`
 (`{"B": "Dispatch office: Krakow"}` → `B: Dispatch office: Krakow`), because only you know whether a key is meaningful

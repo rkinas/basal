@@ -1,7 +1,7 @@
 """Fit the calibration on your own labelled requests: one temperature per question type (for prompt-format-2 models
 also one per option-count bucket of choice questions), the certified confidence thresholds of act's max_error (1%
-and 5% by default), the calibration gates and, from labelled multi questions, the fallback_threshold of each label
-set, written as a calibration file for basal-serve.
+and 5% by default), the calibration gates, from labelled multi questions the fallback_threshold of each label set
+and, with --conformal, the answer-set thresholds of each coverage level, written as a calibration file for basal-serve.
 
   basal-calibrate labelled.jsonl --model Remek/basal-1.5-4.5B --mode mlx        # the engine in process
   basal-calibrate labelled.jsonl --url http://127.0.0.1:8000 --model Remek/basal-1.5-4.5B
@@ -61,6 +61,13 @@ Method (the one the shipped files were fitted with):
     mean IoU on FIT over a log grid (null = the default rule wins), with IoU, empty-set accuracy and false-empty rate
     on CERT next to the default. basal-serve uses it for a request with the same label set and fallback and no
     fallback_threshold of its own;
+  * --conformal 0.8,0.9,0.95 (off by default): split-conformal answer sets per type and coverage level L. The score
+    of a CERT decision is 1 - p(gold) under the fitted temperatures (CERT took no part in fitting them); p_min is the
+    k-th largest p(gold) of the type's CERT decisions, k = ceil((n + 1) L), and the set of an answer is every option
+    with p >= p_min (the top one always). The set then holds the correct answer with probability >= L, on average
+    over requests like the labelled ones. With n < L / (1 - L) CERT decisions of a type there is no p_min and the set
+    is every option. The FIT decisions report the coverage and mean size of the sets. basal-serve returns the set for
+    a choice / noul / score question with "coverage": L;
   * tasks: per task (classify, verify, extract; every claim and field is one decision) the certified threshold of each
     target error, by the same bound on FIT, with its coverage, error and bound on CERT ("task_thresholds" and
     "task_gates"). The task thresholds a shipped file holds are kept only when the temperatures are (no decision
@@ -86,9 +93,9 @@ from . import __version__
 from . import tasks as task_types
 from .engine import resolve
 from .prompt import max_options, model_format, model_layout
-from .server import (MODES, Server, _text, add_engine_args, calibration_file, calibration_name, calibration_orders,
-                     certified, default_mode, load_calibration, model_identity, refuse_lean_flex, temper, temperature,
-                     to_items)
+from .server import (MODES, Server, _text, add_engine_args, answer_set, calibration_file, calibration_name,
+                     calibration_orders, certified, default_mode, load_calibration, model_identity, refuse_lean_flex,
+                     temper, temperature, to_items)
 from .sets import label_set_id
 from .sets import select as select_set
 
@@ -100,6 +107,7 @@ MIN_BLEND = 10      # from this many FIT decisions (below --min-per-type) a temp
 RECOMMENDED = 200   # fewer labelled decisions: loose bounds
 T_GRID = (0.25, 8.0)  # temperatures searched (as for the shipped files)
 METHOD = "bound-controlled (one-sided 95% Clopper-Pearson on FIT)"
+CONFORMAL_METHOD = "split conformal on CERT (score 1 - p(gold), p_min = k-th largest p(gold), k = ceil((n + 1) L))"
 POOLED_NOTE = ("informational: \"confidence\" here is one threshold pooled over all types; basal-serve applies only "
                "per_type[type].confidence and defers a type without one")
 YES, NO = {"yes", "true", "tak"}, {"no", "false", "nie"}
@@ -485,15 +493,16 @@ def buckets_cover(buckets, prim="choice", lo=2, hi=255):
     return seen >= set(range(lo, hi + 1))
 
 
-def served(rows, temps, buckets=None):
-    """(confidence, correct) of every row as basal-serve returns it with these temperatures (same float32 maths):
+def served_p(rows, temps, buckets=None):
+    """The probabilities of every row as basal-serve returns them with these temperatures (same float32 maths):
     temps per type, buckets {type: {"lo-hi": T}} (calibration file 2) before them."""
     cal = dict(temperature_per_prim=temps, temperature_per_bucket=buckets or {})
-    out = []
-    for r in rows:
-        p = temper(torch.tensor(r["p"]), temperature(cal, r["prim"], len(r["p"]))).tolist()
-        out.append((float(max(p)), int(np.argmax(p)) == r["gold"]))
-    return out
+    return [temper(torch.tensor(r["p"]), temperature(cal, r["prim"], len(r["p"]))).tolist() for r in rows]
+
+
+def served(rows, temps, buckets=None):
+    """(confidence, correct) of every row as basal-serve returns it with these temperatures."""
+    return [(float(max(p)), int(np.argmax(p)) == r["gold"]) for r, p in zip(rows, served_p(rows, temps, buckets))]
 
 
 def ece(cs, bins=10):
@@ -853,8 +862,57 @@ def type_threshold(entry, q_type):
     return ((((entry or {}).get("per_type") or {}).get(q_type)) or {}).get("confidence")
 
 
+def conformal_p_min(p_gold, level):
+    """Split conformal with the score 1 - p(gold): the k-th largest p(gold), k = ceil((n + 1) level); None when k > n
+    (too few decisions for the level: the set is every option)."""
+    k = math.ceil(round((len(p_gold) + 1) * level, 9))
+    return sorted(p_gold, reverse=True)[k - 1] if k <= len(p_gold) else None
+
+
+def conformal_needed(level):
+    """The fewest decisions of a type that give a coverage level a p_min (ceil((n + 1) level) <= n)."""
+    n = 1
+    while math.ceil(round((n + 1) * level, 9)) > n:
+        n += 1
+    return n
+
+
+def set_gate(rows, probs, p_min):
+    """Coverage (the gold answer in the set), mean size and singleton share of the answer sets at p_min."""
+    if not rows:
+        return dict(coverage=None, mean_size=None, singleton=None)
+    sets = [answer_set(p, p_min) for p in probs]
+    return dict(coverage=float(np.mean([r["gold"] in s for r, s in zip(rows, sets)])),
+                mean_size=float(np.mean([len(s) for s in sets])), singleton=float(np.mean([len(s) == 1 for s in sets])))
+
+
+def fit_conformal(fit_rows, cert_rows, temps, buckets, levels):
+    """--conformal: per coverage level and type, p_min on the type's CERT decisions (as served with the fitted
+    temperatures), with the coverage and size of the sets on CERT and, held out from p_min, on FIT."""
+    by_type = {}
+    for t in PRIMS:
+        rf, rc = [r for r in fit_rows if r["prim"] == t], [r for r in cert_rows if r["prim"] == t]
+        if rf or rc:
+            by_type[t] = (rf, served_p(rf, temps, buckets), rc, served_p(rc, temps, buckets))
+    out = {}
+    for level in levels:
+        per = {}
+        for t, (rf, pf, rc, pc) in by_type.items():
+            p_min = conformal_p_min([p[r["gold"]] for r, p in zip(rc, pc)], level)
+            e = dict(p_min=p_min, n=len(rc))
+            if p_min is None:
+                e["reason"] = (f"{len(rc)} CERT decisions of this type, coverage {level:g} needs >= "
+                               f"{conformal_needed(level)}: the set is every option")
+            g_c, g_f = set_gate(rc, pc, p_min), set_gate(rf, pf, p_min)
+            e.update(cert_coverage=g_c["coverage"], cert_mean_size=g_c["mean_size"], fit_coverage=g_f["coverage"],
+                     fit_mean_size=g_f["mean_size"], fit_singleton=g_f["singleton"], fit_n=len(rf))
+            per[t] = e
+        out[str(float(level))] = dict(per_type=per)
+    return dict(method=CONFORMAL_METHOD, levels=out)
+
+
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
-        min_blend=MIN_BLEND):
+        min_blend=MIN_BLEND, conformal=()):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
     with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set."""
     sets = [r for r in rows if r["prim"] == "multi"]
@@ -919,6 +977,8 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     extra = dict(gates=gates)
     if multi:
         extra["multi"] = {k: v for k, v in multi.items() if "reason" not in v}
+    if conformal:
+        extra["conformal"] = report["conformal"] = fit_conformal(fit_rows, cert_rows, temps, buckets, conformal)
     if fmt == 2:
         report["buckets"] = {}
         for name, lo, hi in BUCKETS:
@@ -1114,6 +1174,17 @@ def table(report):
             lines.append(head + f"{thr:>11}   {num(c['iou_default']) + ' -> ' + num(c['iou']):<22}"
                                 f"{pct(c['empty_accuracy_default']) + ' -> ' + pct(c['empty_accuracy']):<17}"
                                 f"{pct(c['false_empty_default'])} -> {pct(c['false_empty'])}")
+    if report.get("conformal"):
+        lines += ["", f"answer sets        {'type':<7}{'CERT':>6}{'p_min':>9}{'CERT cover':>12}   {'FIT cover':>9}"
+                      f"{'mean size':>11}{'singleton':>11}   (p_min on CERT, checked on FIT)"]
+        for level, e in report["conformal"]["levels"].items():
+            for t, x in e["per_type"].items():
+                head = f"coverage {float(level):<9g} {t:<7}{x['n']:>6}"
+                if x["p_min"] is None:
+                    lines.append(head + f"   none: {x['reason']}")
+                    continue
+                lines.append(head + f"{x['p_min']:>9.4f}{pct(x['cert_coverage']):>12}   {pct(x['fit_coverage']):>9}"
+                                    f"{num(x['fit_mean_size'], '{:.2f}'):>11}{pct(x['fit_singleton']):>11}")
     return "\n".join(lines)
 
 
@@ -1236,7 +1307,7 @@ def refit(a, targets, reference, reference_name):
               "thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
         baseline = {k: v for k, v in baseline.items() if k not in ("thresholds", "multi", "task_thresholds")}
     cal, report = fit(rows, baseline, targets, a.min_per_type, head["fmt"], a.min_family, reference, a.min_per_set,
-                      a.min_blend)
+                      a.min_blend, a.conformal)
     cal["gates"]["ece_reference"] = reference_name
     cal["engine"] = engine_name(head["kind"], head["quant"], head.get("vllm_preset"))
     cal["fitted_on"] = dict(data=head["data"], decisions=sum(r["prim"] != "multi" for r in rows),
@@ -1275,6 +1346,9 @@ def parser():
     ap.add_argument("--no-calibration", dest="no_calibration", action="store_true",
                     help="no shipped calibration to compare with (types below --min-per-type keep temperature 1.0)")
     ap.add_argument("--targets", default="0.01,0.05", help="max_error targets (comma-separated)")
+    ap.add_argument("--conformal", default=None,
+                    help="coverage levels of the conformal answer sets (comma-separated, e.g. 0.8,0.9,0.95; default: "
+                         "none), fitted per type on CERT; basal-serve answers \"coverage\": L with \"answer_set\"")
     ap.add_argument("--min-per-type", dest="min_per_type", type=int, default=50,
                     help="FIT decisions needed to fit a type's temperature")
     ap.add_argument("--min-blend", dest="min_blend", type=int, default=MIN_BLEND,
@@ -1311,6 +1385,12 @@ def main(argv=None):
         raise SystemExit(f"--targets {a.targets!r}: give numbers such as 0.01,0.05") from None
     if not targets or not all(0 < r < 1 for r in targets):
         raise SystemExit("--targets must lie between 0 and 1")
+    try:
+        a.conformal = sorted({float(x) for x in (a.conformal or "").split(",") if x.strip()})
+    except ValueError:
+        raise SystemExit(f"--conformal {a.conformal!r}: give coverage levels such as 0.8,0.9,0.95") from None
+    if not all(0 < x < 1 for x in a.conformal):
+        raise SystemExit("--conformal levels must lie between 0 and 1")
     if a.calibration and not Path(a.calibration).exists():
         raise SystemExit(f"--calibration {a.calibration}: no such file")
     if a.strict and a.reference is None:
@@ -1344,7 +1424,7 @@ def main(argv=None):
             raise SystemExit("no decisions to fit")
         if rows:
             cal, report = fit(rows, baseline, targets, a.min_per_type, fmt, a.min_family, reference, a.min_per_set,
-                              a.min_blend)
+                              a.min_blend, a.conformal)
             cal["gates"]["ece_reference"] = reference_name
         else:  # task questions only: the temperatures and thresholds of the compared file stay as they are
             cal, report = {k: v for k, v in baseline.items() if k not in KEPT_OUT}, None
