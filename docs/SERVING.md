@@ -172,7 +172,8 @@ benchmarking a GPU.
 - **Status codes and load (2.3.1)**: an invalid request answers HTTP 422, the GPU out of memory 503 (retry later or
   elsewhere) and any other server error 500, all with `{"error": "..."}`. `GET /health` returns the requests in flight
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
-  the server. Definitions: [API.md](API.md).
+  the server. Definitions: [API.md](API.md). `--error-format openai` answers errors as `{"error": {"message",
+  "type", "code"}}` (same status codes).
 
 ## Several GPUs, metrics and health (2.5)
 
