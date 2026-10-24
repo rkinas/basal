@@ -8,6 +8,7 @@
                        (basal/tasks.py)
   GET  /v1/models
   GET  /health
+  GET  /metrics
 
 State once, ask many (SOAM): every question of a request, in both option orders (and every label of a `multi`), is one
 branch over the state; the state is computed once per request. `act`, `multi` and `tool` are engine-level types:
@@ -1608,14 +1609,20 @@ def parser():
 
 
 def http_app(srv, mode, mcp=None):
-    """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models and /health; mcp: (routes, lifespan) of
-    --mcp on. A failed request answers {"error": message} with http_status: 422 invalid request, 503 out of GPU
-    memory, 500 any other server error."""
+    """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models, /health and /metrics;
+    mcp: (routes, lifespan) of --mcp on. A failed request answers {"error": message} with http_status:
+    422 invalid request, 503 out of GPU memory, 500 any other server error."""
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, Response
     from starlette.routing import Route
+
+    from . import __version__
+
+    labels = [v.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"') for v in (__version__, srv.name, mode)]
+    build_info = f'basal_build_info{{version="{labels[0]}",model="{labels[1]}",mode="{labels[2]}"}} 1'
+    cache_snapshot, cache_updated = {}, 0
 
     def failed(e):
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
@@ -1642,6 +1649,33 @@ def http_app(srv, mode, mcp=None):
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})
 
+    async def metrics(_):
+        nonlocal cache_snapshot, cache_updated
+        lines = ["# HELP basal_build_info Engine version, served model and mode.", "# TYPE basal_build_info gauge",
+                 build_info]
+
+        def add(name, kind, help_text, value):
+            lines.extend((f"# HELP {name} {help_text}", f"# TYPE {name} {kind}", f"{name} {value}"))
+
+        load = srv.load()
+        add("basal_requests_running", "gauge", "Requests in flight outside the engine queue.", load["running"])
+        add("basal_requests_queued", "gauge", "Requests waiting for the engine.", load["queued"])
+        cache = getattr(srv.backend, "state_cache", None)
+        if cache is not None:
+            snapshot = cache.stats(blocking=False)
+            if snapshot is not None:
+                cache_snapshot, cache_updated = snapshot, time.time()
+            for key, kind, suffix in (("entries", "gauge", "entries"), ("used_bytes", "gauge", "used_bytes"),
+                                      ("budget_bytes", "gauge", "budget_bytes"), ("hits", "counter", "hits_total"),
+                                      ("misses", "counter", "misses_total"), ("evictions", "counter", "evictions_total"),
+                                      ("prefix_hits", "counter", "prefix_hits_total")):
+                if key in cache_snapshot:
+                    add(f"basal_state_cache_{suffix}", kind, f"State cache {key.replace('_', ' ')}.", cache_snapshot[key])
+            add("basal_state_cache_snapshot_timestamp_seconds", "gauge",
+                "Unix timestamp of the last successful cache snapshot, or 0 before the first.", cache_updated)
+        return Response("\n".join(lines) + "\n",
+                        headers={"content-type": "text/plain; version=0.0.4; charset=utf-8"})
+
     mcp_routes, mcp_run = mcp or ([], None)
 
     @asynccontextmanager
@@ -1656,7 +1690,7 @@ def http_app(srv, mode, mcp=None):
 
     return Starlette(routes=[Route("/v1/systemone", systemone, methods=["POST"]),
                              Route("/v1/basal", systemone, methods=["POST"]), Route("/v1/models", models),
-                             Route("/health", health), *mcp_routes], lifespan=lifespan)
+                             Route("/health", health), Route("/metrics", metrics), *mcp_routes], lifespan=lifespan)
 
 
 def main():

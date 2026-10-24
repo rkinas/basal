@@ -116,16 +116,28 @@ def test_health_counts_running_and_queued_requests():
 
     async def go(c):
         health = []
+
+        async def load_from_metrics():
+            response = await c.get("/metrics")
+            assert response.status_code == 200
+            values = {line.split(" ", 1)[0]: int(line.split(" ", 1)[1])
+                      for line in response.text.splitlines() if line.startswith("basal_requests_")}
+            return values["basal_requests_running"], values["basal_requests_queued"]
+
         assert (await c.get("/health")).json() == {"status": "ok", "running": 0, "queued": 0}
+        assert await load_from_metrics() == (0, 0)
         first = asyncio.get_running_loop().create_task(c.post("/v1/systemone", json=BODY))
         await until(engine.entered.is_set)
         health.append((await c.get("/health")).json())
+        assert await load_from_metrics() == (1, 0)
         second = asyncio.get_running_loop().create_task(c.post("/v1/systemone", json=BODY))
         await until(lambda: srv.in_flight == 2)
         health.append((await c.get("/health")).json())
+        assert await load_from_metrics() == (1, 1)
         engine.go.set()
         codes = [(await t).status_code for t in (first, second)]
         health.append((await c.get("/health")).json())
+        assert await load_from_metrics() == (0, 0)
         return health, codes
 
     health, codes = asyncio.run(on_app(srv, go))

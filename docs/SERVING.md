@@ -144,6 +144,30 @@ benchmarking a GPU.
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md).
 
+## Prometheus metrics
+
+`GET /metrics` exposes Prometheus text format on the serving port, without additional dependencies. Point Grafana
+at Prometheus and configure a scrape, for example:
+
+```yaml
+scrape_configs:
+  - job_name: basal
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["127.0.0.1:8000"]
+```
+
+The endpoint exports `basal_build_info{version,model,mode}`, `basal_requests_running` and `basal_requests_queued`
+(the same definitions as `/health`). With `--state-cache-gb`, it also exports `basal_state_cache_entries`,
+`basal_state_cache_used_bytes`, `basal_state_cache_budget_bytes`, and the existing `hits_total`, `misses_total`,
+`prefix_hits_total` and `evictions_total` counters under the `basal_state_cache_` prefix. These count cache operations,
+not client requests. Counters reset when the process restarts.
+
+All collection happens on a scrape: no per-request hooks, GPU reads or CUDA synchronization are added. If the cache
+lock is busy, the endpoint reuses its last snapshot. `basal_state_cache_snapshot_timestamp_seconds` reports its Unix
+timestamp; 0 means no snapshot yet, and cache values are omitted until one succeeds. Scraping still uses CPU and the
+server's event loop; measure its impact on your workload. The endpoint has the same network access as the HTTP API.
+
 ## Inference on a JSONL file
 
 `basal-run` sends every line of a JSONL file to a running server (concurrently; the server batches the requests) and
