@@ -39,7 +39,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .prompt import PREFILL, RequestError
+from .prompt import PREFILL, RequestError, model_two_way
 
 
 METADATA_FILES = ["*.json", "*.jinja", "*.model", "*.txt", "*.md", "Modelfile*"]  # tokenizer, template, calibration
@@ -113,6 +113,7 @@ class EagerBackend:
 
     def __init__(self, model_dir, dtype="bfloat16", device=None, media=False, forward=None, ple_offload=False,
                  attn="math"):
+        two_way = model_two_way(model_dir)  # basal.json "two_way": read as the model was trained (Gemma 4 only)
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.padding_side = "left"
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
@@ -160,7 +161,10 @@ class EagerBackend:
                 raise ValueError(f"eager forward {forward!r} (one of {', '.join(EAGER_FORWARDS)})")
             if forward == "basal":
                 from .gemma4 import Gemma4Forward, attention_plan
-                self.g4 = Gemma4Forward(self.model, attn=attention_plan(attn))
+                self.g4 = Gemma4Forward(self.model, attn=attention_plan(attn), two_way=two_way)
+        if two_way and self.g4 is None:
+            raise SystemExit(f"{model_dir}: two-way reading (basal.json \"two_way\") runs in the engine's own Gemma 4 "
+                             "forward only (a Gemma 4 model, --eager-forward basal)")
         self.dev = dev
         self.sdpa_kernels = eager_sdpa_kernels(dev)
         self.prefill = PREFILL
@@ -793,6 +797,36 @@ def causal_sdpa(model):
     return model
 
 
+class _Rows(tuple):
+    """A packed unit (GraphBackend._pack) that carries whether its prompt is read two-way (attribute two_way)."""
+    two_way = False
+
+
+def two_way_rows(toks, limits):
+    """Which prompts of one request (token ids) are read two-way: at most max_prompt tokens each, when the request's
+    record (its shared prefix once, then every prompt's own tokens) has at most max_record (as gemma4.Gemma4Forward)."""
+    P = len(os.path.commonprefix(toks))
+    record = P + sum(len(t) - P for t in toks)
+    return [record <= limits["max_record"] and len(t) <= limits["max_prompt"] for t in toks]
+
+
+def graph_two_way_refused(model_dir, state_cache_gb=0, prefix=False, batches="default", lean=False, tree="dense",
+                          readout_layer="off", template="off"):
+    """Why the CUDA graph engine cannot serve a two-way model (basal.json "two_way") with these settings, or None:
+    Gemma 4 models only, and none of the features that share or cache what a prompt reads before its question."""
+    from .gemma4_graph import is_gemma4_dir
+    if not is_gemma4_dir(model_dir):
+        return "two-way reading (basal.json \"two_way\") runs for Gemma 4 models only"
+    opts = [name for name, on in (("--state-cache-gb", state_cache_gb), ("--prefix-cache on", prefix),
+                                  ("--batches compact", batches == "compact"), ("--lean", lean),
+                                  ("--tree flex", tree == "flex"), ("--readout-layer on", readout_layer == "on"),
+                                  ("--template-prefix on", template == "on")) if on]
+    if opts:
+        return (f"{', '.join(opts)}: not with a two-way model (each prompt is read whole, nothing shared or cached "
+                "before its question)")
+    return None
+
+
 class StateCache:
     """Keys and values of request states (the root of a unit cut at the state boundary: template and state), keyed by a
     hash of their token ids, kept on the GPU within a byte budget with least-recently-used eviction. A request whose
@@ -981,6 +1015,15 @@ class GraphBackend(EagerBackend):
         if what:
             from .gdn_graph import is_gdn
             raise ValueError(recurrent_refused(model_dir, what, is_gdn(model_dir)))
+        # basal.json "two_way" (a model trained with two-way reading): every prompt is a plain row of its own, read
+        # two-way in the global layers where it fits the limits (Gemma4Graph._plain_masks), nothing shared or cached
+        self.two_way = model_two_way(model_dir)
+        if self.two_way:
+            why = graph_two_way_refused(model_dir, state_cache_gb, prefix, batches, lean, tree, readout_layer,
+                                        template)
+            if why:
+                raise ValueError(f"{model_dir}: {why}")
+            batches = "default" if batches == "auto" else batches
         if quant == "fp8" and fp8_refused():
             raise ValueError(fp8_refused())
         torch.backends.cuda.enable_cudnn_sdp(False)  # before capture: a captured graph keeps its attention kernel
@@ -1017,7 +1060,7 @@ class GraphBackend(EagerBackend):
         else:
             causal_sdpa(self.model)
             self._llama_init(merge, quant, lean, tree, compile)
-        self.shared = shared
+        self.shared = shared and not self.two_way
         self._wrows = {}
         if batches == "fine":
             self.BATCHES = self.FINE_BATCHES
@@ -1077,6 +1120,9 @@ class GraphBackend(EagerBackend):
                              "serve its -FP8 checkpoint instead")
         if kernels == "auto":
             kernels = (gemma_fast_kernels() if compile else None) or "math"
+        if self.two_way:  # two-way rows: the math kernel in the global layers (their mask is not causal)
+            kernels = {"fa3": "fa3+math", "flex": {"sliding_attention": "flex", "full_attention": "math"}}.get(
+                kernels, kernels)
         if merge == "auto":
             merge = kernels != "math"
         if "fa3" in str(kernels) and attention_available("fa3"):
@@ -1396,11 +1442,11 @@ class GraphBackend(EagerBackend):
         return x.pin_memory().to(self.dev, non_blocking=True) if self.dev.type == "cuda" else x.to(self.dev)
 
     @torch.no_grad()
-    def _forward(self, ids, kv=None, ro=None):
+    def _forward(self, ids, kv=None, ro=None, twl=None):
         """Plain causal forward; kv: per-layer (K, V) buffers [rows, kv heads, length, head dim] it fills (pass 1).
-        Gemma 4: uncompiled; ro [rows, R]: the readout positions -> [rows, R, D]."""
+        Gemma 4: uncompiled; ro [rows, R]: the readout positions -> [rows, R, D]; twl: two-way rows (forward)."""
         if self.gemma is not None:
-            return self.gemma.forward(ids, kv, ro, compiled=False)
+            return self.gemma.forward(ids, kv, ro, compiled=False, twl=twl)
         return self.model.model(input_ids=ids, use_cache=False, basal_kv=kv).last_hidden_state
 
     @torch.no_grad()
@@ -1712,6 +1758,11 @@ class GraphBackend(EagerBackend):
         ids = torch.full((b, L), self.tok.pad_token_id, dtype=torch.long, device=self.dev)
         if self.gemma is not None:
             ro = torch.zeros((b, 1), dtype=torch.long, device=self.dev)
+            if getattr(self, "two_way", None):  # and each row's last token when it is read two-way, else -1
+                twl = torch.full((b,), -1, dtype=torch.long, device=self.dev)
+                gemma = self.gemma
+                return self._capture(key, lambda i, kv, r, w: gemma.forward(i, kv, r, twl=w), ids,
+                                     self._kv_views(b, L), ro, twl)
             return self._capture(key, self.fwd, ids, self._kv_views(b, L), ro)
         out = self._shared_out("plain", max(b * L for b, L in self.grid(self.PLAIN_LENS)) * self._hidden_size,
                                self._dtype)[: b * L * self._hidden_size].view(b, L, -1)
@@ -1933,17 +1984,21 @@ class GraphBackend(EagerBackend):
         if n > self.PLAIN_LENS[-1]:
             assert len(idx) == 1
             t, _, _, last, _ = packs[idx[0]]
-            if n > self.one_forward:  # in chunks (_continue)
+            # in chunks (_continue); a prompt read two-way is read whole (its tokens see the later ones)
+            if n > self.one_forward and not getattr(packs[idx[0]], "two_way", False):
                 assert all(i == len(t) - 1 for i in last)  # a single prompt (or duplicates) reads out at its last token
                 h = self._continue(list(t))[1][None].expand(len(last), -1).clone()
                 torch.cuda.empty_cache()
                 return h
             try:
                 if self.gemma is not None:  # a single prompt (or duplicates) reads out at its last token
-                    return self._forward(self._to_dev(torch.tensor([t])), ro=self._to_dev(torch.tensor([[last[0]]])))[
-                        0, [0] * len(last)]
+                    tw = self._to_dev(torch.tensor([last[0]])) if getattr(packs[idx[0]], "two_way", False) else None
+                    return self._forward(self._to_dev(torch.tensor([t])), ro=self._to_dev(torch.tensor([[last[0]]])),
+                                         twl=tw)[0, [0] * len(last)]
                 return self._forward(self._to_dev(torch.tensor([t])))[0, last]
             except torch.OutOfMemoryError as e:  # beyond what the estimate allowed for: in chunks after all
+                if getattr(packs[idx[0]], "two_way", False):  # (a prompt read two-way cannot run in chunks)
+                    raise
                 traceback.clear_frames(e.__traceback__)  # (the failed forward's tensors, held by the error until then)
                 torch.cuda.empty_cache()
                 self.one_forward = min(self.one_forward, n - 1)
@@ -1957,6 +2012,12 @@ class GraphBackend(EagerBackend):
             for r, c in zip(rows, cols):
                 h_ro[r, 0] = c
             ro[0].copy_(self._to_dev(h_ro), non_blocking=True)
+            if len(ro) > 1:  # two-way rows: the last token of each row read two-way, else -1
+                h_tw = np.full(b, -1, dtype=np.int64)
+                for r, c in zip(rows, cols):
+                    if getattr(packs[idx[r]], "two_way", False):
+                        h_tw[r] = c
+                ro[1].copy_(self._to_dev(h_tw), non_blocking=True)
             cols = [0] * len(rows)
         g.replay()
         return out[self._to_dev(torch.tensor(rows)), self._to_dev(torch.tensor(cols))]
@@ -2282,6 +2343,12 @@ class GraphBackend(EagerBackend):
             prompts, lids = g[0], g[1]
             cut = g[2] if len(g) > 2 and getattr(self, "state_cache", None) is not None else None
             toks = self.encode(prompts)
+            if getattr(self, "two_way", None):  # each prompt alone, flagged where it is read two-way
+                for a, (tk, x, tw) in enumerate(zip(toks, lids, two_way_rows(toks, self.two_way))):
+                    pk = _Rows(self._pack([tk]))
+                    pk.two_way = tw
+                    units.append((pk, [x], k, a))
+                continue
             if not getattr(self, "shared", True):
                 units += [(self._pack([tk]), [x], k, a) for a, (tk, x) in enumerate(zip(toks, lids))]
                 continue

@@ -120,6 +120,27 @@ def model_layout(model_dir):
     return layout
 
 
+TWO_WAY = {"max_prompt": 4096, "max_record": 8192}
+
+
+def model_two_way(model_dir):
+    """Two-way reading of a model trained with it: `"two_way"` in its basal.json -> {"max_prompt", "max_record"} or
+    None (absent or false). true takes the defaults (TWO_WAY); an object may set either limit. The global layers read
+    a prompt of at most max_prompt tokens both ways, when its request has at most max_record tokens (the shared
+    prefix once, then every prompt's own tokens); otherwise the prompt is read one way, as the model was trained."""
+    p = Path(model_dir) / "basal.json"
+    tw = json.loads(p.read_text(encoding="utf-8")).get("two_way") if p.exists() else None
+    if tw in (None, False):
+        return None
+    if tw is True:
+        return dict(TWO_WAY)
+    if not isinstance(tw, dict) or set(tw) - set(TWO_WAY) or not all(
+            isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in tw.values()):
+        raise ValueError(f"{p}: \"two_way\" must be true, false or an object with positive integers "
+                         f"{' / '.join(TWO_WAY)}, not {tw!r}")
+    return {**TWO_WAY, **tw}
+
+
 def lang_of(text):
     """Polish if the text contains Polish diacritics, otherwise English (selects the prompt template)."""
     return "pl" if any(c in PL_CHARS for c in text) else "en"
