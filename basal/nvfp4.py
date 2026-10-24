@@ -112,13 +112,12 @@ def _act_ops(x, inv_g):
 
 
 def _build():
-    """The activation quantiser as the torch op basal::nvfp4_act_quant: one Triton program per 128 rows x 64
-    features writes the packed codes and the four block scales of each row straight into cuBLAS's swizzle."""
+    """The activation quantiser: one Triton program per 128 rows x 64 features writes the packed codes and the four
+    block scales of each row straight into cuBLAS's swizzle."""
     import triton
     import triton.language as tl
-    from torch.library import triton_op, wrap_triton
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["M"])
     def kernel(x, q, s, inv_g, M, K, C4, BM: tl.constexpr):
         pm, pk = tl.program_id(0), tl.program_id(1)
         rm = pm * BM + tl.arange(0, BM)
@@ -141,36 +140,29 @@ def _build():
         off = ((rm // 128).to(tl.int64) * C4 + pk) * 512 + (r % 32) * 16 + (r // 32) * 4
         tl.store(s + off[:, None] + tl.arange(0, 4)[None, :], sc.to(tl.uint8, bitcast=True))
 
-    @triton_op("basal::nvfp4_act_quant", mutates_args=())
-    def op(x: torch.Tensor, inv_g: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        M, K = x.shape
-        Mp = (M + 127) // 128 * 128  # no max() / branch on M: a traced size must stay one expression of M
-        q = torch.empty((Mp, K // 2), dtype=torch.uint8, device=x.device)
-        s = torch.empty((Mp * (K // BLOCK),), dtype=torch.uint8, device=x.device)
-        if M:
-            wrap_triton(kernel)[(Mp // 128, K // 64)](x, q, s, inv_g, M, K, K // 64, BM=128)
-        return q, s
-
-    return op
+    return kernel
 
 
 def act_quant(x, inv_g):
     """[M, K] bf16 -> (codes [Mp, K / 2] uint8, swizzled scales uint8 [Mp * K / 16]), Mp = M rounded up to 128; rows
     past M are zeros."""
-    if not _KERNEL:
-        _KERNEL.append(_build())
-    return torch.ops.basal.nvfp4_act_quant(x, inv_g)
+    build()
+    M, K = x.shape
+    Mp = (M + 127) // 128 * 128
+    q = torch.empty((Mp, K // 2), dtype=torch.uint8, device=x.device)
+    s = torch.empty((Mp * (K // BLOCK),), dtype=torch.uint8, device=x.device)
+    if M:
+        _KERNEL[0][(Mp // 128, K // 64)](x, q, s, inv_g, M, K, K // 64, BM=128)
+    return q, s
 
 
 def build():
-    """The Triton op, before any layer is compiled (no graph break while tracing)."""
+    """The Triton kernel, built once (before any layer is compiled)."""
     if torch.cuda.is_available() and not _KERNEL:
         _KERNEL.append(_build())
 
 
-@torch.library.custom_op("basal::nvfp4_gemm", mutates_args=())
-def _gemm(q: torch.Tensor, s: torch.Tensor, w: torch.Tensor, ws: torch.Tensor, alpha: torch.Tensor, m: int,
-          dtype: torch.dtype) -> torch.Tensor:
+def _mm(q, s, w, ws, alpha, m, dtype):
     """cuBLAS's block-scaled FP4 GEMM, the global scales (alpha) applied in its fp32 epilogue (F.scaled_mm, torch 2.10+;
     the same bits as torch._scaled_mm in fp32 times alpha and 1.1-2.1x faster on sm_120, 24 Oct)."""
     a, b = q.view(torch.float4_e2m1fn_x2), w.view(torch.float4_e2m1fn_x2).t()
@@ -186,9 +178,18 @@ def _gemm(q: torch.Tensor, s: torch.Tensor, w: torch.Tensor, ws: torch.Tensor, a
     return (y[:m] * alpha).to(dtype)
 
 
-@_gemm.register_fake
-def _(q, s, w, ws, alpha, m, dtype):
-    return q.new_empty((m, w.shape[0]), dtype=dtype)
+@torch.library.custom_op("basal::nvfp4_linear", mutates_args=())
+def _linear_cuda(x: torch.Tensor, w: torch.Tensor, ws: torch.Tensor, alpha: torch.Tensor,
+                 inv_g: torch.Tensor) -> torch.Tensor:
+    """x [M, K] bf16 -> [M, N]: the quantiser and the GEMM as one opaque op (compiled layers keep it whole; a CUDA
+    graph captures its two kernels)."""
+    q, s = act_quant(x, inv_g)
+    return _mm(q, s, w, ws, alpha, x.shape[0], x.dtype)
+
+
+@_linear_cuda.register_fake
+def _(x, w, ws, alpha, inv_g):
+    return x.new_empty((x.shape[0], w.shape[0]))
 
 
 def linear(x, w, ws, alpha, inv_g, bias=None):
@@ -198,8 +199,7 @@ def linear(x, w, ws, alpha, inv_g, bias=None):
     x2 = x.reshape(-1, shape[-1])
     N = w.shape[0]
     if x.is_cuda:
-        q, s = act_quant(x2.contiguous(), inv_g)
-        y = _gemm(q, s, w, ws, alpha, x2.shape[0], x.dtype)
+        y = torch.ops.basal.nvfp4_linear(x2.contiguous(), w, ws, alpha, inv_g)
     else:  # the reference maths: both operands dequantised, fp32 products
         K = x2.shape[1]
         qc, sc = _act_ops(x2, inv_g)
