@@ -41,7 +41,13 @@ def test_score_independence_and_accuracy():
     assert row["reference_accuracy"] == 1.0 and row["accuracy"] == 0.5
     assert row["accuracy_diff_ci"][0] <= -0.5 <= row["accuracy_diff_ci"][1]
     assert row["independence"] == 0.5 and abs(row["independence_max_dp"] - 0.4) < 1e-12
-    assert agree.gate(row) == "FAIL" and agree.gate(dict(agreement=1.0, independence=1.0)) == "pass"
+    row["readouts_multi"] = 2
+    assert agree.gate(row) == "FAIL"
+    assert agree.gate(dict(agreement=1.0, near_ties=0, readouts=4, independence=1.0, independence_ties=0,
+                           readouts_multi=2)) == "pass"
+    # disagreements on near ties pass: 98 of 100 agree and both flips are near ties
+    assert agree.gate(dict(agreement=0.98, near_ties=2, readouts=100)) == "pass"
+    assert agree.gate(dict(agreement=0.98, near_ties=0, readouts=100)) == "FAIL"
 
 
 class Tok:

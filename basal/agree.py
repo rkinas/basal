@@ -24,8 +24,9 @@ a request in one call. Per backend:
                against its readout in the request (top-1 agreement, max |dp|); a backend whose answer moves with the
                other questions of the request shows it here, whatever the reference says
 
-Gate: readout agreement >= --gate (default 0.99) and question independence >= --gate. The exit status is 0 when every
-backend passes, 1 otherwise.
+Gate: the readout agreement outside near ties (a disagreement whose reference top two are within 0.02 counts as
+agreeing: any change of rounding can flip those) >= --gate (default 0.99), and the same for question independence.
+The exit status is 0 when every backend passes, 1 otherwise.
 """
 import argparse
 import gc
@@ -164,12 +165,17 @@ def score(sets, ref, got, ind, gold, seed=0):
     if ind is not None:
         c = compare(flat(got["multi"]), ind)
         row["independence"] = c["agreement"]
+        row["independence_ties"] = c["near_ties"]
         row["independence_max_dp"] = c["max_dp"]
     return row
 
 
 def gate(row, g=GATE):
-    return "pass" if row["agreement"] >= g and row.get("independence", 1.0) >= g else "FAIL"
+    """Agreement outside near ties >= g, for the readouts and for question independence."""
+    ok = row["agreement"] + row["near_ties"] / row["readouts"] >= g
+    if "independence" in row:
+        ok = ok and row["independence"] + row["independence_ties"] / (row["readouts_multi"]) >= g
+    return "pass" if ok else "FAIL"
 
 
 def cache_key(model, revision, version, reference, sets):
@@ -279,21 +285,23 @@ def main(argv=None):
         ind = flat(run_groups(be, alone(multi), 1)) if a.independence == "on" else None
         free(be)
         row = dict(backend=spec, load_s=round(load_s, 1), run_s=round(run_s, 1), **score(sets, ref, got, ind, gold))
+        row["readouts_multi"] = len(flat(got["multi"]))
         row["gate"] = gate(row, a.gate)
         rows.append(row)
         print(json.dumps({k: round(v, 7) if isinstance(v, float) else v for k, v in row.items() if k != "sets"}),
               flush=True)
-    print(f"\n{'backend':<28}{'readouts':>9}{'top-1':>8}{'95% CI':>16}{'ties':>7}{'mean|dp|':>10}{'max|dp|':>10}"
+    w = max([28] + [len(r["backend"]) + 2 for r in rows])
+    print(f"\n{'backend':<{w}}{'readouts':>9}{'top-1':>8}{'95% CI':>16}{'ties':>7}{'mean|dp|':>10}{'max|dp|':>10}"
           f"{'decisions':>10}{'indep.':>8}  gate (reference {a.reference})")
     for r in rows:
         ci = f"[{r['agreement_ci'][0]:.3f}, {r['agreement_ci'][1]:.3f}]"
         ind = f"{r['independence']:.3f}" if "independence" in r else "-"
-        print(f"{r['backend']:<28}{r['readouts']:>9}{r['agreement']:>8.4f}{ci:>16}"
+        print(f"{r['backend']:<{w}}{r['readouts']:>9}{r['agreement']:>8.4f}{ci:>16}"
               f"{str(r['near_ties']) + '/' + str(r['disagreements']):>7}{r['mean_dp']:>10.2e}{r['max_dp']:>10.2e}"
               f"{r['decision_agreement']:>10.4f}{ind:>8}  {r['gate']}")
         if "accuracy" in r:
             lo, hi = r["accuracy_diff_ci"]
-            print(f"{'':<28}accuracy {r['accuracy']:.4f} vs {r['reference_accuracy']:.4f} "
+            print(f"{'':<{w}}accuracy {r['accuracy']:.4f} vs {r['reference_accuracy']:.4f} "
                   f"(paired 95% CI of the difference [{lo:+.4f}, {hi:+.4f}], {len(gold)} items)")
     if a.out:
         Path(a.out).write_text(json.dumps(dict(model=model, revision=revision, reference=a.reference, version=__version__,

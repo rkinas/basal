@@ -234,8 +234,8 @@ the same for any backends (basal-bench modes; `MODE=WEIGHTS` for other weights w
 native engine (`--reference`, default `eager-fp32`): per backend the top-answer agreement with a 95% bootstrap interval,
 mean / p99 / max |Δp|, the decisions with both orders averaged, the paired accuracy difference on `--questions` items
 with gold, and question independence (each question of a five-question request asked alone through the same backend
-gives the answer it gives in the request). The exit status is 0 when every backend passes `--gate` (default 0.99);
-`basal-agree --identity` runs the identity gate.
+gives the answer it gives in the request). The exit status is 0 when every backend passes `--gate` (default 0.99, top
+answers outside near ties); `basal-agree --identity` runs the identity gate.
 
 **Your own data.** 44 examples are enough to check that everything works, not for precise numbers. For numbers that
 describe *your* workload, write a JSONL file with a few hundred items in the same simple format (`{"state": ...,
