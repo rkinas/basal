@@ -144,17 +144,19 @@ def _build():
     @triton_op("basal::nvfp4_act_quant", mutates_args=())
     def op(x: torch.Tensor, inv_g: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         M, K = x.shape
-        Mp = max(128, -(-M // 128) * 128)
+        Mp = (M + 127) // 128 * 128  # no max() / branch on M: a traced size must stay one expression of M
         q = torch.empty((Mp, K // 2), dtype=torch.uint8, device=x.device)
         s = torch.empty((Mp * (K // BLOCK),), dtype=torch.uint8, device=x.device)
-        wrap_triton(kernel)[(Mp // 128, K // 64)](x, q, s, inv_g, M, K, K // 64, BM=128)
+        if M:
+            wrap_triton(kernel)[(Mp // 128, K // 64)](x, q, s, inv_g, M, K, K // 64, BM=128)
         return q, s
 
     return op
 
 
 def act_quant(x, inv_g):
-    """[M, K] bf16 -> (codes [Mp, K / 2] uint8, swizzled scales uint8 [Mp * K / 16]); rows past M are zeros."""
+    """[M, K] bf16 -> (codes [Mp, K / 2] uint8, swizzled scales uint8 [Mp * K / 16]), Mp = M rounded up to 128; rows
+    past M are zeros."""
     if not _KERNEL:
         _KERNEL.append(_build())
     return torch.ops.basal.nvfp4_act_quant(x, inv_g)
