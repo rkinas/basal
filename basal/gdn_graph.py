@@ -21,7 +21,13 @@ readout, and changes three things:
 
 The layers are transformers' own modules (projections, norms, MLP, rotary embedding); the Gated DeltaNet kernel is fla's
 (flash-linear-attention), as in the eager reference. Not here (refused before loading, with what to use instead): fp8 /
-nvfp4, compact rows, the state and prefix caches, template prefixes, --readout-layer on, --lean, the long lane.
+nvfp4, compact rows, the prefix cache, template prefixes, --readout-layer on, --lean, the long lane.
+- **State cache** (--state-cache-gb, 2.5): a request cut at its state boundary keeps its root as a full-state checkpoint:
+  the attention layers' keys and values of the state and, per Gated DeltaNet layer, the recurrent state and convolution
+  tail after its last token. A later request with the same state copies them where pass 1 would have written them and
+  runs pass 2 only. A state that begins with a whole cached one (a growing agent trace) continues it
+  (forward_continue) and replaces it; one that differs inside the cached tokens runs again (a recurrent state cannot
+  be cut there).
 """
 import inspect
 import json
@@ -33,7 +39,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .engine import GraphBackend, PREFILL, _copy_same, set_attention
+from .engine import GraphBackend, PREFILL, StateCache, _copy_same, set_attention
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -75,13 +81,13 @@ def refused(quant=None, state_cache_gb=0, prefix=False, batches="default", lean=
     if quant:
         return (f"--mode {quant} is not available for Qwen3.5 (Gated DeltaNet) models: the CUDA graph engine serves "
                 "them in bf16 (--mode fast); --mode vllm runs their FP8 checkpoints")
-    opts = [name for name, on in (("--state-cache-gb", state_cache_gb), ("--prefix-cache on", prefix),
+    opts = [name for name, on in (("--prefix-cache on", prefix),
                                   ("--batches compact", batches == "compact"), ("--lean", lean),
                                   ("--tree flex", tree == "flex"), ("--readout-layer on", readout_layer == "on"),
                                   ("--template-prefix on", template == "on")) if on]
     if opts:
         return (f"{', '.join(opts)}: not available for Qwen3.5 (Gated DeltaNet) models in the CUDA graph engine (basal "
-                "2.4 runs their plain and branched rows; the caches would have to keep recurrent states)")
+                "2.5 runs their plain and branched rows and the state cache)")
     if device and not torch.cuda.is_available():
         return "the CUDA graph engine needs a CUDA GPU; serve Qwen3.5 models with --mode eager here"
     if device and fla_rule() is None:
@@ -396,8 +402,10 @@ class Qwen35Graph:
         if out is not None:
             out[0].copy_(fs)
             n = w.shape[-1] - 1
-            ix = lens[:, None] - n + torch.arange(n, device=h.device)[None]  # tokens lens - n .. lens - 1
-            t = qkv.gather(1, ix.clamp_min(0)[..., None].expand(-1, -1, qkv.shape[-1]))
+            # tokens lens - n .. lens - 1; a row that continues a tail (c0) reads its first ones there
+            src = qkv if c0 is None else torch.cat([c0.to(qkv.dtype), qkv], 1)
+            ix = lens[:, None] - n + torch.arange(n, device=h.device)[None] + (0 if c0 is None else n)
+            t = src.gather(1, ix.clamp_min(0)[..., None].expand(-1, -1, src.shape[-1]))
             out[1].copy_(t * (ix >= 0)[..., None])  # before position 0: zeros (a root shorter than the tail)
         return f["gdn_out"](h, o, z.reshape(b, T, -1, a.head_v_dim), a.norm.weight, a.out_proj.weight)
 
@@ -471,6 +479,26 @@ class Qwen35Graph:
             lambda x, h, i: self._attention(x, h, cos, sin, prefix=(*roots[i], allow)))
 
 
+    @torch.no_grad()
+    def forward_continue(self, ids, n, kv0, st0, kv, st):
+        """Rows [b, T] that continue a cached state of n tokens (positions n ..): kv0 per attention layer (K, V)
+        [b, kv heads, n, d], st0 per Gated DeltaNet layer (state, tail); fills kv (K, V) [b, kv heads, T, d] with the
+        rows' own keys and values and st (state, tail) after their last token -> normalised hidden states [b, T, D]."""
+        b, T = ids.shape
+        dev = ids.device
+        h = self.m.embed_tokens(ids)
+        cos, sin = self._rope(h, torch.arange(n, n + T, device=dev)[None].expand(b, T))
+        G = self.heads // self.kv_shapes[0][0] if kv else 1
+        own = torch.ones(T, T, dtype=torch.bool, device=dev).tril()
+        allow = torch.cat([torch.ones(T, n, dtype=torch.bool, device=dev), own], -1)
+        allow = allow[None, None, None].expand(b, 1, G, T, n + T).reshape(b, 1, G * T, n + T)
+        lens = torch.full((b,), T, dtype=torch.long, device=dev)
+        return self._layers(
+            h,
+            lambda x, h, i: self._gdn(x, h, None, lens, st[i], s0=st0[i][0], c0=st0[i][1]),
+            lambda x, h, i: self._attention(x, h, cos, sin, kv[i], prefix=(*kv0[i], allow)))
+
+
 class GDNGraphBackend(GraphBackend):
     """GraphBackend for Qwen3.5 (Gated DeltaNet) models: GraphBackend(model_dir, ...) of such a model builds this one
     (GraphBackend.__new__). Single prompts run in the plain graphs as before; a branched unit runs its root in a plain
@@ -512,6 +540,8 @@ class GDNGraphBackend(GraphBackend):
         if batches == "fine":
             self.BATCHES = self.FINE_BATCHES
         self._alloc_kv()
+        # --state-cache-gb: roots cut at the state boundary, kept as full-state checkpoints (keys / values + states)
+        self.state_cache = StateCache(state_cache_gb * 2 ** 30) if state_cache_gb and shared else None
         self.template = []
         self.counts = {}  # forwards per kind: "plain" / "pass1" / "pass2", each "graph" or "eager" (gate scripts)
         self.pool = torch.cuda.graph_pool_handle() if cuda else None
@@ -697,18 +727,91 @@ class GDNGraphBackend(GraphBackend):
         reads = [(None, i) if i < P else (first[sg[i]][0], first[sg[i]][1] + i - start[sg[i]]) for i in last]
         return rows, reads
 
+    CONTINUE_MAX = 8192  # most new tokens a cached state is continued by (beyond: the whole state runs again)
+
+    def _extend_states(self, units, keys, hits):
+        """A request state that begins with a whole cached one (a growing agent trace or chat history): its new tokens
+        continue the cached checkpoint (Qwen35Graph.forward_continue: the attention layers over the cached keys and
+        values, the Gated DeltaNet layers from the cached states and tails), and the extended checkpoint replaces the
+        old entry and serves as a hit. A state that differs inside the cached tokens runs again: a recurrent state
+        cannot be cut there."""
+        if not keys or self.state_cache is None:
+            return
+        na = len(self.kv_shapes)
+        for k, key in enumerate(keys):
+            if key is None or k in hits:
+                continue
+            pk = units[k][0]
+            root = list(pk[0][: pk[2].index(1)])
+            found = self.state_cache.longest(root)
+            if found is None:
+                continue
+            old, e, m, n = found
+            if old == key:  # cached by an earlier unit of this call
+                hits[k] = e
+                continue
+            if m != n or n >= len(root) or len(root) - n > self.CONTINUE_MAX:
+                continue
+            T, dt, dev = len(root) - n, self._dtype, self.dev
+            kv = [tuple(torch.empty((1, H, T, D), dtype=dt, device=dev) for _ in "kv") for H, D in self.kv_shapes]
+            st = [(torch.empty((1, *self.net.state_shape), dtype=torch.float32, device=dev),
+                   torch.empty((1, *self.net.tail_shape), dtype=dt, device=dev)) for _ in range(self.net.n_gdn)]
+            with self._launch:
+                self.net.forward_continue(self._to_dev(torch.tensor([root[n:]])), n,
+                                          [(ke[None], ve[None]) for ke, ve in e[:na]],
+                                          [(se[None], ce[None]) for se, ce in e[na:]], kv, st)
+            new = ([(torch.cat([ke, kn[0]], 1), torch.cat([ve, vn[0]], 1)) for (ke, ve), (kn, vn) in zip(e[:na], kv)]
+                   + [(s[0], c[0]) for s, c in st])
+            self.state_cache.put(key, new, tokens=root, replaces=old)
+            hits[k] = new
+
+    @staticmethod
+    def _entry(kv, st, r, p):
+        """The state-cache entry of root row r (p tokens): per attention layer (K, V) [kv heads, p, d], then per Gated
+        DeltaNet layer (recurrent state, convolution tail) after its last token."""
+        return ([(k[r, :, :p].clone(), v[r, :, :p].clone()) for k, v in kv]
+                + [(s[r].clone(), c[r].clone()) for s, c in st])
+
+    @staticmethod
+    def _load(kv, st, hits, P):
+        """Cached entries into root rows 0.. of the pass-1 outputs, where pass 1 would have written them."""
+        n = len(kv)
+        for r, (e, p) in enumerate(zip(hits, P)):
+            for (kb, vb), (ke, ve) in zip(kv, e[:n]):
+                kb[r, :, :p].copy_(ke, non_blocking=True)
+                vb[r, :, :p].copy_(ve, non_blocking=True)
+            for (sb, cb), (se, ce) in zip(st, e[n:]):
+                sb[r].copy_(se, non_blocking=True)
+                cb[r].copy_(ce, non_blocking=True)
+
     @torch.no_grad()
     def _tree_hidden(self, packs, idx, keys=None, hits=None):
         """Branched units -> hidden states at their readout positions. Pass 1: the roots in a plain graph that also
         writes their keys, values and recurrent states (beyond the largest graph: one uncaptured forward into fresh
         buffers). Pass 2: one row per leaf of each unit's trie, over its root, in pass-2 graphs of up to LEAF_ROWS[-1]
-        rows (uncaptured beyond them)."""
+        rows (uncaptured beyond them). keys / hits (--state-cache-gb): per unit, the state-cache key of its root and its
+        cached entry; when every root is cached and no prompt ends inside one, pass 1 is skipped (_load); roots computed
+        here are stored (_entry)."""
         P = [packs[k][2].index(1) for k in idx]  # block 0 (the root) comes first and is contiguous
         b = len(idx)
         roots = [packs[k][0][:p] for k, p in zip(idx, P)]
+        keys, hits = keys or [None] * b, hits or [None] * b
+        leaves = [self._leaves(packs[k], p) for k, p in zip(idx, P)]
+        # a prompt that is a root itself is read out in pass 1, so its unit needs pass 1
+        cached = all(e is not None for e in hits) and all(q is not None for _, reads in leaves for q, _ in reads)
         captured = self.pool is not None and max(P) <= self.PLAIN_LENS[-1] and b <= self.TREE_ROWS[-1]
-        self._count("pass1", captured)
-        if captured:
+        h1 = None
+        if cached:
+            self._count("pass1 cached", captured)
+            if captured:
+                L2 = self._root_len(self._bucket(max(P), self.PLAIN_LENS))
+                kv, st = self._root_views(L2), self._st
+            else:
+                L2 = max(P)
+                kv, st = self._fresh(b, L2)
+            self._load(kv, st, hits, P)
+        elif captured:
+            self._count("pass1", captured)
             L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(b, self.BATCHES)
             L2 = self._root_len(L)
             g, s_ids, s_lens, h1 = self._graph(B, L)
@@ -718,16 +821,21 @@ class GDNGraphBackend(GraphBackend):
             g.replay()
             kv, st = self._root_views(L2), self._st
         else:
+            self._count("pass1", captured)
             L2 = max(P)
             kv, st = self._fresh(b, L2)
             ids, lens = self._rows_in(roots, L2)
             h1 = self.fwd(self._to_dev(ids), self._to_dev(lens), kv, st)
+        if self.state_cache is not None and not cached:  # the roots computed here, as full-state checkpoints
+            for r, key in enumerate(keys):
+                if key is not None and hits[r] is None:
+                    self.state_cache.put(key, self._entry(kv, st, r, P[r]), tokens=roots[r])
         rows, sel = [], []  # rows: (unit, token indices); sel: per readout (pass, row, column), in unit order
-        for r, (k, p) in enumerate(zip(idx, P)):
-            leaf, reads = self._leaves(packs[k], p)
+        for r, (leaf, reads) in enumerate(leaves):
             sel += [(1, r, c) if q is None else (2, len(rows) + q, c) for q, c in reads]
             rows += [(r, ix) for ix in leaf]
-        out = torch.empty((len(sel), h1.shape[-1]), dtype=h1.dtype, device=self.dev)
+        width = h1.shape[-1] if h1 is not None else self._hidden_size
+        out = torch.empty((len(sel), width), dtype=self._dtype if h1 is None else h1.dtype, device=self.dev)
         j1 = [n for n, x in enumerate(sel) if x[0] == 1]
         if j1:
             out[self._to_dev(torch.tensor(j1))] = h1[self._to_dev(torch.tensor([sel[n][1] for n in j1])),
