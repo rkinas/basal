@@ -7,6 +7,13 @@ along the ring). Requests without a state go to the less loaded of two random re
 /health; one answering 503 (starting) or not answering gets no requests until it is ready again. With --gpus, the
 router exits (status 1) when every replica it started has exited.
 
+Off by default (the replicas' answers then pass through untouched):
+  --escalate URL ... --escalate-below P   a cascade: questions whose top probability (calibrated, as the first replica
+                                          answers) is under P are asked again of the escalation replicas (a bigger
+                                          model); every answer says "answered_by": "first" or "escalated"
+  --route SCRIPT=URL[,URL]                requests whose state is mostly in that script (latin, cyrillic, greek,
+                                          arabic, hebrew, cjk) go to those replicas instead
+
   basal-router --replicas http://127.0.0.1:8001 http://127.0.0.1:8002 --port 8000
   basal-router --gpus 0,1,2,3 --port 8000 -- --model Remek/basal-2.0-mini --mode fast   (starts one basal-serve per
                                                                                           GPU on ports 8001..)
@@ -42,6 +49,31 @@ def state_key(body):
     return re.sub(r"\s+", " ", state.strip())
 
 
+SCRIPTS = ("latin", "cyrillic", "greek", "arabic", "hebrew", "cjk")
+
+
+def script_of(text):
+    """The script most of the letters of text are in (SCRIPTS, or "other"; None without letters)."""
+    import unicodedata
+    count = {}
+    for ch in text or "":
+        if ch.isalpha():
+            name = unicodedata.name(ch, "")
+            sc = next((x for x in SCRIPTS[:5] if name.startswith(x.upper())), None)
+            if sc is None:
+                sc = "cjk" if name.startswith(("CJK", "HIRAGANA", "KATAKANA", "HANGUL")) else "other"
+            count[sc] = count.get(sc, 0) + 1
+    return max(count, key=count.get) if count else None
+
+
+def top_probability(answer):
+    """The top probability of an answer (its option probabilities), None for answers without one (multi, tasks)."""
+    p = answer.get("probabilities") if isinstance(answer, dict) else None
+    if answer.get("type") == "multi" or not isinstance(p, dict) or not p:
+        return None
+    return max(p.values())
+
+
 def _h(text):
     return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
 
@@ -72,10 +104,16 @@ class Ring:
 
 
 class Router:
-    def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0):
+    def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None):
         import httpx
-        self.replicas = list(replicas)
-        self.ring = Ring(self.replicas)
+        self.pools = {"main": list(replicas), "escalate": list(escalate),
+                      **{f"script:{k}": list(v) for k, v in (routes or {}).items()}}
+        self.replicas = list(dict.fromkeys(u for urls in self.pools.values() for u in urls))
+        self.rings = {name: Ring(urls) for name, urls in self.pools.items() if urls}
+        self.ring = self.rings.get("main")
+        self.below = below
+        self.answered = {"first": 0, "escalated": 0}
+        self.scripts = {}
         self.ready = set()
         self.load = {r: 0 for r in self.replicas}
         self.routed = {(r, how): 0 for r in self.replicas for how in ("state", "load")}
@@ -86,12 +124,12 @@ class Router:
         self.client = httpx.AsyncClient(timeout=None, transport=transport,
                                         limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
-    def choose(self, key):
-        """(replica, how) for a request with routing key key (None: by load)."""
+    def choose(self, key, pool="main"):
+        """(replica, how) for a request with routing key key (None: by load), among the replicas of pool."""
         if key is not None:
-            r = self.ring.pick(key, self.load, self.ready, self.factor)
+            r = self.rings[pool].pick(key, self.load, self.ready, self.factor)
             return r, "state"
-        ready = sorted(self.ready)
+        ready = sorted(self.ready & set(self.pools[pool]))
         if not ready:
             return None, "load"
         a, b = self.rng.choice(ready), self.rng.choice(ready)
@@ -108,8 +146,51 @@ class Router:
         await asyncio.gather(*(one(r) for r in self.replicas))
 
     async def forward(self, path, body, headers):
-        """-> (status, content, content type)."""
-        r, how = self.choose(state_key(body))
+        """-> (status, content, content type): the request to the replica its pool and state give, then (--escalate)
+        its low-confidence questions to the escalation replicas."""
+        pool = "main"
+        if len(self.rings) > 1 + ("escalate" in self.rings):  # --route
+            try:
+                sc = script_of(json.loads(body).get("state"))
+            except (ValueError, AttributeError):
+                sc = None
+            if sc is not None:
+                self.scripts[sc] = self.scripts.get(sc, 0) + 1
+                pool = f"script:{sc}" if f"script:{sc}" in self.rings else pool
+        status, content, ctype = await self._send(pool, path, body, headers)
+        if "escalate" in self.rings and status == 200:
+            content = await self._cascade(path, body, content, headers)
+        return status, content, ctype
+
+    async def _cascade(self, path, body, content, headers):
+        """The answers of the first replica, with those under --escalate-below asked again of the escalation pool."""
+        try:
+            req, resp = json.loads(body), json.loads(content)
+            answers = resp["answers"]
+        except (ValueError, KeyError, TypeError):
+            return content
+        low = [q for q, a in answers.items() if q in (req.get("questions") or {})
+               and (top_probability(a) if isinstance(a, dict) else None) is not None and top_probability(a) < self.below]
+        for a in answers.values():
+            if isinstance(a, dict):
+                a["answered_by"] = "first"
+        done = []
+        if low:
+            sub = dict(req, questions={q: req["questions"][q] for q in low})
+            st, c2, _ = await self._send("escalate", path, json.dumps(sub).encode(), headers)
+            if st == 200:
+                for q, a in (json.loads(c2).get("answers") or {}).items():
+                    if q in low and isinstance(a, dict):
+                        a["answered_by"] = "escalated"
+                        answers[q] = a
+                        done.append(q)
+        self.answered["escalated"] += len(done)
+        self.answered["first"] += sum(1 for a in answers.values() if isinstance(a, dict)) - len(done)
+        resp["cascade"] = {"below": self.below, "escalated": done}
+        return json.dumps(resp, ensure_ascii=False).encode()
+
+    async def _send(self, pool, path, body, headers):
+        r, how = self.choose(state_key(body), pool)
         if r is None:
             return 503, b'{"error": "no basal replica is ready"}', "application/json"
         self.load[r] += 1
@@ -136,7 +217,11 @@ class Router:
             ("basal_router_routed_total", "requests routed, by the state's hash or by load", "counter",
              [({"replica": r, "by": how}, n) for (r, how), n in self.routed.items()]),
             ("basal_router_failed_total", "requests the replica answered with 5xx or not at all", "counter",
-             [({"replica": r}, n) for r, n in self.failed.items()])])
+             [({"replica": r}, n) for r, n in self.failed.items()])]
+            + ([("basal_router_answers_total", "answers by the first replica / escalated (--escalate)", "counter",
+                 [({"answered_by": k}, n) for k, n in self.answered.items()])] if "escalate" in self.rings else [])
+            + ([("basal_router_script_total", "requests by the script of their state (--route)", "counter",
+                 [({"script": k}, n) for k, n in sorted(self.scripts.items())])] if self.scripts else []))
 
 
 def app(router, poll_s=POLL_S, procs=(), on_dead=lambda: signal.raise_signal(signal.SIGTERM)):
@@ -212,6 +297,10 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--load-factor", dest="load_factor", type=float, default=LOAD_FACTOR)
+    ap.add_argument("--escalate", nargs="*", default=[], help="escalation replicas (a bigger model) for the cascade")
+    ap.add_argument("--escalate-below", dest="escalate_below", type=float, default=0.8,
+                    help="--escalate: questions whose top probability is under this are asked again there")
+    ap.add_argument("--route", action="append", default=[], help="SCRIPT=URL[,URL]: states in that script go there")
     a = ap.parse_args(argv)
     procs, urls = ([], list(a.replicas))
     if a.gpus:
@@ -221,7 +310,13 @@ def main(argv=None):
         raise SystemExit("basal-router: no replicas (--replicas URL ... or --gpus 0,1 -- <basal-serve arguments>)")
     import uvicorn
     print(f"basal-router: {len(urls)} replicas, port {a.port}", flush=True)
-    router = Router(urls, factor=a.load_factor)
+    routes = {}
+    for x in a.route:
+        k, _, v = x.partition("=")
+        if k not in SCRIPTS + ("other",) or not v:
+            raise SystemExit(f"basal-router: --route {x!r}: SCRIPT=URL[,URL], SCRIPT one of {', '.join(SCRIPTS)}, other")
+        routes[k] = v.split(",")
+    router = Router(urls, factor=a.load_factor, escalate=a.escalate, below=a.escalate_below, routes=routes)
     try:
         uvicorn.run(app(router, procs=procs), host=a.host, port=a.port, log_level="warning")
     finally:
