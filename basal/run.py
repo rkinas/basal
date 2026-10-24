@@ -21,7 +21,10 @@ from pathlib import Path
 import httpx
 
 
-def to_request(item, early_exit=None):
+def to_request(item, early_exit=None, preset=None, lang=None):
+    if preset and "questions" not in item and "question" not in item:  # --preset: its questions over the state
+        from .presets import questions
+        item = dict(item, questions=questions(preset, lang, item["state"]))
     if "questions" in item:
         body = {k: item[k] for k in ("state", "questions", "early_exit") if k in item}
     else:
@@ -66,7 +69,8 @@ async def run(a):
         async def one(i, it):
             async with sem:
                 try:
-                    r = await c.post(a.url, json=to_request(it, a.early_exit))
+                    r = await c.post(a.url, json=to_request(it, a.early_exit, getattr(a, "preset", None),
+                                                            getattr(a, "lang", None)))
                     resp = r.json()
                 except (httpx.HTTPError, ValueError) as e:
                     resp = {"error": str(e)}
@@ -90,12 +94,27 @@ async def run(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--input", required=True, help="JSONL file")
-    ap.add_argument("--output", required=True, help="JSONL file with one answer per input line")
+    ap.add_argument("--input", help="JSONL file")
+    ap.add_argument("--output", help="JSONL file with one answer per input line")
+    ap.add_argument("--preset", default=None, help="ready questions for lines with a state only (--list-presets)")
+    ap.add_argument("--lang", choices=["pl", "en"], default=None, help="--preset wording (default: the state's)")
+    ap.add_argument("--list-presets", dest="list_presets", action="store_true")
     ap.add_argument("--url", default="http://127.0.0.1:8000/v1/systemone")
     ap.add_argument("--concurrency", type=int, default=16, help="requests in flight (the server batches them)")
     ap.add_argument("--early-exit", dest="early_exit", default=None, help="e.g. 0.99 (server mode fast-exit)")
-    asyncio.run(run(ap.parse_args()))
+    a = ap.parse_args()
+    if a.list_presets:
+        from .presets import names, questions
+        for n in names():
+            print(n + ": " + ", ".join(questions(n, "en")))
+        return
+    if not a.input or not a.output:
+        ap.error("--input and --output are required")
+    if a.preset:
+        from .presets import names
+        if a.preset not in names():
+            ap.error(f"--preset {a.preset}: one of {', '.join(names())}")
+    asyncio.run(run(a))
 
 
 if __name__ == "__main__":
