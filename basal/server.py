@@ -1607,6 +1607,55 @@ def parser():
     return ap
 
 
+def prometheus(metrics):
+    """Prometheus text exposition of [(name, help, type, [(labels dict, value)])]."""
+    out = []
+    for name, help_, kind, samples in metrics:
+        out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
+        for labels, value in samples:
+            lab = ",".join(f'{k}="{str(v).replace(chr(34), chr(39))}"' for k, v in labels.items())
+            out.append(f"{name}{{{lab}}} {value}" if lab else f"{name} {value}")
+    return "\n".join(out) + "\n"
+
+
+class Starting:
+    """basal-serve while the model loads and warms up (2.5): the port answers every request with HTTP 503
+    {"status": "starting"} (a router or a load balancer sees a server that is not ready, not a closed port), from a
+    small thread server; stop() frees the port for the real one. Start-up stays in the main thread (CUDA graphs,
+    torch.compile)."""
+
+    def __init__(self, host, port):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def _answer(self):
+                body = b'{"status": "starting"}'
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Retry-After", "5")
+                self.end_headers()
+                self.wfile.write(body)
+            do_GET = do_POST = do_HEAD = _answer
+
+            def log_message(self, *_):
+                pass
+        ThreadingHTTPServer.allow_reuse_address = True
+        try:
+            self.httpd = ThreadingHTTPServer((host, port), H)
+        except OSError as e:  # the port is taken: start without it (uvicorn reports the port when it binds)
+            print(f"basal: warning: no 503 answers during start-up on port {port}: {e}", flush=True)
+            self.httpd = None
+            return
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        if self.httpd is not None:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+            self.httpd = None
+
+
 def http_app(srv, mode, mcp=None):
     """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models and /health; mcp: (routes, lifespan) of
     --mcp on. A failed request answers {"error": message} with http_status: 422 invalid request, 503 out of GPU
@@ -1614,8 +1663,9 @@ def http_app(srv, mode, mcp=None):
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, PlainTextResponse
     from starlette.routing import Route
+    counts = {"requests": 0, "failed": 0, "seconds": 0.0}  # GET /metrics
 
     def failed(e):
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
@@ -1628,10 +1678,15 @@ def http_app(srv, mode, mcp=None):
             body = await request.json()
         except ValueError as e:  # not JSON (or not UTF-8)
             return failed(RequestError(f"the request body is not valid JSON: {e}"))
+        t = time.perf_counter()
+        counts["requests"] += 1
         try:
             return JSONResponse(await srv.serve(body))
         except Exception as e:  # noqa: BLE001
+            counts["failed"] += 1
             return failed(e)
+        finally:
+            counts["seconds"] += time.perf_counter() - t
 
     async def models(_):
         return JSONResponse(models_payload(srv.name, mode, getattr(srv.backend, "policies", {}), srv.temps,
@@ -1641,6 +1696,31 @@ def http_app(srv, mode, mcp=None):
 
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})
+
+    async def metrics(_):
+        """Prometheus metrics (2.5): requests waiting / running (also under vLLM's names, which routers such as llm-d
+        read), requests served / failed and their time, the state cache when there is one."""
+        load = srv.load()
+        info = {"model": srv.name, "mode": mode, "layout": getattr(srv, "layout", "canonical")}
+        m = [("basal_info", "the served model", "gauge", [(info, 1)]),
+             ("basal_requests_waiting", "requests waiting for the engine", "gauge", [({}, load["queued"])]),
+             ("basal_requests_running", "requests in flight, not waiting", "gauge", [({}, load["running"])]),
+             ("vllm:num_requests_waiting", "as basal_requests_waiting (vLLM's name)", "gauge", [({}, load["queued"])]),
+             ("vllm:num_requests_running", "as basal_requests_running (vLLM's name)", "gauge", [({}, load["running"])]),
+             ("basal_requests_total", "requests served (POST /v1/systemone, /v1/basal)", "counter",
+              [({}, counts["requests"])]),
+             ("basal_requests_failed_total", "requests answered with an error", "counter", [({}, counts["failed"])]),
+             ("basal_request_seconds_total", "time spent on those requests", "counter",
+              [({}, round(counts["seconds"], 6))])]
+        cache = getattr(srv.backend, "state_cache", None)
+        if cache is not None:
+            st = cache.stats()
+            m += [("basal_state_cache_bytes", "bytes of cached states", "gauge", [({}, st["used_bytes"])]),
+                  ("basal_state_cache_budget_bytes", "--state-cache-gb", "gauge", [({}, st["budget_bytes"])]),
+                  ("basal_state_cache_entries", "cached states", "gauge", [({}, st["entries"])]),
+                  ("basal_state_cache_hits_total", "requests whose state was cached", "counter", [({}, st["hits"])]),
+                  ("basal_state_cache_misses_total", "requests whose state was not", "counter", [({}, st["misses"])])]
+        return PlainTextResponse(prometheus(m), media_type="text/plain; version=0.0.4")
 
     mcp_routes, mcp_run = mcp or ([], None)
 
@@ -1656,7 +1736,7 @@ def http_app(srv, mode, mcp=None):
 
     return Starlette(routes=[Route("/v1/systemone", systemone, methods=["POST"]),
                              Route("/v1/basal", systemone, methods=["POST"]), Route("/v1/models", models),
-                             Route("/health", health), *mcp_routes], lifespan=lifespan)
+                             Route("/health", health), Route("/metrics", metrics), *mcp_routes], lifespan=lifespan)
 
 
 def main():
@@ -1672,11 +1752,19 @@ def main():
     import uvicorn
 
     t0 = time.time()
-    if a.think == "off":
-        srv = Server(a)
-    else:
-        from .think import ThinkServer
-        srv = ThinkServer(a)
+    starting = Starting(a.host, a.port)  # 503 on the port until the model is ready
+    try:
+        if a.think == "off":
+            srv = Server(a)
+        else:
+            from .think import ThinkServer
+            srv = ThinkServer(a)
+    except BaseException as e:  # a failed start-up exits (exit 1), the port closes: never a half-started server
+        starting.stop()
+        if isinstance(e, SystemExit):
+            raise
+        traceback.print_exc()
+        raise SystemExit(f"basal: start-up failed: {type(e).__name__}: {e}") from None
     attn = getattr(srv.backend, "attn", None)
     rows = getattr(srv.backend, "compact_kernel", None)  # compact rows: their kernel, and the template prefix with them
     info = (f" attention {attn}" if attn else "") + (f" compact rows {rows}" if rows else "") \
@@ -1700,6 +1788,7 @@ def main():
         fast = dict(loop="uvloop", http="httptools")
     except ImportError:
         fast = {}
+    starting.stop()
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning", **fast)
 
 
