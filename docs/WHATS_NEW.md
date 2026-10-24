@@ -1,3 +1,13 @@
+# What is new in basal 2.5
+
+- **`--mlx-forward basal` on Apple Silicon** (opt-in; the default `mlx-lm` is unchanged): basal's own forward over
+  mlx-lm's layers for Llama and Gemma 4. The layers from the last one with its own keys and values on run at the
+  readout rows only, the GPU starts early, and the projections that read one input become one matrix where a check at
+  load finds the same bits. basal-omni-1.0-mini-MLX on an Apple M4 Pro: one prompt 225 -> 131 ms, one question in two
+  orders 222 -> 179 ms, one prompt over 3,000 tokens 5.3 -> 3.0 s; basal-2.0-mini-MLX-8bit 2-4% faster on short
+  prompts. Top answers equal the default path on 184 of 184 readouts per model. Details in
+  [QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon).
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture
