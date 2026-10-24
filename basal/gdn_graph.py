@@ -402,6 +402,9 @@ class GDNGraphBackend(GraphBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto"):
+        if compile == "layer":
+            raise ValueError(f"{model_dir}: --compile-scope layer: the bf16 Llama forward only (Qwen3.5's compiled "
+                             "code is per layer kind already)")
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)  # before loading
         if why:
             raise ValueError(f"{model_dir}: {why}")

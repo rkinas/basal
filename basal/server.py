@@ -720,6 +720,9 @@ class Server:
     def __init__(self, a):
         validate_quant(a.mode, a.quant)
         kind, quant, comp = MODES[a.mode]
+        if getattr(a, "compile_scope", "model") == "layer" and (kind != "graph" or not comp):
+            raise SystemExit(f"--compile-scope layer: the CUDA graph engine's compiled modes (--mode fast), not "
+                             f"--mode {a.mode}")
         if kind == "gguf" and not a.gguf:
             raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
         if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
@@ -819,7 +822,9 @@ class Server:
             from .tpu import TPUBackend
             self.backend = TPUBackend(md, a.dtype, shared=shared, max_len=a.max_len)
         else:
-            self.backend = GraphBackend(md, a.dtype, quant, compile=comp, shared=shared, attn=attn,
+            scope = getattr(a, "compile_scope", "model")
+            self.backend = GraphBackend(md, a.dtype, quant, compile="layer" if comp and scope == "layer" else comp,
+                                        shared=shared, attn=attn,
                                         state_cache_gb=getattr(a, "state_cache_gb", 0),
                                         merge=merge_arg(a.merge), lean=lean_arg(getattr(a, "lean", "off")),
                                         tree=getattr(a, "tree", "dense"),
@@ -1524,6 +1529,11 @@ def add_engine_args(ap):
                     help="CUDA graph engine, Llama models: one compiled layer function for every layer and shape "
                          "(basal/lean.py) instead of transformers' module tree, in both passes or in pass 2 only. "
                          "auto: pass2 on the CUDA graph engine (with --tree auto / flex), else off")
+    ap.add_argument("--compile-scope", dest="compile_scope", choices=["model", "layer"], default="model",
+                    help="CUDA graph engine, Llama models, compiled modes: torch.compile the transformers model as a "
+                         "whole (model) or each decoder layer, one compiled layer function for all of them (layer: "
+                         "start-up compiles one layer instead of the whole model; kernels fuse within a layer only, "
+                         "so probabilities move by bf16 rounding)")
     ap.add_argument("--tree", choices=["auto", "dense", "flex"], default="dense",
                     help="with --lean pass2: the pass-2 trie mask as a dense additive mask (KV heads repeated) or as a "
                          "FlexAttention mask over the KV heads as they are. auto: flex with --lean pass2, else dense")

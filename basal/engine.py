@@ -550,14 +550,17 @@ def _varlen_attention(q, k, v, cu, scale, layer=0, impl="fa3"):
 
 
 def basal_attention(module, query, key, value, attention_mask, dropout=0.0, scaling=None, is_causal=None,
-                    basal_kv=None, basal_prefix=None, basal_cu=None, basal_varlen="fa3", basal_tree=None, **kwargs):
+                    basal_kv=None, basal_prefix=None, basal_cu=None, basal_varlen="fa3", basal_tree=None,
+                    basal_layer_kv=None, **kwargs):
     """torch SDPA with additions for the two-pass forward of branched units and for compact rows (the kwargs pass
     through the transformers model forward): basal_kv[layer] = (K, V) buffers that receive this layer's keys and
-    values (the root pass), basal_prefix[layer] = (K, V) of a computed prefix that the queries also attend to (the
-    branch pass), basal_cu = cumulative token counts of prompts packed into one row (each attends to itself only),
-    basal_varlen = the kernel of those rows (_varlen_attention's impl), basal_tree = the branch pass without dense
-    masks: the queries attend to the prefix and, per trie block, to their own ancestors separately, merged by
-    log-sum-exp (no concatenated keys, no [N, P + N] mask); _block_plan's batches on the CPU, a _VarlenTree on CUDA.
+    values (the root pass; basal_layer_kv = this layer's (K, V) alone, as the per-layer compiled forward passes them,
+    so that a compiled layer does not depend on its index), basal_prefix[layer] = (K, V) of a computed prefix that the
+    queries also attend to (the branch pass), basal_cu = cumulative token counts of prompts packed into one row (each
+    attends to itself only), basal_varlen = the kernel of those rows (_varlen_attention's impl), basal_tree = the
+    branch pass without dense masks: the queries attend to the prefix and, per trie block, to their own ancestors
+    separately, merged by log-sum-exp (no concatenated keys, no [N, P + N] mask); _block_plan's batches on the CPU, a
+    _VarlenTree on CUDA.
     A causal forward without a mask uses the kernel chosen by set_attention (--attn)."""
     from transformers.integrations.sdpa_attention import sdpa_attention_forward
     if basal_cu is not None:
@@ -569,8 +572,8 @@ def basal_attention(module, query, key, value, attention_mask, dropout=0.0, scal
         o_p, l_p = _attention_lse(query, k, v, scaling)
         o_b, l_b = _branch_attention(query, key, value, scaling, basal_tree)
         return _merge_attention(o_p, l_p, o_b, l_b).transpose(1, 2).contiguous(), None
-    if basal_kv is not None:
-        k, v = basal_kv[module.layer_idx]
+    if basal_kv is not None or basal_layer_kv is not None:
+        k, v = basal_layer_kv if basal_layer_kv is not None else basal_kv[module.layer_idx]
         k.copy_(key); v.copy_(value)
     if basal_prefix is not None:
         k, v = basal_prefix[module.layer_idx]
@@ -766,6 +769,14 @@ def _cascade_varlen(q, k, v, kp, vp, tree, scale):
         o_b = qf.new_zeros(B * S, H, d).index_copy_(0, tree.qi, o_b)
         l_b = torch.full((B * S, H), float("-inf"), device=q.device).index_copy_(0, tree.qi, l_b)
     return _merge_attention(o_r, l_r, o_b, l_b).view(B, S, H, d)
+
+
+def _layer_call(layer, h, mask, pe, pos, kv):
+    """One decoder layer as the transformers model's loop calls it, its (K, V) buffers passed alone (basal_layer_kv):
+    compiled once (--compile-scope layer), it serves every layer, which differ only in their weights (inputs to the
+    compiled code), not in an index it would have to specialise on."""
+    return layer(h, attention_mask=mask, position_embeddings=pe, position_ids=pos, past_key_values=None,
+                 use_cache=False, basal_layer_kv=kv)
 
 
 def causal_sdpa(model):
@@ -977,6 +988,11 @@ class GraphBackend(EagerBackend):
         # (deterministic cuBLAS needs it)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:2")
         self.fp8_checkpoint = modelopt_fp8(model_dir)  # the -FP8 repositories: FP8 weights with static scales
+        if compile == "layer":  # measured on the bf16 Llama forward only (refused before the weights are loaded)
+            what = ("FP8 / NVFP4 weights" if quant or self.fp8_checkpoint else
+                    "Gemma 4" if gemma4_graph.is_gemma4_dir(model_dir) else "--lean" if lean else None)
+            if what:
+                raise ValueError(f"--compile-scope layer: the bf16 Llama forward only, not {what}")
         # likewise: the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs)
         self.attn = set_attention(attn, fp8=self.fp8_checkpoint or quant == "fp8")
         if batches == "compact" and self.attn != "fa3":  # refused before the weights are loaded
@@ -1100,7 +1116,11 @@ class GraphBackend(EagerBackend):
             dynamo.config.cache_size_limit = 64
             # pass 2 stays uncompiled: compiled graphs for its (rows, branch length, root length) grid took minutes
             # to capture; its graphs replay the normal forward
-            self.fwd = torch.compile(self._forward, dynamic=True)
+            if compile == "layer":  # --compile-scope layer: one compiled layer function (_forward_by_layer)
+                self._layer_step = torch.compile(_layer_call, dynamic=True)
+                self.fwd = self._forward_by_layer
+            else:
+                self.fwd = torch.compile(self._forward, dynamic=True)
 
     @property
     def _dtype(self):
@@ -1561,10 +1581,12 @@ class GraphBackend(EagerBackend):
             hits[k] = new
 
     @torch.no_grad()
-    def _forward_layered(self, ids, kv=None, between=None):
+    def _forward_layered(self, ids, kv=None, between=None, step=None):
         """The plain causal forward (`_forward`, uncompiled) one decoder layer at a time, calling between(i) before
         layer i (the long lane gives the GPU to the main lane there): the transformers model's own loop, the same
-        modules with the same arguments, so the same result. Gemma 4: its own forward, uncompiled."""
+        modules with the same arguments, so the same result. step: run each layer as step(layer, hidden states, mask,
+        rotary embeddings, positions, this layer's (K, V)) (_layer_call compiled: --compile-scope layer). Gemma 4: its
+        own forward, uncompiled."""
         if self.gemma is not None:
             return self.gemma.forward(ids, kv, between=between, compiled=False)
         from transformers.masking_utils import create_causal_mask
@@ -1577,9 +1599,18 @@ class GraphBackend(EagerBackend):
         for i, layer in enumerate(m.layers[: m.config.num_hidden_layers]):
             if between is not None:
                 between(i)
-            h = layer(h, attention_mask=mask, position_embeddings=pe, position_ids=pos, past_key_values=None,
-                      use_cache=False, basal_kv=kv)
+            if step is not None:
+                h = step(layer, h, mask, pe, pos, None if kv is None else kv[i])
+            else:
+                h = layer(h, attention_mask=mask, position_embeddings=pe, position_ids=pos, past_key_values=None,
+                          use_cache=False, basal_kv=kv)
         return m.norm(h)
+
+    def _forward_by_layer(self, ids, kv=None, ro=None):
+        """The plain causal forward with each decoder layer compiled (--compile-scope layer): the same transformers
+        layers as the model compiled as a whole, one compiled layer function for every layer and shape, so start-up
+        compiles one layer instead of the whole model; the loop, the embeddings and the final norm stay uncompiled."""
+        return self._forward_layered(ids, kv, step=self._layer_step)
 
     def _capture(self, key, fn, *static):
         """Warm fn up and capture it as graph `key`; in warm() the capture waits for _capture_deferred, and a key

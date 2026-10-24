@@ -1,3 +1,15 @@
+# What is new in basal 2.4.2 (not released yet)
+
+- **`--compile-scope layer`** (opt-in, `--mode fast`, the Llama-based basal-2.0 models): torch.compile compiles one
+  decoder layer, called for every layer, instead of the whole model, so start-up compiles a layer instead of 32-60.
+  The same transformers layers as the whole-model compile; kernels fuse within a layer only, so probabilities move by
+  bf16 rounding. RTX 4060 Ti, graph warm-up from cold compile caches: basal-2.0-mini 235 -> 95 s, basal-2.0-4.5B 515
+  -> 251 s; five questions at a time as fast, single questions 2-3% slower on mini and as fast on the 4.5B (within
+  run-to-run noise); identity readouts: the same top answer on 416 / 420 (mini) and 418 / 420 (4.5B), the changed ones
+  near-ties (margins under 0.08), mean |dp| 0.005, as far from fp32 as the whole-model compile (mini: 4.7e-3 against
+  4.8e-3). bf16 Llama weights only (FP8 / NVFP4, Gemma 4, Qwen3.5 and --lean are refused). Contributed by Miłosz
+  Kucharski (@Butterski), [#49](https://github.com/rkinas/basal/pull/49).
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture
