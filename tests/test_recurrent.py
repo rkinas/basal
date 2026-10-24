@@ -306,6 +306,16 @@ def test_pass2_parts_keep_the_budgets(L2):
     assert [lens[q] for p in parts for q in p] == sorted(lens)
 
 
+def test_pinned_fla_cache_never_times():
+    """A pinned autotuner cache has every key (so Triton never times candidates): the recorded config for a recorded
+    key, the kernel's default for any other; without CUDA nothing is pinned."""
+    c = gdn_module._PinnedCache({(64, "torch.bfloat16"): "recorded"}, "default")
+    assert (64, "torch.bfloat16") in c and (128, "torch.float32") in c
+    assert c[(64, "torch.bfloat16")] == "recorded" and c[(128, "torch.float32")] == "default"
+    if not torch.cuda.is_available():
+        assert gdn_module.fla_pin() == 0
+
+
 @pytest.mark.skipif(not torch.cuda.is_available() or gdn_module.fla_rule() is None, reason="needs CUDA and fla")
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-4), ("bfloat16", 0.03)])
 def test_graphs_equal_eager_on_cuda(monkeypatch, tmp_path, dtype, tol):
