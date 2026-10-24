@@ -81,6 +81,17 @@ MODES = {
 }
 
 
+def nvfp4_args(a):
+    """--nvfp4-amax / --nvfp4-scope as GraphBackend arguments (none when not given)."""
+    path = getattr(a, "nvfp4_amax", None)
+    if not path:
+        return {}
+    import json
+    with open(path) as f:
+        amax = json.load(f)
+    return dict(nvfp4_amax=amax.get("amax", amax), nvfp4_scope=getattr(a, "nvfp4_scope", "all"))
+
+
 def default_mode(model=None, revision=None):
     """fast on CUDA, mlx on Apple Silicon when mlx and mlx-lm are installed, mps otherwise there, tpu on a TPU VM
     with basal[tpu] installed, else eager. basal-omni (Gemma 4; model: its directory or repo id) gets fast only on the
@@ -776,7 +787,8 @@ class Server:
                                         template=getattr(a, "template_prefix", "off"),
                                         gemma_attn=getattr(a, "gemma_attn", "auto"),
                                         fp8_scaling=getattr(a, "fp8_scaling", "auto"),
-                                        fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS))
+                                        fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
+                                        **nvfp4_args(a))
         self.tok = self.backend.tok
         self.states_cached = bool(getattr(a, "state_cache_gb", 0))  # --state-cache-gb: requests are cut at their state
         model = getattr(self.backend, "model", None)  # evidence head: needs the in-process HF model
@@ -1492,6 +1504,12 @@ def add_engine_args(ap):
     ap.add_argument("--fp8-bf16-layers", dest="fp8_bf16_layers", type=int, default=FP8_BF16_LAYERS,
                     help="--mode fp8 with block scaling: the first and the last this many decoder layers keep bf16 "
                          f"weights (default {FP8_BF16_LAYERS}; 0 = every layer in FP8)")
+    ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
+                    help="--mode nvfp4 with basal-omni: the calibrated input amax of each decoder linear (JSON, "
+                         "{\"amax\": {\"<layer>.<proj>\": value}}): NVFP4 weights and activations (basal/nvfp4.py); "
+                         "--fp8-bf16-layers keeps the edge layers bf16")
+    ap.add_argument("--nvfp4-scope", dest="nvfp4_scope", choices=["all", "mlp"], default="all",
+                    help="--mode nvfp4 with --nvfp4-amax: all decoder projections, or gate / up / down only")
     ap.add_argument("--fp8-accum", dest="fp8_accum", choices=["fast", "full"], default="fast",
                     help="FP8 checkpoints in the CUDA graph engine: cuBLAS fast accumulation (rounding depends on the "
                          "batch's kernel) or full accumulation (decisions independent of batching, as --deterministic)")

@@ -13,7 +13,7 @@ from collections import namedtuple
 import torch
 import torch.nn.functional as F
 
-from . import fp8block
+from . import fp8block, nvfp4
 from .engine import FP8_FAST_ACCUM, FP8Linear, _ATTN
 
 E4M3 = torch.float8_e4m3fn
@@ -60,6 +60,8 @@ def _params(m):
         return (m.weight, m.weight_scale, m.input_scale, m.bias)
     if isinstance(m, fp8block.BlockFP8Linear):
         return (m.weight, m.weight_scale, m.bias)
+    if isinstance(m, nvfp4.NVFP4Linear):
+        return (m.weight, m.weight_scale, m.alpha, m.inv_g, m.bias)
     return (m.weight, m.bias)
 
 
@@ -70,6 +72,8 @@ def linear(x, p):
         return F.linear(x, p[0], p[1])
     if len(p) == 3:
         return fp8block.linear(x, *p)
+    if len(p) == 5:
+        return nvfp4.linear(x, *p)
     w, ws, xs, b = p
     shape, dt = x.shape, x.dtype
     x = x.reshape(-1, shape[-1])
