@@ -207,6 +207,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
         instr = _text(q.get("instructions", ""))
         lang = force_lang or ("pl" if state_pl else lang_of(instr))
         extra = {}
+        lim = limits(name, q, t)
         if t == "multi":  # one yes/no branch per label
             crit = q.get("criteria") or {}
             if isinstance(crit, list):
@@ -275,7 +276,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
             what = " (tools and extra options)" if t == "tool" else ""
             raise RequestError(f"question {name!r}: {len(opts)} options{what} (supported: 2..{max_opts})")
         out.append(dict(name=name, type=t, keys=keys, state=state, question=instr, options=opts, lang=lang,
-                        branches=[(instr, opts)], option_keys=q.get("option_keys", "show"), **extra))
+                        branches=[(instr, opts)], option_keys=q.get("option_keys", "show"), **extra, **lim))
     return out
 
 
@@ -311,6 +312,53 @@ def certified(cal, max_error, q_type):
     if "per_type" not in entry and cal.get("prompt", 1) == 1:
         return entry.get("confidence")
     return ((entry.get("per_type") or {}).get(q_type) or {}).get("confidence")
+
+
+NO_CONFORMAL = "no conformal threshold for this type at this coverage: the set is every option"
+
+
+def answer_set(p, p_min):
+    """Indices of the conformal answer set of probabilities p: every option with p >= p_min, the most probable first
+    (ties in option order) and always in; every option when p_min is None."""
+    order = sorted(range(len(p)), key=lambda i: -p[i])
+    return order if p_min is None else [i for j, i in enumerate(order) if j == 0 or p[i] >= p_min]
+
+
+def limits(name, q, t):
+    """The optional "coverage" (conformal answer set) and "max_error" (abstain flag) of a choice / noul / score
+    question -> extra item fields; refused on the other types (act and tool read their own max_error)."""
+    plain = t in ("choice", "noul", "score")
+    if q.get("coverage") is not None and not plain:
+        raise RequestError(f"question {name!r}: coverage is supported on choice, noul and score questions")
+    out = {}
+    for k in ("coverage", "max_error") if plain else ():
+        v = q.get(k)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v < 1:
+            raise RequestError(f"question {name!r}: {k} must be a number between 0 and 1")
+        out[k] = float(v)
+    return out
+
+
+def plain_limits(ans, q, probs, conf, cal):
+    """A plain answer with "coverage": its answer_set (the keys whose probability reaches the type's conformal p_min
+    at that level, calibration conformal.levels[L].per_type[type]) and the coverage; with "max_error": "abstain",
+    true when the confidence is below the type's certified threshold for that target or it has none."""
+    if "coverage" in q:
+        level = ((cal.get("conformal") or {}).get("levels") or {}).get(str(q["coverage"])) or {}
+        p_min = ((level.get("per_type") or {}).get(q["type"]) or {}).get("p_min")
+        keys = list(probs)
+        ans["answer_set"] = [keys[i] for i in answer_set([probs[k] for k in keys], p_min)]
+        ans["coverage"] = q["coverage"]
+        if p_min is None:
+            ans["coverage_note"] = NO_CONFORMAL
+    if "max_error" in q:
+        thr = certified(cal, q["max_error"], q["type"])
+        if thr is None:
+            ans["max_error"] = NO_CERTIFICATE
+        ans["abstain"] = thr is None or conf < thr
+    return ans
 
 
 def act_answer(q, probs, conf, cal):
@@ -642,18 +690,23 @@ def calibration_mismatch(cal, name, md):
     return None
 
 
+# the parts of a file fitted on other option orders or another layout that do not hold for the served ones
+UNVALIDATED_OUT = ("thresholds", "multi", "task_thresholds", "conformal")
+
+
 def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layout="canonical"):
     """The calibration basal-serve applies -> (calibration dict, its file, None or why it is unvalidated). A file
     fitted on other option orders than the served ones gives wrong temperatures and thresholds: the file for the
     served orders, CALIBRATION[.<engine>].o<orders>.json, is used when the model ships one; otherwise the file is kept
-    for its temperatures without its thresholds, fitted fallback thresholds and task thresholds (max_error defers,
-    tasks report automated: null), and the answers are marked unvalidated. An explicit --calibration file is not replaced."""
+    for its temperatures without its thresholds, fitted fallback thresholds, task thresholds and conformal levels
+    (max_error defers, tasks report automated: null, answer sets hold every option), and the answers are marked
+    unvalidated. An explicit --calibration file is not replaced."""
     layout = layout or "canonical"
     cal = calibration_file(md, kind, path, quant, preset, layout)
     data = {} if off or not cal.exists() else json.loads(cal.read_text(encoding="utf-8"))
     if data and calibration_layout(data) != layout:  # another layout's thresholds do not hold here (2.4.1)
         why = f"{cal.name} was fitted on the {calibration_layout(data)} layout, served with --layout {layout}"
-        return {k: v for k, v in data.items() if k not in ("thresholds", "multi", "task_thresholds")}, cal, why
+        return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
     fitted = calibration_orders(data)
     alt = cal.with_name(f"{cal.stem}.o{orders}{cal.suffix}")
     if fitted is not None and fitted != orders and not path and alt.exists():
@@ -662,7 +715,7 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     if fitted is None or fitted == orders:
         return data, cal, None
     why = f"{cal.name} was fitted on {fitted} option order(s), served with {orders}"
-    return {k: v for k, v in data.items() if k not in ("thresholds", "multi", "task_thresholds")}, cal, why
+    return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
 
 
 def calibration_file(md, kind, path=None, quant=None, preset=None, layout="canonical"):
@@ -1382,6 +1435,8 @@ class Server:
                        "legend": dict(zip(q["keys"], q["options"])), "probabilities": probs, "confidence": conf}
             else:
                 ans = {"type": "choice", "choice": max(probs, key=probs.get), "probabilities": probs, "confidence": conf}
+            if q["type"] in ("choice", "noul", "score") and ("coverage" in q or "max_error" in q):
+                plain_limits(ans, q, probs, conf, self.cal)
             answers[q["name"]] = ans
         ev_q = [q for q in qs if body["questions"][q["name"]].get("evidence")]
         if ev_q and truncation:

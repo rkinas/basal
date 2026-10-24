@@ -141,6 +141,33 @@ The thresholds hold for the mix of question types and prompts you calibrated on.
 how well one temperature carries over to a kind of decision it was not fitted on, such as a new question in
 production.
 
+## Answer sets (coverage)
+
+`--conformal 0.8,0.9,0.95` (off by default) also fits answer sets, by split conformal prediction:
+
+1. For each type and coverage level *L*, the CERT decisions (not used for the temperatures) are scored with the
+   probabilities as served: the score of a decision is 1 − p(gold).
+2. `p_min` is the *k*-th largest p(gold) of the type's *n* CERT decisions, *k* = ⌈(*n* + 1) *L*⌉. The answer set of a
+   question is every option with p ≥ `p_min`, the most probable first and always in.
+3. For a new request like the labelled ones, the set then holds the correct answer with probability ≥ *L*. This holds
+   on average over requests, not for each one, and only for decisions like those you calibrated on.
+4. With fewer than *L* / (1 − *L*) CERT decisions of a type (9 at 0.9, 19 at 0.95) there is no `p_min`, and the set
+   is every option.
+
+The FIT decisions, held out from `p_min`, report the coverage, mean set size and singleton share of the sets (the
+`answer sets` table, and `conformal.levels[L].per_type[type]` in the file). A question asks for its set with
+`"coverage": L`, a level the file has. A file fitted on other option orders or another layout keeps no levels, as it
+keeps no thresholds.
+
+```jsonc
+"conformal": {"method": "split conformal on CERT ...",
+              "levels": {"0.9": {"per_type": {"choice": {"p_min": 0.142, "n": 512, "cert_coverage": 0.902,
+                                                         "fit_coverage": 0.897, "fit_mean_size": 1.61, ...}}}}}
+```
+
+A question with `"max_error": r` on a `choice`, `noul` or `score` question gets `"abstain": true` when its
+confidence is below the type's certified threshold for *r* (step 3 of the method), or when the type has none.
+
 ## `multi`: the fallback threshold of a label set
 
 A `multi` question with a `fallback` label (see [FEATURES.md](FEATURES.md#label-constraints-exclusive-and-fallback))
