@@ -4,6 +4,8 @@
                         "instructions": "...", "criteria": {...} | [...], "option_keys": "show"|"hide" (optional),
                         "evidence": true (optional; models with evidence_head.pt: supporting spans of the state)}},
                         "early_exit": "off"|"0.99"|... (optional), "facts": "off"|"auto" (optional)}
+                       also the shape of vLLM's structured-diffusion example: "ask_if" / "depends_on" on a question (a
+                       skipped question is answered null) and "images" for image media
   POST /v1/basal       same as /v1/systemone; also the experimental task types classify, verify, compress, extract
                        (basal/tasks.py)
   GET  /v1/models
@@ -299,6 +301,93 @@ def act_spec(name, q, outcomes):
 
 
 NO_CERTIFICATE = "no certified threshold for this type at this max_error"
+PLAIN = ("choice", "noul", "score")
+
+
+def answer_ids(q):
+    """The ask_if values that name each answer of a choice / noul / score item -> its canonical answer: noul yes / no
+    (or true / false), a choice option key, a score level key or its text."""
+    if q["type"] == "noul":
+        return {"yes": "true", "true": "true", "no": "false", "false": "false"}
+    ids = {k: k for k in q["keys"]}
+    if q["type"] == "score":
+        ids.update({o: k for k, o in zip(q["keys"], q["options"]) if o not in ids})
+    return ids
+
+
+def answer_id(q, ans):
+    """The canonical answer of a plain answer: noul "true" / "false" (true on a tie), the choice, the top score level."""
+    if q["type"] == "noul":
+        return "true" if ans["probabilities"]["true"] >= ans["probabilities"]["false"] else "false"
+    return ans["choice"] if q["type"] == "choice" else max(ans["probabilities"], key=ans["probabilities"].get)
+
+
+def ask_gates(questions, qs):
+    """The questions' depends_on / ask_if (as in vLLM's structured-diffusion example) -> [(name, {question: canonical
+    answers})] of the questions with an ask_if, each after every question it names. Checked: known names, no cycle,
+    ask_if naming a choice / noul / score question, values among its answers (answer_ids). basal-serve answers every
+    question over the state in one pass, so depends_on puts no earlier answer into a prompt; a question whose ask_if
+    fails is answered null afterwards (skip_answers)."""
+    if not any(isinstance(q, dict) and ("depends_on" in q or "ask_if" in q) for q in questions.values()):
+        return []
+    plain = {q["name"]: q for q in qs if q["type"] in PLAIN}
+    deps, gates = {}, {}
+    for name, q in questions.items():
+        d, ask = q.get("depends_on") or [], q.get("ask_if") or {}
+        if not isinstance(d, list) or not all(isinstance(x, str) for x in d):
+            raise RequestError(f"question {name!r}: depends_on must be a list of question names")
+        if not isinstance(ask, dict) or not all(isinstance(v, list) and v for v in ask.values()):
+            raise RequestError(f"question {name!r}: ask_if must map a question name to a non-empty list of its answers")
+        for x in list(d) + list(ask):
+            if x not in questions or x == name:
+                raise RequestError(f"question {name!r}: depends on unknown question {x!r}")
+        for x, vals in ask.items():
+            if x not in plain:
+                raise RequestError(f"question {name!r}: ask_if names {x!r}, not a choice, noul or score question")
+            ids = answer_ids(plain[x])
+            vals = [("true" if v else "false") if isinstance(v, bool) else v for v in vals]
+            bad = [v for v in vals if not isinstance(v, str) or v not in ids]
+            if bad:
+                raise RequestError(f"question {name!r}: ask_if values {bad} for {x!r} must be among {sorted(ids)}")
+            gates.setdefault(name, {})[x] = {ids[v] for v in vals}
+        deps[name] = set(d) | set(ask)
+    order, done = [], set()
+    while len(done) < len(deps):
+        ready = [n for n in deps if n not in done and deps[n] <= done]
+        if not ready:
+            raise RequestError(f"depends_on / ask_if: a cycle among {sorted(set(deps) - done)}")
+        done.update(ready)
+        order += [(n, gates[n]) for n in ready if n in gates]
+    return order
+
+
+def skip_answers(answers, gates, qs):
+    """ask_if as a post-filter: a question whose ask_if fails (the named question's answer is not among the values, or
+    it was skipped itself) is answered null -> the skipped names."""
+    by = {q["name"]: q for q in qs}
+    skipped = []
+    for name, ask in gates:
+        if any(answers.get(x) is None or answer_id(by[x], answers[x]) not in ok for x, ok in ask.items()):
+            answers[name] = None
+            skipped.append(name)
+    return skipped
+
+
+def images_as_media(images):
+    """"images" (data:image/... URLs or {"content_type": "image/...", "base64": ...}, as in vLLM's structured-diffusion
+    example) -> "media" image items."""
+    if not isinstance(images, list) or not images:
+        raise RequestError("images must be a non-empty list of data:image/... URLs or {content_type, base64} objects")
+    out = []
+    for i, im in enumerate(images):
+        if isinstance(im, str) and im.startswith("data:image/"):
+            out.append({"type": "image", "data": im})
+        elif isinstance(im, dict) and str(im.get("content_type", "")).startswith("image/") \
+                and isinstance(im.get("base64"), str):
+            out.append({"type": "image", "data": im["base64"]})
+        else:
+            raise RequestError(f"images[{i}]: a data:image/... URL or an object with content_type and base64")
+    return out
 
 
 def certified(cal, max_error, q_type):
@@ -1240,11 +1329,16 @@ class Server:
             raise RequestError('facts must be "off" or "auto"')
         if body.get("facts") == "auto":  # append computed calendar / arithmetic facts (PL dates, gaps, VAT)
             state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+        if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
+            if body.get("media") is not None:
+                raise RequestError("give media or images, not both")
+            body = dict(body, media=images_as_media(body["images"]))
         m = self.media_of(body, pol)
         lang = body.get("lang")  # the prompt language when the text alone does not show it (a state that is only media)
         if lang is not None and lang not in ("pl", "en"):
             raise RequestError('lang must be "pl" or "en"')
         qs = to_items(state, body["questions"], self.max_options, force_lang=lang)
+        gates = ask_gates(orig["questions"], qs)
         for q in qs:
             stored_fallback(self.cal, q)
         cap = getattr(self.backend, "max_codes", None)  # an engine that reads fewer option codes (Ollama: 20)
@@ -1284,6 +1378,10 @@ class Server:
                     out["usage"][k] = out["usage"].get(k, 0) + out2["usage"].get(k, 0)
             out = tasks.finish(out, orig, plans, self.cal, a2)
             out["usage"]["latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        if gates:
+            skipped = skip_answers(out["answers"], gates, qs)
+            if skipped:
+                out["usage"]["skipped"] = skipped
         return out
 
     @reads_request
@@ -1598,6 +1696,9 @@ def parser():
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--error-format", dest="error_format", choices=["basal", "openai"], default="basal",
+                    help="body of a failed request: {\"error\": message} (basal) or {\"error\": {\"message\", \"type\", "
+                         "\"code\"}} (openai, as OpenAI-style servers answer); the status codes are the same")
     ap.add_argument("--mcp", choices=["off", "on"], default="off",
                     help="also serve MCP (streamable HTTP) at /mcp for agents: tools decide and decide_many over the "
                          "same queue (needs basal[mcp]; no authentication, like the HTTP API: bind --host 127.0.0.1 "
@@ -1607,10 +1708,20 @@ def parser():
     return ap
 
 
-def http_app(srv, mode, mcp=None):
+def error_body(e, error_format="basal"):
+    """The body and status of a failed request: {"error": message}; with --error-format openai {"error": {"message",
+    "type", "code"}}, the shape of OpenAI-style servers (vLLM's structured-diffusion example among them)."""
+    status = http_status(e)
+    if error_format == "openai":
+        kind = "validation_error" if status == 422 else "server_error"
+        return {"error": {"message": str(e), "type": kind, "code": status}}, status
+    return {"error": str(e)}, status
+
+
+def http_app(srv, mode, mcp=None, error_format="basal"):
     """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models and /health; mcp: (routes, lifespan) of
-    --mcp on. A failed request answers {"error": message} with http_status: 422 invalid request, 503 out of GPU
-    memory, 500 any other server error."""
+    --mcp on. A failed request answers error_body with http_status: 422 invalid request, 503 out of GPU memory, 500
+    any other server error."""
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
@@ -1621,7 +1732,8 @@ def http_app(srv, mode, mcp=None):
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
         if isinstance(e, torch.OutOfMemoryError):  # the failed forward's blocks back to the GPU: kept by the
             torch.cuda.empty_cache()  # allocator, they failed the next requests too (ultra, 20 Oct)
-        return JSONResponse({"error": str(e)}, status_code=http_status(e))
+        body, status = error_body(e, error_format)
+        return JSONResponse(body, status_code=status)
 
     async def systemone(request):
         try:
@@ -1693,7 +1805,7 @@ def main():
         from .mcp_server import http
         mcp = http(srv, a.host)
         print(f"basal: MCP (streamable HTTP) at http://{a.host}:{a.port}/mcp", flush=True)
-    app = http_app(srv, a.mode, mcp)
+    app = http_app(srv, a.mode, mcp, a.error_format)
     try:  # uvloop + httptools when available (uvicorn[standard]); plain asyncio otherwise
         import httptools  # noqa: F401
         import uvloop  # noqa: F401

@@ -81,6 +81,9 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   - **503**: the GPU ran out of memory (CUDA, MPS or Metal). The server frees the failed request's memory, so a retry,
     later or on another server, may succeed;
   - **500**: any other server error.
+
+  `basal-serve --error-format openai` answers `{"error": {"message": "...", "type": "validation_error" |
+  "server_error", "code": 422}}` instead, with the same status codes, for clients of OpenAI-style servers.
 - `GET /v1/models` returns `{"models": [{"name", "description", "release_date", "mode", "early_exit",
   "temperature_per_prim"}]}` (`release_date` is the engine's release date, not the model's).
 - `GET /health` returns `{"status": "ok", "running": R, "queued": Q}` (2.3.1). The counts cover the decision requests
@@ -89,6 +92,24 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   queue (the main queue, the `--scheduler` backlog or the `--long-lane` queue). `running` counts the others: in an
   engine call, or in the server's own work before or after one (a request with a second pass, such as `--orders auto`,
   can be queued again). `running` and `queued` both 0 means that the server is idle.
+
+## Requests from other `/v1/systemone` servers' clients
+
+The request shape of vLLM's structured-diffusion example (`examples/features/structured_diffusion`) is accepted as
+well:
+
+- `"ask_if": {"<question>": ["<answer>", ...]}` on a question: it is answered only when every named question's answer
+  is among the values, otherwise its answer is `null` and `usage.skipped` names it. The named question must be a
+  `choice` (an option key), `noul` (`yes` / `no`, `true` / `false`) or `score` question (a level key or its text);
+  a question named by a skipped one is skipped too.
+- `"depends_on": ["<question>", ...]` is checked (known names, no cycle with `ask_if`). basal-serve answers all
+  questions over the state in one pass, so an earlier answer is not added to a later question's prompt.
+- `"images": ["data:image/png;base64,...", {"content_type": "image/jpeg", "base64": "..."}]` is the same as
+  `"media"` with image items (servers with `--media on`); a request gives one of the two.
+- `"model"`, `"seed"`, `"alone"` and the example's read options (`samples`, `steps`, ...) are ignored.
+
+A request without these fields is answered as before. The example's own answers differ from basal-serve's in one way
+a client sees: its `noul` answer has only `noul`; `basal.client` fills in `probabilities` and `confidence`.
 
 ## Question types
 
