@@ -221,12 +221,21 @@ basal-loadtest --url http://127.0.0.1:8000/v1/systemone --synthetic 1500 --concu
 
 # identity gate: every prefix-reuse path of the fast engine against the eager per-prompt reference
 basal-bench --identity --model Remek/basal-2.0-4.5B                    # fp32; --dtype bfloat16 as served
+
+# agreement: any backends against the native engine (eager fp32, every prompt alone; its rows are cached)
+basal-agree --model Remek/basal-2.0-mini --backends mps mlx mlx=Remek/basal-2.0-mini-MLX-8bit
 ```
 
 `basal-loadtest` reports the median and p95 latency of sequential requests and the decisions per second with
 concurrent clients (`--concurrency`); `--synthetic N` uses generated items with states of about N tokens. `basal-bench
 --identity` runs single prompts, option orders and multi-question requests over one state, alone and batched, and
-compares every readout with an eager forward of its own prompt (argmax agreement, max |Δp|).
+compares every readout with an eager forward of its own prompt (argmax agreement, max |Δp|). `basal-agree` (2.5) does
+the same for any backends (basal-bench modes; `MODE=WEIGHTS` for other weights with the same tokenizer) against the
+native engine (`--reference`, default `eager-fp32`): per backend the top-answer agreement with a 95% bootstrap interval,
+mean / p99 / max |Δp|, the decisions with both orders averaged, the paired accuracy difference on `--questions` items
+with gold, and question independence (each question of a five-question request asked alone through the same backend
+gives the answer it gives in the request). The exit status is 0 when every backend passes `--gate` (default 0.99);
+`basal-agree --identity` runs the identity gate.
 
 **Your own data.** 44 examples are enough to check that everything works, not for precise numbers. For numbers that
 describe *your* workload, write a JSONL file with a few hundred items in the same simple format (`{"state": ...,
