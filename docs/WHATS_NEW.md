@@ -1,3 +1,14 @@
+# What is new in basal 2.4.2
+
+- **No first-request stalls in `--mode strix`** (AMD Strix Halo): start-up compiles every Triton kernel copy a request
+  can need. Triton compiles a kernel once per tile config and per class of each length argument (1, a multiple of 16,
+  other); the start-up of 2.4.1 and earlier ran two lengths only, so the first request that needed a new copy waited
+  0.2-0.3 s for each (in the request matrix, with an empty Triton cache, the first S request with 1 question took
+  1.82 s instead of 0.18 s). basal-2.0-4.5B on the Radeon 8060S: no kernel compiled during 152 requests of 90-16,000
+  tokens (before: 13 copies in 4 requests, 2.7 s), the same probabilities to the bit on 2,362 prompts; start-up about
+  5 s longer at the first start on a machine, about the same once Triton's disk cache holds the copies. Details in
+  [STRIX_HALO.md](benchmarks/STRIX_HALO.md#what---mode-strix-does). Contributed by Michał Kardyś (@kardysm).
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture

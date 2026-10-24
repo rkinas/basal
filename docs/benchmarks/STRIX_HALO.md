@@ -65,6 +65,16 @@ reaches 16–19 useful TFLOPS at every request size. GPU time by operation, from
   head still runs the stock model.
 - The server waits for the GPU by polling an event with 0.5 ms sleeps: ROCm's synchronize spins a CPU core at 100% for
   the whole forward.
+- Start-up compiles every kernel copy a request can need. Triton compiles a kernel once per tile config and per class
+  of each length argument (1, a multiple of 16, other), and the row count picks both, so a request that needs a copy
+  not compiled yet waits for it: 0.2–0.3 s per copy here, about 1 ms when Triton's disk cache (`~/.triton/cache`)
+  already holds it. In engine 2.4.1 and earlier the start-up ran two lengths only, and the first request whose length
+  was a multiple of 16 in a range waited: in the request matrix, the first timed pass of S with 1 question (208 tokens)
+  and of M with 2 (720 tokens), on both machines. With an empty Triton cache those passes took 1.82 and 2.30 s against
+  0.18 and 0.33 s for the next pass. Now no request compiles a kernel. The warm-up's short forwards run the first layer
+  and the last only (the layers between need the same copies), so start-up takes no longer once Triton's disk cache
+  holds the copies (6.0–6.1 against 6.0–6.2 s) and about 5 s longer at the first start on a machine (13.4–13.6 against
+  8.7–8.8 s).
 
 ## Results against `gguf`: basal-2.0
 
@@ -103,7 +113,8 @@ questions each), so thermal drift and the power limit hit both engines alike:
 - Start-up 6.2 s and 10.1 GiB GTT (`gguf` 3.3 s, 5.8 GiB), as with basal-1.5.
 - The matrix run (one engine at a time, tables under [Raw results](#raw-results-summary)) agrees with the A/B
   within 5%, except S with 1 question: `strix` 231 ms in the matrix and 142–148 ms in all 5 A/B rounds, `gguf` 126 and
-  131–143 ms.
+  131–143 ms. The matrix's first timed pass of that shape compiled kernel copies (322 ms, see
+  [What `--mode strix` does](#what---mode-strix-does)).
 
 basal-1.5 → basal-2.0 on the same engines (matrix p50):
 
@@ -148,6 +159,8 @@ reference (one does not fit in 32 GB): `strix` and `gguf` 142 of 144 decisions e
   RAM on the way to GTT: 33 s, and 118 s once the system was swapping.
 - In the matrix, the first timed pass of S with 1 question and of M with 2 is a one-off `strix` stall on both
   machines (here 545 / 1,316 ms against ~190 / ~320 ms), so the matrix p50 of those two shapes overstates `strix`.
+  The stall is Triton compiling kernel copies for the first lengths that are a multiple of 16; the start-up now
+  compiles them ([What `--mode strix` does](#what---mode-strix-does)).
 
 ## Results against `gguf`: basal-1.5 (request matrix over HTTP)
 
@@ -218,11 +231,13 @@ Reproduce: the scripts, the commands and the raw results (basal-1.5 in `results/
 `tests/test_strix.py`: every Triton kernel against its stock counterpart (attention against a dense masked softmax over
 packed rows of several requests, readout-only queries included; rotary bit-identical to the Hugging Face rotary;
 projections for every row-count config and row chunk, with and without the residual; FFN input and RMSNorm against the
-stock layer), the interval mask against the block mask it replaces, and the whole backend on a tiny random Llama with
+stock layer), the interval mask against the block mask it replaces, the whole backend on a tiny random Llama with
 biases against separate bf16 forwards of every prompt (1–8 questions over one state, several requests in one sequence
-and the same request alone, several forwards per call with a request bisected, determinism), plus the mode dispatch of
-`basal-serve` and `basal-bench`. Full suite on this machine: 76 passed, 3 skipped (MLX / Apple only); on engine 2.0.0,
-511 passed, 19 skipped (MLX and the extras not installed).
+and the same request alone, several forwards per call with a request bisected, determinism), and the start-up warm-up
+(after it, no row count of 1–5,000 tokens with 1–528 readout rows compiles a kernel), plus the mode dispatch of
+`basal-serve` and `basal-bench`. Full suite on this machine in the run from when `--mode strix` was added (before the
+warm-up test): 76 passed, 3 skipped (MLX / Apple only); on engine 2.0.0, 511 passed, 19 skipped (MLX and the extras
+not installed).
 
 ## Raw results (summary)
 
@@ -237,7 +252,8 @@ agree with these files.
 **Request matrix**, p50 latency per request over HTTP (states S / M / L / XL ≈ 100 / 570 / 2,000 / 6,000 tokens, 1-20
 questions; prompt tokens as the server counted them). p50 of the 2 timed passes for `gguf` and `strix` and of 1 timed
 pass for `fast-nocompile`; the fp32 reference ran each request once. Two passes give no p95 per shape: they differ by
-less than 5% except basal-2.0 `strix` S with 1 question (141 / 322 ms) and M with 2 (280 / 468 ms), and basal-1.5
+less than 5% except basal-2.0 `strix` S with 1 question (141 / 322 ms) and M with 2 (280 / 468 ms), whose first timed
+pass compiled kernel copies ([What `--mode strix` does](#what---mode-strix-does)), and basal-1.5
 `strix` L with 10 (1.46 / 1.57 s).
 
 | request | tokens 1.5 | `gguf` | **`strix`** | `fast-nocompile` | fp32 ref. | tokens 2.0 | `gguf` | **`strix`** | fp32 ref. |

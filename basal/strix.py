@@ -294,6 +294,59 @@ class StrixHaloFastBackend(GraphBackend):
             for n in (min(300, self.cos.shape[0] - 1), min(1100, self.cos.shape[0] - 1)):
                 toks = [[1] + list(range(1000, 1000 + n)), [1] + list(range(1000, 1000 + n // 2)) + [7, 8]]
                 self.run_shared([([[t % V for t in x] for x in toks], [[30 % V, 31 % V]] * 2)])
+            self._warm_shapes()
+
+    # Start-up forwards for attention and rotary (one tile config each): sequence lengths other and a multiple of 16,
+    # each against readout rows 1, other and a multiple of 16 (the last layer's attention takes both counts), and a
+    # sequence of one token (a request that packs to one). They run the first layer and the last only: every layer
+    # between needs the copies the first one compiles.
+    WARM_FORWARDS = ((1, 1), (17, 1), (32, 1), (17, 3), (32, 3), (17, 16), (32, 16))
+
+    @staticmethod
+    def warm_rows(cfgs):
+        """Row counts that cover a (largest row count, config) list: 1 (the last row chunk of qkv / o, one readout
+        row), then in every range one count that is not a multiple of 16 and one that is."""
+        rows, lo = [1], 0
+        for lim, _ in cfgs:
+            rows += [lo + 17 + ((lo + 17) % 16 == 0), (lo // 16 + 2) * 16]
+            lo = lim
+        return rows
+
+    def _warm_row(self, L, nq):
+        """Inputs of `forward` for one packed row of L tokens and its last nq tokens read out: causal sequences of
+        at most the context each (positions within the rotary tables), token ids within the vocabulary."""
+        i = torch.arange(L, device=self.dev)
+        P = self.cos.shape[0]
+        ends = torch.clamp((i // P + 1) * P, max=L)
+        return (i + 1000) % self.embed.shape[0], (i % P).to(torch.int32), ends.to(torch.int32), i[L - nq:]
+
+    @torch.no_grad()
+    def _warm_shapes(self):
+        """Compile every kernel copy a request can need. Triton compiles a kernel once per tile config and per class of
+        each integer argument: 1, a multiple of 16, other. The row count picks both (the config by its range in FFN /
+        LINEAR, the class by its value), and a request that needs a copy not compiled yet waits for it: ~0.2-0.3 s per
+        copy on the 8060S, ~1 ms when Triton's disk cache holds it (in the request matrix, the first timed pass of S
+        with 1 question and of M with 2 did). The projections run on zero rows of warm_rows, as the forward calls them
+        (same strides, residual for o / down); attention and rotary in the short WARM_FORWARDS, over the first and the
+        last layer (all 60 layers of basal-2.0 took ~0.7 s per start)."""
+        z = lambda m, n: torch.zeros(m, n, device=self.dev, dtype=torch.bfloat16)  # noqa: E731
+        _, wqkv, bqkv, wo, bo, _, wg, bg, wu, bu, wd, bd = self.layers[0]
+        for m in self.warm_rows(self.LINEAR["qkv"]):
+            self._linear("qkv", z(m, self.hidden), wqkv, bqkv)
+        for m in self.warm_rows(self.LINEAR["o"]):
+            self._linear("o", z(m, wo.shape[1]), wo, bo, z(m, self.hidden))
+        for m in self.warm_rows(self.LINEAR["down"]):
+            self._linear("down", z(m, wd.shape[1]), wd, bd, z(m, self.hidden))
+        for m in self.warm_rows(self.FFN):
+            self._ffn_in(z(m, self.hidden), wg, bg, wu, bu)
+        layers = self.layers
+        self.layers = layers[:1] + layers[-1:] if len(layers) > 1 else layers
+        try:
+            for L, nq in self.WARM_FORWARDS:
+                self.forward(*self._warm_row(L, nq))
+            self._wait()
+        finally:
+            self.layers = layers
 
     def _oversize(self, pack, n):
         return len(pack[0]) > self.TOKEN_BUDGET
