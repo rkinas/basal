@@ -8,9 +8,9 @@ import httpx
 
 
 class Basal:
-    def __init__(self, url="http://127.0.0.1:8000", timeout=60, early_exit=None, facts=None):
+    def __init__(self, url="http://127.0.0.1:8000", timeout=60, early_exit=None, facts=None, api_key=None):
         self.url, self.early_exit, self.facts = url.rstrip("/") + "/v1/systemone", early_exit, facts
-        self.http = httpx.Client(timeout=timeout)
+        self.http = httpx.Client(timeout=timeout, headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
 
     def decide(self, state, questions):
         body = {"state": state, "questions": questions}

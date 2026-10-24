@@ -1,6 +1,6 @@
 """basal-serve's status codes and load (#22): an invalid request answers 422, the GPU out of memory 503 and any other
 server error 500, all with {"error": ...}; GET /health counts the requests in flight as running and queued. Through
-the app of basal-serve (http_app) with its batching worker and a stub engine."""
+the app of basal-serve (build_app) with its batching worker and a stub engine."""
 import asyncio
 import threading
 
@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from basal.prompt import RequestError
-from basal.server import http_app, http_status, out_of_memory
+from basal.server import build_app, parser, http_status, out_of_memory
 from tests.test_server import FakeServer
 
 Q = {"type": "choice", "instructions": "Which?", "criteria": {"a": "Alpha", "b": "Beta"}}
@@ -42,7 +42,7 @@ class AppServer(FakeServer):
 async def on_app(srv, fn):
     worker = asyncio.get_running_loop().create_task(srv.worker())
     try:
-        transport = httpx.ASGITransport(app=http_app(srv, "fast"))
+        transport = httpx.ASGITransport(app=build_app(srv, parser().parse_args(["--mode", "fast"])))
         async with httpx.AsyncClient(transport=transport, base_url="http://basal") as c:
             return await fn(c)
     finally:
@@ -57,10 +57,10 @@ def post(srv, body=None, content=None):
 
 
 @pytest.mark.parametrize("body,content,message", [
-    (None, b"{not json", "not valid JSON"),
+    (None, b"{not json", "malformed JSON"),
     (["a list"], None, "must be a JSON object"),
-    ({"state": "s"}, None, "missing field 'questions'"),
-    ({"state": "s", "questions": {"q": "Which?"}}, None, "question object"),
+    ({"state": "s"}, None, "questions must be a non-empty object"),
+    ({"state": "s", "questions": {"q": "Which?"}}, None, "must be an object"),
     ({"state": "s", "questions": {"q": dict(Q, criteria={"a": "Alpha"})}}, None, "1 options"),
     ({"state": "s", "questions": {"q": dict(Q, option_keys="maybe")}}, None, "option_keys"),
     ({"state": "s", "questions": {"q": dict(Q, type="act", costs={"defer": 1})}}, None, "missing field 'wrong'"),
@@ -71,7 +71,7 @@ def post(srv, body=None, content=None):
 def test_invalid_requests_answer_422(body, content, message):
     srv = AppServer(Engine())
     r = post(srv, body, content)
-    assert r.status_code == 422 and message in r.json()["error"]
+    assert r.status_code == (400 if content is not None or isinstance(body, list) else 422) and message in r.json()["error"]
     assert srv.load() == {"running": 0, "queued": 0}
 
 
@@ -86,7 +86,7 @@ def test_invalid_requests_answer_422(body, content, message):
 def test_server_errors_answer_500_and_out_of_memory_503(error, status):
     srv = AppServer(Engine(error))
     r = post(srv, BODY)
-    assert r.status_code == status and r.json() == {"error": str(error)}
+    assert r.status_code == status and r.json()["error"] == str(error)
     assert srv.load() == {"running": 0, "queued": 0}
 
 
@@ -132,3 +132,30 @@ def test_health_counts_running_and_queued_requests():
     assert codes == [200, 200]
     assert health == [{"status": "ok", "running": 1, "queued": 0}, {"status": "ok", "running": 1, "queued": 1},
                       {"status": "ok", "running": 0, "queued": 0}]
+
+
+@pytest.mark.parametrize("question", [
+    dict(Q, type="act", costs={"wrong": 1, "defer": .1}, max_error="bad"),
+    *[{"type": "multi", "criteria": ["a", "b"], key: "bad"} for key in ("min", "max")],
+    *[{"type": "tool", "multi": True, "tools": [{"type": "function", "function": {"name": "lookup"}}],
+       key: "bad"} for key in ("min", "max")],
+])
+def test_invalid_assembly_options_are_rejected_before_inference(question):
+    engine = Engine()
+    srv = AppServer(engine)
+    response = post(srv, {"state": "s", "questions": {"q": question}})
+    assert response.status_code == 422, response.text
+    assert response.json()["code"] == "INVALID_REQUEST"
+    assert not engine.entered.is_set()
+    assert srv.load() == {"running": 0, "queued": 0}
+
+
+@pytest.mark.parametrize("question", [
+    dict(Q, type="act", costs={"wrong": 1, "defer": .1}, max_error="0.05"),
+    {"type": "multi", "criteria": ["a", "b"], "min": "1", "max": "2"},
+    {"type": "tool", "multi": True, "tools": [{"type": "function", "function": {"name": "lookup"}}],
+     "min": "1", "max": "2"},
+])
+def test_numeric_assembly_options_keep_legacy_coercion(question):
+    response = post(AppServer(Engine()), {"state": "s", "questions": {"q": question}})
+    assert response.status_code == 200, response.text

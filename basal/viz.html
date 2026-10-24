@@ -324,6 +324,7 @@ function rawEditor(name, q) {  // a question type the form does not edit: its JS
   return box;
 }
 function loadRequest(req) {
+  postedRequest = null;
   $("#state").value = typeof req.state === "string" ? req.state : JSON.stringify(req.state, null, 2);
   $("#qs").replaceChildren(...Object.entries(req.questions).map(([n, q]) => questionEditor(n, q)));
 }
@@ -352,10 +353,10 @@ function pushHistory(req, res, gold) {
 $("#clearh").onclick = () => { store.set("basal-viz-history", []); renderHistory(); };
 
 // ---- decide -----------------------------------------------------------------------------------------------------
-let currentGold = null;
-async function decide(gold) {
+let currentGold = null, postedRequest = null;
+async function decide(gold, requestOverride) {
   currentGold = gold === undefined ? currentGold : gold;
-  const req = readRequest();
+  const req = requestOverride||readRequest();
   if (!Object.keys(req.questions).length) return;
   const btn = $("#go"); btn.disabled = true;
   const out = $("#out");
@@ -364,7 +365,7 @@ async function decide(gold) {
   const ld = h("div", { class: "loading" }, h("div", { class: "spin" }), "Running the model — a forward pass per option order, with every layer recorded…");
   out.prepend(ld);
   try {
-    const r = await fetch("/api/explain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(req) });
+    const r = await fetch("api/explain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(req) });
     const res = await r.json();
     if (!r.ok || res.error) throw new Error(res.error || r.statusText);
     last = { res, req, gold: currentGold };
@@ -376,8 +377,11 @@ async function decide(gold) {
     [...out.querySelectorAll(".result")].forEach(r => r.classList.remove("stale"));
   } finally { btn.disabled = false; }
 }
-$("#go").onclick = () => decide();
-$("#addq").onclick = () => $("#qs").append(questionEditor("q" + ($("#qs").children.length + 1), { type: "choice" }));
+$("#go").onclick = () => decide(undefined, postedRequest);
+$("#addq").onclick = () => { postedRequest = null; $("#qs").append(questionEditor("q" + ($("#qs").children.length + 1), { type: "choice" })); };
+$("#state").addEventListener("input", () => { postedRequest = null; });
+$("#qs").addEventListener("input", () => { postedRequest = null; });
+$("#qs").addEventListener("change", () => { postedRequest = null; });
 document.addEventListener("keydown", e => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") decide(); });
 $("#ex").onchange = e => {
   const ex = EXAMPLES[+e.target.value]; if (!ex) return;
@@ -639,12 +643,19 @@ function decisionView(q, v) {
 }
 
 // ---- boot -------------------------------------------------------------------------------------------------------
+let booted = false, posted = null;  // a request posted by basal-ui before the page has booted waits for it
+function explainPosted(req) {
+  loadRequest(req); postedRequest = req; currentGold = null;
+  $("#go").click();
+}
 (async function () {
   renderHistory();
   try {
-    INFO = await (await fetch("/api/info")).json();
+    const ri = await fetch("api/info");
+    INFO = await ri.json();
+    if (!ri.ok) throw new Error(INFO.error || ri.statusText);
     $("#modelchip").textContent = `${INFO.model} · ${INFO.device} · ${INFO.dtype} · ${INFO.layers} layers · prompt format ${INFO.prompt_format} · ${INFO.orders} option order${INFO.orders === 1 ? "" : "s"}`;
-    EXAMPLES = await (await fetch("/api/examples")).json();
+    EXAMPLES = await (await fetch("api/examples")).json();
     const sel = $("#ex"), groups = {};
     EXAMPLES.forEach((e, i) => {
       groups[e.file] ??= sel.appendChild(h("optgroup", { label: e.file }));
@@ -653,8 +664,15 @@ function decisionView(q, v) {
       groups[e.file].append(h("option", { value: i }, `${e.id} — ${txt.slice(0, 60)}${Object.keys(e.request.questions).length > 1 ? ` (+${Object.keys(e.request.questions).length - 1} more)` : ""}`));
     });
     loadRequest(EXAMPLES[0].request); currentGold = EXAMPLES[0].gold || null;
-  } catch (e) { $("#modelchip").textContent = "server not reachable"; }
+  } catch (e) { $("#modelchip").textContent = `server not reachable: ${e.message}`; }
+  booted = true;
+  if (posted) explainPosted(posted);
 })();
+// embedded in basal-ui (/viz/): the playground posts a request to explain
+window.addEventListener("message", e => {
+  if (e.origin !== location.origin || !e.data?.request) return;
+  if (booted) explainPosted(e.data.request); else posted = e.data.request;
+});
 </script>
 </body>
 </html>

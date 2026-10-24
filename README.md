@@ -322,6 +322,7 @@ Each answer has a probability for every option, the chosen key and the confidenc
 | Apple Silicon in detail, CPU | [docs/INSTALL.md](docs/INSTALL.md#apple-silicon-mlx) |
 | images and audio (basal-omni) | [below](#images-and-audio-basal-omni-experimental) |
 | all seven engines compared | [docs/INSTALL.md](docs/INSTALL.md#engines) |
+| a browser app: hardware check, model suggestion, playground (`basal-ui`) | [docs/SERVING.md](docs/SERVING.md#browser-app-pick-a-model-for-your-hardware-and-try-it) |
 | a JSONL file, serving flags, benchmarking your GPU | [docs/SERVING.md](docs/SERVING.md) |
 | Python client | [docs/INSTALL.md](docs/INSTALL.md#nvidia-gpu-the-basal-engine-recommended) |
 
@@ -373,16 +374,16 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --hos
 claude mcp add --transport http basal http://127.0.0.1:8000/mcp     # Claude Code; other hosts take the same URL
 ```
 
-No authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway in front. Details:
-[docs/MCP.md](docs/MCP.md).
+Without `--api-keys` there is no authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway in
+front; with `--api-keys` every request needs a key. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Documentation
 
 | | |
 |---|---|
 | [INSTALL](docs/INSTALL.md) | engines, the model files and every install path: NVIDIA (bf16, FP8), vLLM, SGLang, Apple Silicon, Ollama / llama.cpp, CPU, basal-omni |
-| [API](docs/API.md) | request, response, question types, using the confidence, how to ask |
-| [SERVING](docs/SERVING.md) | serving modes and flags, inference on a JSONL file, benchmarking your GPU |
+| [API](docs/API.md) | Complete basal-serve HTTP reference: upstream question types and confidence guidance, System One, Decisions, authentication, errors, media and client setups |
+| [SERVING](docs/SERVING.md) · [BENCHMARK_SETS](docs/BENCHMARK_SETS.md) | serving modes, basal-ui walkthrough (several models on one port), batch inference, visualization and benchmarks; preparing your own benchmark set |
 | [RESULTS](docs/RESULTS.md) | results against basal-1.5: Werdykt, other benchmarks, speed |
 | [MCP](docs/MCP.md) · [THINKING](docs/THINKING.md) · [OMNI](docs/OMNI.md) | MCP server and bridge; the experimental thinking mode; basal-omni on the engine |
 | [FEATURES](docs/FEATURES.md) · [CALIBRATION](docs/CALIBRATION.md) | `multi`, `act`, `tool` and evidence in detail; calibrating on your own data |

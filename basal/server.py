@@ -281,6 +281,12 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
 
 def act_spec(name, q, outcomes):
     """Cost matrix C[action][outcome] from the full form or the short form {"wrong": W, "defer": D}."""
+    max_error = q.get("max_error")
+    if max_error is not None:
+        try:
+            max_error = float(max_error)
+        except (TypeError, ValueError, OverflowError):
+            raise RequestError(f"question {name!r}: max_error must be a number") from None
     costs = q.get("costs")
     if not isinstance(costs, dict) or not costs:
         raise RequestError(f"question {name!r}: act needs costs")
@@ -289,13 +295,13 @@ def act_spec(name, q, outcomes):
         C = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
         if "defer" in costs:
             C["defer"] = {z: float(costs["defer"]) for z in outcomes}
-        return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=q.get("max_error"))
+        return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=max_error)
     for a, row in costs.items():
         if not isinstance(row, dict) or set(row) != set(outcomes):
             raise RequestError(f"question {name!r}: costs[{a!r}] must give a cost for every outcome {outcomes}")
     C = {a: {z: float(v) for z, v in row.items()} for a, row in costs.items()}
     defer = q.get("defer_action") or next((a for a in ("defer", "human") if a in C), None)
-    return dict(costs=C, defer=defer, max_error=q.get("max_error"))
+    return dict(costs=C, defer=defer, max_error=max_error)
 
 
 NO_CERTIFICATE = "no certified threshold for this type at this max_error"
@@ -311,6 +317,18 @@ def certified(cal, max_error, q_type):
     if "per_type" not in entry and cal.get("prompt", 1) == 1:
         return entry.get("confidence")
     return ((entry.get("per_type") or {}).get(q_type) or {}).get("confidence")
+
+
+def certified_table(cal):
+    """{max_error target: {question type: certified confidence threshold}} of a calibration ({} without thresholds):
+    what a client needs to tell automatable decisions from those to review."""
+    table = {}
+    for target in (cal.get("thresholds") or {}):
+        row = {t: c for t in ("choice", "noul", "score") if (c := certified(cal, float(target), t)) is not None}
+        if row:
+            table[target] = row
+    return table
+
 
 
 def act_answer(q, probs, conf, cal):
@@ -570,11 +588,12 @@ def orders_for(orders, k):
 
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
-                   calibration_warning=None, vllm_preset=None, layout=None):
+                   calibration_warning=None, vllm_preset=None, certified=None, context=None, layout=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
-    model's prompt format, the option orders served, why the --calibration file may not belong to the model and the
-    --vllm-preset (--mode vllm)."""
+    model's prompt format, the option orders served, why the --calibration file may not belong to the model, the
+    --vllm-preset (--mode vllm), the certified thresholds per max_error target and type, and the context policy
+    (limit in tokens, --context-overflow, --truncate-head)."""
     entry = {"name": name, "release_date": RELEASE_DATE,
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
@@ -589,6 +608,10 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
         entry["calibration_warning"] = calibration_warning
     if vllm_preset:
         entry["vllm_preset"] = vllm_preset
+    if certified and not calibration_warning:
+        entry["certified"] = certified
+    if context:
+        entry["context"] = context
     if layout not in (None, "canonical"):  # the prompt layout served (2.4.1; basal-calibrate fits its file)
         entry["layout"] = layout
     return {"models": [entry]}
@@ -1598,70 +1621,123 @@ def parser():
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--api-keys", default=None, metavar="PATH",
+                    help="JSON API key file; when set, require a key for every endpoint except GET /health")
+    ap.add_argument("--cors-origins", default="", help="comma-separated browser origins allowed by CORS")
     ap.add_argument("--mcp", choices=["off", "on"], default="off",
                     help="also serve MCP (streamable HTTP) at /mcp for agents: tools decide and decide_many over the "
-                         "same queue (needs basal[mcp]; no authentication, like the HTTP API: bind --host 127.0.0.1 "
-                         "for agents on this machine)")
+                         "same queue (needs basal[mcp]; API-key protected with --api-keys)")
     from .think import add_think_args  # --think off|auto (experimental; off = this server unchanged)
     add_think_args(ap)
     return ap
 
 
-def http_app(srv, mode, mcp=None):
-    """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models and /health; mcp: (routes, lifespan) of
-    --mcp on. A failed request answers {"error": message} with http_status: 422 invalid request, 503 out of GPU
-    memory, 500 any other server error."""
+def build_app(srv, a):
+    """Build the HTTP application around an initialized inference server."""
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
     from starlette.routing import Route
 
-    def failed(e):
+    from .auth import ApiKeys, protect, request_ids
+    from .compat import decision_body, decision_response, openai_error, systemone_media, validate_systemone
+
+    serve = getattr(srv, "serve", srv.decide)
+
+    def failed(e, decisions=False):
+        status = http_status(e)
+        code = {422: "INVALID_REQUEST", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[status]
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
-        if isinstance(e, torch.OutOfMemoryError):  # the failed forward's blocks back to the GPU: kept by the
-            torch.cuda.empty_cache()  # allocator, they failed the next requests too (ultra, 20 Oct)
-        return JSONResponse({"error": str(e)}, status_code=http_status(e))
+        if isinstance(e, torch.OutOfMemoryError):
+            torch.cuda.empty_cache()
+        if decisions:
+            return openai_error(status, str(e), code)
+        data = {"error": str(e), "code": code}
+        if status == 422:
+            data["detail"] = [{"loc": ["body"], "msg": str(e), "type": "value_error"}]
+        return JSONResponse(data, status_code=status)
 
     async def systemone(request):
         try:
             body = await request.json()
-        except ValueError as e:  # not JSON (or not UTF-8)
-            return failed(RequestError(f"the request body is not valid JSON: {e}"))
+        except Exception:
+            return JSONResponse({"error": "malformed JSON", "code": "INVALID_JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be a JSON object", "code": "INVALID_JSON"}, status_code=400)
         try:
-            return JSONResponse(await srv.serve(body))
+            validate_systemone(body)
+            body = systemone_media(body)
+        except (ValueError, KeyError, TypeError) as e:
+            status, msg, code = e.args[0] if e.args and isinstance(e.args[0], tuple) else (422, str(e), "INVALID_REQUEST")
+            return JSONResponse({"error": msg, "code": code,
+                                 "detail": [{"loc": ["body"], "msg": msg, "type": "value_error"}]}, status_code=status)
+        try:
+            return JSONResponse(await serve(body))
         except Exception as e:  # noqa: BLE001
             return failed(e)
 
+    async def decisions(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return openai_error(400, "malformed JSON", "INVALID_JSON")
+        if not isinstance(body, dict):
+            return openai_error(400, "request body must be a JSON object", "INVALID_JSON")
+        try:
+            internal, spec, values = decision_body(body)
+        except (ValueError, KeyError, TypeError) as e:
+            error = e.args[0] if isinstance(e, ValueError) and e.args and isinstance(e.args[0], tuple) else (422, str(e), "INVALID_REQUEST")
+            status, message, code = error[:3]
+            return openai_error(status, message, code, error[3] if len(error) > 3 else None)
+        try:
+            result = await serve(internal)
+            return JSONResponse(decision_response(result, spec, values))
+        except Exception as e:  # noqa: BLE001
+            return failed(e, decisions=True)
+
     async def models(_):
-        return JSONResponse(models_payload(srv.name, mode, getattr(srv.backend, "policies", {}), srv.temps,
-                                           srv.fmt, srv.orders, getattr(srv.backend, "media_kinds", ()),
-                                           getattr(srv, "cal_mismatch", None), getattr(srv.backend, "preset", None),
-                                           getattr(srv, "layout", None)))
+        return JSONResponse(models_payload(
+            srv.name, a.mode, getattr(srv.backend, "policies", {}), srv.temps, srv.fmt, srv.orders,
+            getattr(srv.backend, "media_kinds", ()), getattr(srv, "cal_mismatch", None),
+            getattr(srv.backend, "preset", None), None if getattr(srv, "cal_mismatch", None) else certified_table(srv.cal),
+            {"limit": srv.context[0] if srv.context else None, "overflow": srv.overflow,
+             "truncate_head": srv.trunc_head}, layout=getattr(srv, "layout", None)))
 
     async def health(_):
-        return JSONResponse({"status": "ok", **srv.load()})
+        return JSONResponse({"status": "ok", **(srv.load() if hasattr(srv, "load") else {})})
 
-    mcp_routes, mcp_run = mcp or ([], None)
+    mcp_routes, mcp_run = [], None
+    if a.mcp == "on":
+        from .mcp_server import http
+        mcp_routes, mcp_run = http(srv, a.host)
 
     @asynccontextmanager
     async def lifespan(_app):
-        tasks = [asyncio.get_running_loop().create_task(srv.worker())]
+        workers = [asyncio.get_running_loop().create_task(srv.worker())]
         if srv.long_tokens is not None:
-            tasks.append(asyncio.get_running_loop().create_task(srv.long_worker()))
+            workers.append(asyncio.get_running_loop().create_task(srv.long_worker()))
         async with mcp_run() if mcp_run else nullcontext():
             yield
-        for task in tasks:
+        for task in workers:
             task.cancel()
 
-    return Starlette(routes=[Route("/v1/systemone", systemone, methods=["POST"]),
-                             Route("/v1/basal", systemone, methods=["POST"]), Route("/v1/models", models),
-                             Route("/health", health), *mcp_routes], lifespan=lifespan)
+    app = Starlette(routes=[
+        Route("/v1/systemone", systemone, methods=["POST"]),
+        Route("/v1/basal", systemone, methods=["POST"]),
+        Route("/v1/decisions", decisions, methods=["POST"]),
+        Route("/decisions", decisions, methods=["POST"]),
+        Route("/v1/models", models), Route("/health", health), *mcp_routes
+    ], lifespan=lifespan)
+
+    origins = [origin.strip() for origin in a.cors_origins.split(",") if origin.strip()]
+    keys = ApiKeys(a.api_keys) if a.api_keys else None
+    return request_ids(protect(app, keys, origins))
 
 
 def main():
     a = parser().parse_args()
-    refuse_lean_flex(a.lean, a.tree)  # before default_mode, which resolves the model on CUDA GPUs without FA3
+    refuse_lean_flex(a.lean, a.tree)
     a.mode = a.mode or default_mode(a.model, a.revision)
     validate_quant(a.mode, a.quant)
     if a.mcp == "on":
@@ -1670,7 +1746,6 @@ def main():
         if missing:
             raise SystemExit(missing)
     import uvicorn
-
     t0 = time.time()
     if a.think == "off":
         srv = Server(a)
@@ -1678,23 +1753,16 @@ def main():
         from .think import ThinkServer
         srv = ThinkServer(a)
     attn = getattr(srv.backend, "attn", None)
-    rows = getattr(srv.backend, "compact_kernel", None)  # compact rows: their kernel, and the template prefix with them
+    rows = getattr(srv.backend, "compact_kernel", None)
     info = (f" attention {attn}" if attn else "") + (f" compact rows {rows}" if rows else "") \
         + (" template prefix" if rows and getattr(srv.backend, "template", None) else "")
-    # everything built so far (weights, graphs, compiled code) lives as long as the server: out of the garbage
-    # collector's sight, so a full collection no longer walks it (up to 1.4 s each at the end of start-up on 4.5B, and
-    # a 2.9 s stall of one request under nsys, 20 Oct)
     gc.collect()
     gc.freeze()
     print(f"basal: model {a.model} mode {a.mode}{info} ready in {time.time() - t0:.0f}s on port {a.port}", flush=True)
-
-    mcp = None
+    app = build_app(srv, a)
     if a.mcp == "on":
-        from .mcp_server import http
-        mcp = http(srv, a.host)
         print(f"basal: MCP (streamable HTTP) at http://{a.host}:{a.port}/mcp", flush=True)
-    app = http_app(srv, a.mode, mcp)
-    try:  # uvloop + httptools when available (uvicorn[standard]); plain asyncio otherwise
+    try:
         import httptools  # noqa: F401
         import uvloop  # noqa: F401
         fast = dict(loop="uvloop", http="httptools")

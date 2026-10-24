@@ -21,6 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ui = ["fastapi>=0.115"]
 fp8 = ["torchao==0.18.0"]
 nvfp4 = ["torchao==0.18.0"]
 vllm = ["vllm>=0.11"]
@@ -36,12 +37,16 @@ mcp = ["mcp>=2.3,<3"]  # basal-serve --mcp on (MCP at /mcp) and the basal-mcp st
 # the version the backend was validated with
 tpu = ["jax[tpu]==0.11.1; python_version >= '3.12' and sys_platform == 'linux'"]
 test = [
-  "pytest", "jsonschema", "mcp>=2.3,<3",
+  "pytest", "jsonschema", "mcp>=2.3,<3", "fastapi>=0.115",
   "mlx>=0.32; sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11'",
   "mlx-lm>=0.32; sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11'",
 ]
+# the release gate of basal-ui with the models on disk (tests/e2e, BASAL_E2E=1; docs/E2E.md): its page tests drive
+# Chromium (after installing: playwright install chromium)
+e2e = ["playwright>=1.48"]
 
 [project.scripts]
+basal-ui = "basal.ui.app:main"
 basal-serve = "basal.server:main"
 basal-bench = "basal.bench:main"
 basal-loadtest = "basal.loadtest:main"
@@ -52,10 +57,12 @@ basal-calibrate = "basal.calibrate:main"
 basal-viz = "basal.viz:main"
 
 [tool.setuptools]
-packages = ["basal"]
+packages = ["basal", "basal.ui"]
 
 [tool.setuptools.package-data]
 basal = ["examples/*.jsonl", "examples/*.py", "viz.html"]
+"basal.ui" = ["static/*.html", "static/fonts/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]  # tests import shared stubs from tests.test_server
+markers = ["e2e: end-to-end test of a real basal-ui with real models (BASAL_E2E=1; docs/E2E.md)"]

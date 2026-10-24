@@ -210,6 +210,33 @@ def measure(be, groups, lat_n):
                      lat2_p95_ms=two[int(0.95 * len(two))] * 1000, dec_s=len(chunk) / t)
 
 
+def measure_mode(mode, md, qs, fmt, lat_n, reference_mode, ref_top=None, vllm_model=None, gguf=None,
+                 ollama_model=None, ollama_url="http://127.0.0.1:11434", llamacpp_url="http://127.0.0.1:8080", mlx_packed=False):
+    """One mode of a comparison: load it, measure it, free it -> (the result row, the top option of every decision).
+    ref_top: the reference mode's tops, for the agreement (None: this is the reference)."""
+    reset_memory()
+    t0 = time.time()
+    be = build(mode, md, vllm_model, gguf, ollama_model, ollama_url, llamacpp_url, fmt, mlx_packed)
+    try:
+        load_s = time.time() - t0
+        groups = groups_for(be.tok, qs, fmt)
+        dec, r = measure(be, groups, min(lat_n, len(groups) - 5))
+        top = [max(range(len(d)), key=d.__getitem__) for d in dec]
+        r = dict(mode=mode, reference_mode=reference_mode, gpu=device_name(be), n=len(groups), load_s=round(load_s, 1),
+                 **r, mem_gb=memory_gb(be))
+        if all("gold" in g[0] for g in groups):
+            r["acc"] = sum(t == g[0]["gold"] for t, g in zip(top, groups)) / len(groups)
+        if ref_top is not None:
+            r["agree"] = sum(x == y for x, y in zip(top, ref_top)) / len(ref_top)
+        return r, top
+    finally:
+        if hasattr(be, "llm"):
+            del be.llm
+        del be
+        gc.collect()
+        reset_memory()
+
+
 def main():
     import sys
     if "--identity" in sys.argv[1:]:  # the identity gate of the fast path (basal/identity.py)
@@ -245,26 +272,11 @@ def main():
     fmt = model_format(md)
     ref, rows = None, []
     for mode in a.modes:
-        reset_memory()
-        t0 = time.time()
-        be = build(mode, md, vm, a.gguf, a.ollama_model, a.ollama_url, a.llamacpp_url, fmt, a.mlx_packed)
-        load_s = time.time() - t0
-        groups = groups_for(be.tok, qs, fmt)
-        dec, r = measure(be, groups, min(a.lat_n, len(groups) - 5))
-        top = [max(range(len(d)), key=d.__getitem__) for d in dec]
-        r = dict(mode=mode, reference_mode=a.modes[0], gpu=device_name(be), n=len(groups), load_s=round(load_s, 1),
-                 **r, mem_gb=memory_gb(be))
-        if all("gold" in g[0] for g in groups):
-            r["acc"] = sum(t == g[0]["gold"] for t, g in zip(top, groups)) / len(groups)
-        if ref is None:
-            ref = top
-        else:
-            r["agree"] = sum(x == y for x, y in zip(top, ref)) / len(ref)
+        r, top = measure_mode(mode, md, qs, fmt, a.lat_n, a.modes[0], ref, vm, a.gguf, a.ollama_model, a.ollama_url,
+                              a.llamacpp_url, a.mlx_packed)
+        ref = top if ref is None else ref
         rows.append(r)
         print(json.dumps({k: round(v, 3) if isinstance(v, float) else v for k, v in r.items()}), flush=True)
-        if hasattr(be, "llm"):
-            del be.llm
-        del be; gc.collect(); reset_memory()
     print(f"\n{'mode':<18}{'lat2 ms':>9}{'lat1 ms':>9}{'dec/s':>8}{'agree':>8}{'acc':>7}{'GB':>6}")
     for r in rows:
         print(f"{r['mode']:<18}{r['lat2_ms']:>9.1f}{r['lat1_ms']:>9.1f}{r['dec_s']:>8.1f}"

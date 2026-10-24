@@ -22,6 +22,7 @@ from pathlib import Path
 import torch
 
 from .engine import default_device
+from .facts import inject as inject_facts
 from .prompt import FORMATS, PREFILL
 from .run import to_request
 from .server import Server, certified, http_status, temperature, to_items
@@ -162,10 +163,14 @@ class Explainer:
             timing_ms=dict(tokenize=t_tok * 1000, separate_with_lens=t_sep * 1000, packed=t_packed * 1000))
 
     def explain(self, body):
-        """The page's steps for every question of a request (one entry per label of a multi question)."""
+        """The page's steps for every question of a request (one entry per label of a multi question); with
+        "facts": "auto" the state carries the computed facts, as basal-serve reads it."""
         with self.lock:
             t0 = time.perf_counter()
-            items = to_items(body["state"], body["questions"], self.srv.max_options, force_lang=body.get("lang"))
+            state = body["state"]
+            if body.get("facts") == "auto":
+                state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+            items = to_items(state, body["questions"], self.srv.max_options, force_lang=body.get("lang"))
             qs = [self.explain_branch(q, bi) for q in items for bi in range(len(q["branches"]))]
             return {"model": self.name, "questions": qs, "total_ms": (time.perf_counter() - t0) * 1000}
 
@@ -197,6 +202,42 @@ def examples():
     return out
 
 
+def make_app(explainer_fn, examples_fn, lifespan=None):
+    """The basal-viz page and its API: /, /api/info, /api/examples, /api/explain. explainer_fn() is the Explainer in
+    use; RuntimeError when there is none (basal-ui before its Inspect view starts one): 503 on info and explain."""
+    from starlette.applications import Starlette
+    from starlette.responses import FileResponse, JSONResponse
+    from starlette.routing import Route
+
+    def current():
+        try:
+            return explainer_fn(), None
+        except RuntimeError as e:
+            return None, JSONResponse({"error": str(e)}, status_code=503)
+
+    async def info(_):
+        ex, unavailable = current()
+        return unavailable or JSONResponse(ex.info)
+
+    async def explain(request):
+        ex, unavailable = current()
+        if unavailable:
+            return unavailable
+        try:
+            body = await request.json()
+            res = await asyncio.get_running_loop().run_in_executor(None, ex.explain, body)
+            return JSONResponse(compare_served(res, await ex.srv.decide(body)))
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": str(e)}, status_code=http_status(e))
+
+    return Starlette(routes=[
+        Route("/", lambda _: FileResponse(HERE / "viz.html")),
+        Route("/api/info", info),
+        Route("/api/examples", lambda _: JSONResponse(examples_fn())),
+        Route("/api/explain", explain, methods=["POST"]),
+    ], lifespan=lifespan)
+
+
 def main():
     ap = argparse.ArgumentParser(description="basal decision visualiser (local web page)")
     ap.add_argument("--model", default="Remek/basal-2.0-mini", help="local directory or Hugging Face repo id")
@@ -211,33 +252,17 @@ def main():
     a = ap.parse_args()
 
     import uvicorn
-    from starlette.applications import Starlette
-    from starlette.responses import FileResponse, JSONResponse
-    from starlette.routing import Route
 
     t0 = time.time()
     ex = Explainer(a)
     exs = examples()
-
-    async def explain(request):
-        try:
-            body = await request.json()
-            res = await asyncio.get_running_loop().run_in_executor(None, ex.explain, body)
-            return JSONResponse(compare_served(res, await ex.srv.decide(body)))
-        except Exception as e:  # noqa: BLE001
-            return JSONResponse({"error": str(e)}, status_code=http_status(e))
 
     async def lifespan(_app):
         task = asyncio.get_running_loop().create_task(ex.srv.worker())  # the batching loop of basal-serve
         yield
         task.cancel()
 
-    app = Starlette(routes=[
-        Route("/", lambda _: FileResponse(HERE / "viz.html")),
-        Route("/api/info", lambda _: JSONResponse(ex.info)),
-        Route("/api/examples", lambda _: JSONResponse(exs)),
-        Route("/api/explain", explain, methods=["POST"]),
-    ], lifespan=lifespan)
+    app = make_app(lambda: ex, lambda: exs, lifespan)
     print(f"basal-viz: {ex.name} on {ex.dev} ready in {time.time() - t0:.0f}s -> http://{a.host}:{a.port}", flush=True)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 

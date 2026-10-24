@@ -18,6 +18,9 @@ The inference engine in this repository is original work licensed under the Apac
 includes contributions by Paweł Kiszczak, Piotr Durlej, Kuba Sołtys, Michał Kardyś and @lukaspoloki (README.md,
 Contributors).
 
+basal-ui (basal/ui/static/fonts) bundles the Manrope and IBM Plex Mono fonts, licensed under the SIL Open Font
+License, Version 1.1 (OFL-Manrope.txt, OFL-IBMPlexMono.txt in that directory).
+
 Training data attribution (basal-1.0 models):
   English decision items in the training data were converted from the public corpus
   avbiswas/bev-decision-150K (https://huggingface.co/datasets/avbiswas/bev-decision-150K), which aggregates questions

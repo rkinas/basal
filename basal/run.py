@@ -23,7 +23,7 @@ import httpx
 
 def to_request(item, early_exit=None):
     if "questions" in item:
-        body = {k: item[k] for k in ("state", "questions", "early_exit") if k in item}
+        body = dict(item)
     else:
         t, opts = item.get("type", "choice"), item["options"]
         if t == "noul":
@@ -36,7 +36,10 @@ def to_request(item, early_exit=None):
         if t != "noul":
             q["option_keys"] = "hide"  # keys are the placeholders "0", "1", ...; the option texts define the options
         body = {"state": item["state"], "questions": {"q": q}}
-    if early_exit and "early_exit" not in body:
+    if "questions" in item:
+        if early_exit is not None:
+            body["early_exit"] = early_exit
+    elif early_exit:
         body["early_exit"] = early_exit
     return body
 
@@ -53,24 +56,43 @@ def summarise(item, resp):
             out["correct"] = pred == item["gold"]
     if "error" in resp:
         out["error"] = resp["error"]
+    for key in ("status", "code", "request_id"):
+        if key in resp:
+            out[key] = resp[key]
     return out
 
 
-async def run(a):
+async def run(a) -> dict:
+    """Answer every line of a.input into a.output; -> the summary. Optional: a.headers (sent with every request) and
+    a.progress(done, total), called after each answer (an exception it raises stops the run)."""
     items = [json.loads(line) for line in Path(a.input).read_text(encoding="utf-8").splitlines() if line.strip()]
     for i, it in enumerate(items):
         it.setdefault("id", i)
     results: list[dict] = [{} for _ in items]
     sem = asyncio.Semaphore(a.concurrency)
-    async with httpx.AsyncClient(timeout=300) as c:
+    progress, done = getattr(a, "progress", None), 0
+    async with httpx.AsyncClient(timeout=300, headers=getattr(a, "headers", None)) as c:
         async def one(i, it):
+            nonlocal done
             async with sem:
                 try:
                     r = await c.post(a.url, json=to_request(it, a.early_exit))
-                    resp = r.json()
+                    try:
+                        resp = r.json()
+                    except ValueError:
+                        resp = {"error": r.text or r.reason_phrase}
+                    if not isinstance(resp, dict):
+                        resp = {"error": "invalid response body"}
+                    if not r.is_success:
+                        resp.setdefault("error", r.text or r.reason_phrase)
+                        resp["status"] = r.status_code
+                        resp["request_id"] = r.headers.get("x-request-id")
                 except (httpx.HTTPError, ValueError) as e:
                     resp = {"error": str(e)}
                 results[i] = summarise(it, resp)
+                done += 1
+                if progress:
+                    progress(done, len(items))
         t0 = time.perf_counter()
         await asyncio.gather(*(one(i, it) for i, it in enumerate(items)))
         wall = time.perf_counter() - t0
@@ -85,7 +107,7 @@ async def run(a):
     graded = [r for r in ok if "correct" in r]
     if graded:
         s["accuracy"] = round(sum(r["correct"] for r in graded) / len(graded), 4)
-    print(json.dumps(s))
+    return s
 
 
 def main():
@@ -95,7 +117,7 @@ def main():
     ap.add_argument("--url", default="http://127.0.0.1:8000/v1/systemone")
     ap.add_argument("--concurrency", type=int, default=16, help="requests in flight (the server batches them)")
     ap.add_argument("--early-exit", dest="early_exit", default=None, help="e.g. 0.99 (server mode fast-exit)")
-    asyncio.run(run(ap.parse_args()))
+    print(json.dumps(asyncio.run(run(ap.parse_args()))))
 
 
 if __name__ == "__main__":

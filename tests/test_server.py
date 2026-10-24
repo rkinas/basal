@@ -11,7 +11,7 @@ import pytest
 import basal.bench as bench_module
 import basal.server as server_module
 from basal.facts import HEADER, facts, inject
-from basal.server import Server, default_mode, models_payload, named_options, parser, to_items
+from basal.server import Server, certified_table, default_mode, models_payload, named_options, parser, to_items
 
 SPEC = json.loads((Path(__file__).parent / "data/systemone_openapi.json").read_text(encoding="utf-8"))
 
@@ -261,6 +261,22 @@ def test_model_list_conforms_to_official_schema():
     m = models_payload("basal-1.5-4.5B", "mlx", {}, {"noul": 1.56})["models"][0]   # basal-calibrate checks it
     assert m["temperature_per_prim"] == {"noul": 1.56}
     assert models_payload("basal-1.5-4.5B", "mlx", {})["models"][0]["temperature_per_prim"] == {}
+
+
+def test_model_list_carries_certified_thresholds_and_context_policy():
+    context = {"limit": 4096, "overflow": "truncate", "truncate_head": 1 / 3}
+    payload = models_payload("m", "fast", {}, certified={"0.01": {"choice": 0.9}}, context=context)
+    jsonschema.validate(payload, schema("ModelMetadataList"))
+    m = payload["models"][0]
+    assert m["certified"] == {"0.01": {"choice": 0.9}} and m["context"] == context
+    assert "certified" not in models_payload("m", "fast", {}, certified={})["models"][0]
+    cal = {"prompt": 2, "thresholds": {"0.01": {"per_type": {"choice": {"confidence": 0.9}, "noul": {}}},
+                                       "0.05": {"per_type": {}}}}
+    assert certified_table(cal) == {"0.01": {"choice": 0.9}}
+    mismatched = models_payload("m", "fast", {}, calibration_warning="belongs to another model",
+                                certified={"0.01": {"choice": 0.9}})
+    assert "certified" not in mismatched["models"][0]
+    assert certified_table({}) == {}
 
 
 def swapped_prompts_differ(crit_a, crit_b, t="choice"):

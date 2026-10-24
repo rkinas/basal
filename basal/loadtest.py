@@ -36,7 +36,15 @@ def body(q, early_exit=None, questions=1):
     return b
 
 
-async def run(a):
+def _progress(a, phase, done, total):
+    progress = getattr(a, "progress", None)
+    if progress:
+        progress(phase, done, total)
+
+
+async def run(a) -> dict:
+    """Warm-up, a.n_seq sequential requests, a.n_conc at a.concurrency -> latency and throughput. Optional: a.headers
+    (sent with every request) and a.progress(phase, done, total) after each request (an exception stops the run)."""
     # warm-up, sequential and concurrent phases ask different requests (as far as the questions go), so an engine with
     # a prefix cache across requests (vLLM, SGLang, llama.cpp) cannot answer a timed request from an earlier phase
     n = 10 + a.n_seq + a.n_conc
@@ -44,22 +52,28 @@ async def run(a):
     bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
     while len(bodies) < n:  # small question files are reused
         bodies += bodies
-    async with httpx.AsyncClient(timeout=300) as c:
-        for b in bodies[:10]:  # warm-up
+    async with httpx.AsyncClient(timeout=300, headers=getattr(a, "headers", None)) as c:
+        for i, b in enumerate(bodies[:10]):  # warm-up
             (await c.post(a.url, json=b)).raise_for_status()
+            _progress(a, "warm-up", i + 1, 10)
         lat = []
-        for b in bodies[10: 10 + a.n_seq]:
+        for i, b in enumerate(bodies[10: 10 + a.n_seq]):
             t0 = time.perf_counter()
             r = await c.post(a.url, json=b)
             lat.append(time.perf_counter() - t0)
             r.raise_for_status()
+            _progress(a, "sequential", i + 1, a.n_seq)
         lat.sort()
         sem = asyncio.Semaphore(a.concurrency)
+        finished = 0
 
         async def one(b):
+            nonlocal finished
             async with sem:
                 t0 = time.perf_counter()
                 r = await c.post(a.url, json=b)
+                finished += 1
+                _progress(a, "concurrent", finished, a.n_conc)
                 return time.perf_counter() - t0, r.status_code
 
         t0 = time.perf_counter()
@@ -71,35 +85,54 @@ async def run(a):
     if a.questions_per_request > 1:  # a request is several decisions; the rates above count requests
         out.update(questions_per_request=a.questions_per_request,
                    questions_per_s=len(ok) * a.questions_per_request / wall)
-    print(json.dumps({k: round(v, 2) if isinstance(v, float) else v for k, v in out.items()}))
-    if a.out:
-        Path(a.out).write_text(json.dumps(out, indent=1), encoding="utf-8")
+    return out
 
 
-async def determinism(a, bodies):
-    """The same requests alone and under load -> identical answers, max |dp|."""
+async def determinism(a, bodies) -> dict:
+    """The same requests alone and under load -> identical answers, max |dp| (a.headers, a.progress as in run)."""
     n = a.determinism
     probe, other = bodies[:n], bodies[n: 2 * n]
 
     def probs(r):
         r.raise_for_status()
         return [list(ans["probabilities"].values()) for ans in r.json()["answers"].values()]
-    async with httpx.AsyncClient(timeout=300) as c:
-        alone = [probs(await c.post(a.url, json=b)) for b in probe]
+    async with httpx.AsyncClient(timeout=300, headers=getattr(a, "headers", None)) as c:
+        alone = []
+        for i, b in enumerate(probe):
+            alone.append(probs(await c.post(a.url, json=b)))
+            _progress(a, "alone", i + 1, n)
         sem = asyncio.Semaphore(a.concurrency)
+        finished = 0
 
         async def one(b):
+            nonlocal finished
             async with sem:
-                return await c.post(a.url, json=b)
+                r = await c.post(a.url, json=b)
+                finished += 1
+                _progress(a, "under load", finished, 2 * n)
+                return r
         mixed = [x for pair in zip(probe, other) for x in pair]
         res = await asyncio.gather(*[one(b) for b in mixed])
     loaded = [probs(r) for r in res[::2]]
     diffs = [max(abs(x - y) for pa, qa in zip(p, q) for x, y in zip(pa, qa)) for p, q in zip(alone, loaded)]
     top = lambda ps: max(range(len(ps)), key=ps.__getitem__)  # noqa: E731
     flips = sum(top(pa) != top(qa) for p, q in zip(alone, loaded) for pa, qa in zip(p, q))
-    out = dict(url=a.url, determinism=dict(requests=n, identical=sum(d == 0.0 for d in diffs), max_abs_diff=max(diffs),
-                                           decision_flips=flips, concurrency=a.concurrency))
-    print(json.dumps(out))
+    return dict(url=a.url, determinism=dict(requests=n, identical=sum(d == 0.0 for d in diffs), max_abs_diff=max(diffs),
+                                            decision_flips=flips, concurrency=a.concurrency))
+
+
+def determinism_bodies(a) -> list[dict]:
+    """2 * a.determinism request bodies: the probes and the requests mixed with them under load."""
+    n = 2 * a.determinism
+    qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else load_questions(a.questions, n)
+    bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
+    while len(bodies) < n:
+        bodies += bodies
+    return bodies
+
+
+def report(a, out):
+    print(json.dumps({k: round(v, 2) if isinstance(v, float) else v for k, v in out.items()}))
     if a.out:
         Path(a.out).write_text(json.dumps(out, indent=1), encoding="utf-8")
 
@@ -126,14 +159,8 @@ def main():
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     if a.determinism:
-        n = 2 * a.determinism
-        qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic \
-            else load_questions(a.questions, n)
-        bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
-        while len(bodies) < n:
-            bodies += bodies
-        return asyncio.run(determinism(a, bodies))
-    asyncio.run(run(a))
+        return report(a, asyncio.run(determinism(a, determinism_bodies(a))))
+    report(a, asyncio.run(run(a)))
 
 
 if __name__ == "__main__":
