@@ -199,6 +199,23 @@ benchmarking a GPU.
   `{"status": "starting"}`. A start-up that fails exits with code 1, so a supervisor or the router never sees a
   half-started server.
 
+
+**Cascade and routing by script** (off by default; with neither flag the replicas' answers pass through untouched):
+
+```
+basal-router --replicas http://127.0.0.1:8001 --escalate http://127.0.0.1:8101 --escalate-below 0.8
+basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:8201
+```
+
+- `--escalate URL ... --escalate-below P`: a small model answers first. Each question whose top probability (calibrated,
+  as that replica returns it) is under P is asked again of the escalation replicas, usually a bigger model, and its
+  answer replaces the first one. Every answer says `"answered_by": "first"` or `"escalated"`, the response lists the
+  escalated questions under `"cascade"`, and `/metrics` counts both (`basal_router_answers_total`). Questions without
+  option probabilities (multi, tasks) are never escalated.
+- `--route SCRIPT=URL[,URL]`: requests whose state is mostly in that script (latin, cyrillic, greek, arabic, hebrew,
+  cjk, other) go to those replicas, for example a model trained for Ukrainian; the rest go to `--replicas`
+  (`basal_router_script_total`).
+
 ## Inference on a JSONL file
 
 `basal-run` sends every line of a JSONL file to a running server (concurrently; the server batches the requests) and

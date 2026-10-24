@@ -120,3 +120,61 @@ def test_starting_answers_503_then_frees_the_port():
     with socket.socket() as s:                                                          # the port is free again
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", port))
+
+
+def cascade_transport(conf):
+    """Fake replicas that answer every question with top probability conf[replica] (and say who answered)."""
+    def handler(req):
+        base = f"{req.url.scheme}://{req.url.host}"
+        if req.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        body = json.loads(req.content)
+        c = conf[base](body) if callable(conf[base]) else conf[base]
+        ans = {q: {"type": "choice", "choice": "a", "probabilities": {"a": c[q] if isinstance(c, dict) else c,
+                                                                       "b": 1 - (c[q] if isinstance(c, dict) else c)},
+                   "replica": base} for q in body["questions"]}
+        return httpx.Response(200, json={"answers": ans, "replica": base})
+    return httpx.MockTransport(handler)
+
+
+def test_cascade_escalates_only_low_confidence_questions():
+    small, big = "http://small", "http://big"
+    rt = R.Router([small], transport=cascade_transport({small: {"q1": 0.55, "q2": 0.95}, big: 0.9}),
+                  escalate=[big], below=0.8)
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        body = {"state": "Doc", "questions": {"q1": {"type": "choice"}, "q2": {"type": "choice"}}}
+        r = c.post("/v1/systemone", json=body).json()
+        assert r["answers"]["q1"]["replica"] == big and r["answers"]["q1"]["answered_by"] == "escalated"
+        assert r["answers"]["q2"]["replica"] == small and r["answers"]["q2"]["answered_by"] == "first"
+        assert r["cascade"] == {"below": 0.8, "escalated": ["q1"]}
+        m = c.get("/metrics").text
+        assert 'basal_router_answers_total{answered_by="escalated"} 1' in m
+        assert 'basal_router_answers_total{answered_by="first"} 1' in m
+
+
+def test_router_without_cascade_passes_answers_through_untouched():
+    """Off by default: the replica's response bytes come back as they are."""
+    def handler(req):
+        if req.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(200, content=b'{"answers":{"q":{"probabilities":{"a":0.5,"b":0.5}}},  "x": 1}')
+    rt = R.Router(["http://r0"], transport=httpx.MockTransport(handler))
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        r = c.post("/v1/systemone", json={"state": "s", "questions": {"q": {}}})
+        assert r.content == b'{"answers":{"q":{"probabilities":{"a":0.5,"b":0.5}}},  "x": 1}'
+
+
+def test_route_by_script():
+    assert R.script_of("Звіт про інцидент") == "cyrillic" and R.script_of("Raport z incydentu") == "latin"
+    assert R.script_of("事件报告") == "cjk" and R.script_of("1234") is None
+    main, cyr = "http://main", "http://cyr"
+    rt = R.Router([main], transport=cascade_transport({main: 0.9, cyr: 0.9}), routes={"cyrillic": [cyr]})
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        q = {"q": {"type": "choice"}}
+        assert c.post("/v1/systemone", json={"state": "Звіт про інцидент", "questions": q}).json()["replica"] == cyr
+        assert c.post("/v1/systemone", json={"state": "Raport z incydentu", "questions": q}).json()["replica"] == main
+        m = c.get("/metrics").text
+        assert 'basal_router_script_total{script="cyrillic"} 1' in m and 'basal_router_script_total{script="latin"} 1' in m
