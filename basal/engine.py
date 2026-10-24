@@ -857,7 +857,7 @@ class StateCache:
     def put(self, key, kv, tokens=None, replaces=None):
         """Stores a state's keys / values; with its token ids (tokens) it is also found by states that begin with it.
         replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step)."""
-        size = sum(k.numel() * k.element_size() + v.numel() * v.element_size() for k, v in kv)
+        size = sum(k.nbytes + v.nbytes for k, v in kv)  # torch tensors and MLX arrays alike
         if size > self.budget:
             return
         with self.lock:
@@ -2851,8 +2851,11 @@ class MLXBackend:
     groups (Gemma 4, long groups, sequence-length-dependent RoPE) keep the KV cache. Either way a suffix sees the prefix
     and its own earlier tokens only, so every readout equals a separate forward of its prompt; the packed row sums in a
     different order, so in bf16 / quantised weights its probabilities differ slightly from the KV-cache path (identical
-    decisions in fp32) and the shipped CALIBRATION.mlx.json was fitted on the KV-cache path. All MLX work runs on one
-    dedicated thread (the server calls the backend from an executor)."""
+    decisions in fp32) and the shipped CALIBRATION.mlx.json was fitted on the KV-cache path. With a state cache
+    (state_cache_gb, prefix: --state-cache-gb / --prefix-cache, as on the CUDA graph engine) a group the server cut at
+    its state or template prefix takes the keys / values of that root from the cache across requests (_state) and
+    computes only the rest; such groups use the KV-cache path. All MLX work runs on one dedicated thread (the server
+    calls the backend from an executor)."""
 
     MAX_ROWS = 16      # suffix rows per forward
     TOKEN_BUDGET = 8192  # rows x padded length per forward without a shared prefix
@@ -2861,9 +2864,24 @@ class MLXBackend:
     PACK_BUDGET = 2048  # packed rows x padded length per forward: on an M4 Pro 16 rows of ~250 tokens in one forward
     # (TOKEN_BUDGET) gave 9-11% fewer decisions/s than chunks of 2,048 tokens (44 bench examples, two orders)
     CACHE_BYTES = 2 << 30  # MLX buffer cache limit (and wired headroom above the weights)
+    # --prefix-cache: a request whose prompts together run at most PREFIX_SFX[-1] tokens past the template prefix is cut
+    # there (server.cut_of); PREFIX_GB is the state-cache budget when only the template prefixes are kept
+    PREFIX_SFX = [256]
+    PREFIX_GB = 0.25
+    # a prefill that continues cached keys / values runs one token or at least this many: MLX's fused attention over a
+    # cache (mx.fast.scaled_dot_product_attention, MLX 0.32.4) loses bf16 precision when 2-8 queries times the query
+    # heads per KV head exceed 32 (basal-2.0-mini, 6 per KV head: 6-8 queries; 4.5B, 8: 5-8; max error against an fp32
+    # reference 4-6e-2 instead of 5-8e-3, any key length). On basal-2.0-mini a BAN-PL decision went from 0.46 to 0.16
+    # when a state continued a cached one by 8 tokens.
+    MIN_CONTINUE = 9
+    state_cache = None  # StateCache: keys / values of request states (or template prefixes), reused across requests
+    prefix = False
 
-    def __init__(self, model_dir, max_rows=None, quant=None, packed=False):
+    def __init__(self, model_dir, max_rows=None, quant=None, packed=False, state_cache_gb=0, prefix=False):
         from concurrent.futures import ThreadPoolExecutor
+        self.prefix = bool(prefix)
+        gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
+        self.state_cache = StateCache(gb * 2 ** 30) if gb else None
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
@@ -2901,7 +2919,8 @@ class MLXBackend:
         weights = sum(v.nbytes for _, v in tree_flatten(self.model.parameters()))
         if mx.metal.is_available():
             rec = mx.device_info().get("max_recommended_working_set_size", weights)
-            mx.set_wired_limit(min(rec, weights + self.CACHE_BYTES))
+            cached = self.state_cache.budget if self.state_cache is not None else 0
+            mx.set_wired_limit(min(rec, weights + self.CACHE_BYTES + cached))
         mx.set_cache_limit(self.CACHE_BYTES)
         self.packed = bool(packed) and self._position_rope()
 
@@ -3003,15 +3022,52 @@ class MLXBackend:
         h = self.lm.model(ids, cache=cache)
         return h[mx.arange(B), mx.array([len(r) - 1 for r in rows])]
 
-    def _prefix(self, toks):
+    def _prefix(self, toks, initial=None):
+        """Per-layer (keys, values) [1, kv heads, length, head size] of toks. initial: those of toks[:m], which the
+        forward continues over toks[m:] (positions m..)."""
         mx = self.mx
         from mlx_lm.models.cache import KVCache, make_prompt_cache
         # plain caches: a sliding-window layer (Gemma 4) gets a rotating cache from mlx-lm, which keeps only the last
         # window of the prefix; here every layer keeps the whole prefix and the window is applied by the mask
         cache = [KVCache() for _ in make_prompt_cache(self.model)]
-        self.lm.model(mx.array([toks]), cache=cache)
+        m = 0
+        if initial is not None:
+            m = initial[0][0].shape[2]
+            if m >= len(toks):
+                return initial
+            if 1 < len(toks) - m < self.MIN_CONTINUE:  # start earlier: MIN_CONTINUE tokens over the shorter prefix
+                m = max(0, len(toks) - self.MIN_CONTINUE)
+                initial = [(k[..., :m, :], v[..., :m, :]) for k, v in initial] if m else None
+        if initial is not None:
+            for c, (k, v) in zip(cache, initial):  # the forward writes into new buffers, never into these
+                c.keys, c.values, c.offset = k, v, m
+        self.lm.model(mx.array([list(toks[m:])]), cache=cache)
         kv = [(c.keys[..., : c.offset, :], c.values[..., : c.offset, :]) for c in cache]
         mx.eval(kv)
+        return kv
+
+    def _state(self, root):
+        """Per-layer (keys, values) of a group's root (its tokens up to the server's cut: the state, or the template
+        prefix) from the state cache, computed and stored on a miss. A root that begins with a cached one (a growing
+        agent trace or chat history, or an edited state up to the edit, StateCache.longest) computes only its tokens
+        past the common prefix, and the entry it extends to its end is replaced. Entries are stored as copies
+        (mx.contiguous): a slice of mlx-lm's KVCache buffer, which grows in steps of 256 tokens, keeps the whole buffer
+        alive, so the cache would hold more memory than its budget counts."""
+        mx, cache = self.mx, self.state_cache
+        key = cache.key(root)
+        kv = cache.get(key)
+        if kv is not None:
+            return kv
+        initial, replaces = None, None
+        found = cache.longest(root)
+        if found is not None:
+            old, pkv, m, n = found
+            if cache.BLOCK <= m < len(root):
+                initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
+                replaces = old if m == n else None
+        kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial)]
+        mx.eval(kv)
+        cache.put(key, kv, tokens=root, replaces=replaces)
         return kv
 
     @staticmethod
@@ -3041,10 +3097,21 @@ class MLXBackend:
         h = self.lm.model(ids, cache=[_PackedRow(pos, mask[:, None])] * len(self.lm.model.layers))
         return h[mx.array([b for b, r in enumerate(rows) for _ in r[3]]), mx.array([j for r in rows for j in r[3]])]
 
-    def _group(self, toks, lids):
-        """One group: shared prefix once, then the suffixes in batches of max_rows."""
+    def _group(self, toks, lids, cut=None):
+        """One group: shared prefix once, then the suffixes in batches of max_rows. cut: the server's state-cache cut
+        (tokens of the root, which every prompt of the group begins with): the root's keys / values come from the state
+        cache (_state) and only the rest of the shared prefix is computed over them. The cold and the cached request
+        run the same forwards, so a cached state gives bit-identical probabilities; against the same request without
+        the cache (the shared prefix in one forward) they are equal up to rounding in fp32 and differ slightly with
+        bf16 / quantised weights (other kernels for other row counts; the same top answers at margins >= 0.2 in
+        HARDWARE.md#apple-m4-state-cache-on---mode-mlx)."""
         P = self._shared_len(toks)
-        prefix = self._prefix(toks[0][:P]) if P > 0 else None
+        if cut and self.state_cache is not None and cut <= P:
+            prefix = self._state(list(toks[0][:cut]))
+            if P > cut:
+                prefix = self._prefix(toks[0][:P], prefix)
+        else:
+            prefix = self._prefix(toks[0][:P]) if P > 0 else None
         out = []
         for i in range(0, len(toks), self.max_rows):
             h = self._forward([t[P:] for t in toks[i: i + self.max_rows]], prefix)
@@ -3070,24 +3137,26 @@ class MLXBackend:
         return res
 
     def _run_shared(self, groups):
-        enc = [(self.encode(p), x) for p, x in groups]
+        # a group the server cut for the state cache (its third element) runs through _group, single prompts too
+        cut = self.state_cache is not None
+        enc = [(self.encode(g[0]), g[1], g[2] if cut and len(g) > 2 else None) for g in groups]
         out = [None] * len(groups)
-        single = [k for k, (t, _) in enumerate(enc) if len(t) == 1]
+        single = [k for k, (t, _, c) in enumerate(enc) if len(t) == 1 and not c]
         if single:
             for k, p in zip(single, self._singles([enc[k][0][0] for k in single], [enc[k][1][0] for k in single])):
                 out[k] = [p]
         if self.packed:  # packed row length: the prefix once, then every suffix
             n = {k: sum(map(len, t)) - (len(t) - 1) * self._shared_len(t)
-                 for k, (t, _) in enumerate(enc) if out[k] is None}
+                 for k, (t, _, c) in enumerate(enc) if out[k] is None and not c}
             fit = [k for k in n if n[k] <= self.PACK_TOKENS]
             for c in self._chunks([n[k] for k in fit], self.PACK_BUDGET) if fit else []:
                 ks = [fit[j] for j in c]
                 probs = self._letters(self._packed([enc[k][0] for k in ks]), [x for k in ks for x in enc[k][1]])
                 for k in ks:
                     out[k], probs = probs[: len(enc[k][1])], probs[len(enc[k][1]):]
-        for k, (t, x) in enumerate(enc):
+        for k, (t, x, c) in enumerate(enc):
             if out[k] is None:
-                out[k] = self._group(t, x)
+                out[k] = self._group(t, x, c)
         return out
 
     def run_shared(self, groups, policy=None):

@@ -728,14 +728,15 @@ class Server:
             deterministic_setup(kind)
         elif getattr(a, "fp8_accum", "fast") == "full":  # FP8 checkpoints: the same GEMM arithmetic as --deterministic
             set_fp8_fast_accum(False)
-        if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit")):
-            raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) and is "
-                             "not combined with --deterministic (a cached state changes the shapes of the forwards)")
+        if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit", "mlx")):
+            raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or "
+                             "--mode mlx and is not combined with --deterministic (a cached state changes the shapes of "
+                             "the forwards)")
         if getattr(a, "layout", None) not in (None, "canonical"):
             refuse_layout_caches(a.layout, a)
-        if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind != "graph"):
-            raise SystemExit("--prefix-cache needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) and is not "
-                             "combined with --deterministic")
+        if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind not in ("graph", "mlx")):
+            raise SystemExit("--prefix-cache needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or --mode "
+                             "mlx and is not combined with --deterministic")
         a.lean, a.tree = lean_tree(getattr(a, "lean", "off"), getattr(a, "tree", "dense"), kind, comp, a.quant or quant)
         refuse_lean_flex(a.lean, a.tree)
         if getattr(a, "batches", "default") not in ("default", "auto") and kind not in ("graph", "exit"):
@@ -803,7 +804,9 @@ class Server:
         elif kind == "sglang":
             self.backend = SGLangBackend(md, a.dtype, mem=a.gpu_memory, max_len=a.max_len)
         elif kind == "mlx":
-            self.backend = MLXBackend(md, quant=quant, packed=getattr(a, "mlx_packed", False))
+            self.backend = MLXBackend(md, quant=quant, packed=getattr(a, "mlx_packed", False),
+                                      state_cache_gb=getattr(a, "state_cache_gb", 0),
+                                      prefix=getattr(a, "prefix_cache", "off") == "on")
         elif kind == "mps":
             self.backend = MPSBackend(md, a.dtype, shared=shared, device=a.device)
         elif kind == "gguf":
@@ -1528,12 +1531,14 @@ def add_engine_args(ap):
                     help="with --lean pass2: the pass-2 trie mask as a dense additive mask (KV heads repeated) or as a "
                          "FlexAttention mask over the KV heads as they are. auto: flex with --lean pass2, else dense")
     ap.add_argument("--state-cache-gb", dest="state_cache_gb", type=float, default=0,
-                    help="CUDA graph engine: keep the keys and values of request states on the GPU up to this many GB "
-                         "(least recently used evicted); a later request with the same state computes only its "
-                         "questions and options (0: off)")
+                    help="CUDA graph engine and --mode mlx: keep the keys and values of request states on the GPU "
+                         "up to this many GB (least recently used evicted); a later request with the same state "
+                         "computes only its questions and options, one whose state begins with a cached one only its "
+                         "new tokens (0: off)")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
-                    help="CUDA graph engine: compute the template prefix (chat template, system prompt, the header up "
-                         "to the state) once and run short requests over its cached keys and values")
+                    help="CUDA graph engine and --mode mlx: compute the template prefix (chat template, system "
+                         "prompt, the header up to the state) once and run short requests over its cached keys and "
+                         "values")
     ap.add_argument("--batches", choices=["auto", "compact", "default", "fine"], default="auto",
                     help="CUDA graph engine: compact = single prompts packed back to back into one row (FlashAttention "
                          "3 varlen on Hopper; elsewhere, sm80+, torch's varlen attention, Llama models), no padding to "
