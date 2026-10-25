@@ -48,8 +48,8 @@ from .evidence import Evidence
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import tasks
-from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, RequestError, lang_of, letter_ids, max_options, media_messages,
-                     model_format, model_layout, model_two_way,
+from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, lang_of, letter_ids, max_options,
+                     media_messages, model_format, model_layout, model_option_isolation, model_two_way, option_tokens,
                      reads_request, render)
 from .sets import label_set_id
 from .sets import select as select_set
@@ -570,11 +570,12 @@ def orders_for(orders, k):
 
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
-                   calibration_warning=None, vllm_preset=None, layout=None, two_way=None):
+                   calibration_warning=None, vllm_preset=None, layout=None, two_way=None, option_isolation=False):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
     model's prompt format, the option orders served, why the --calibration file may not belong to the model and the
-    --vllm-preset (--mode vllm), and the two-way limits of a model trained with two-way reading."""
+    --vllm-preset (--mode vllm), the two-way limits of a model trained with two-way reading, and whether its options
+    are read in isolated blocks."""
     entry = {"name": name, "release_date": RELEASE_DATE,
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
@@ -593,6 +594,8 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
         entry["layout"] = layout
     if two_way:
         entry["two_way"] = dict(two_way)
+    if option_isolation:
+        entry["option_isolation"] = True
     return {"models": [entry]}
 
 
@@ -612,6 +615,23 @@ def two_way_refused(kind, a):
         return "--long-lane: not with a two-way model (its long prompts are read one way, like the others)"
     if getattr(a, "eager_forward", None) == "hf":
         return "a two-way model needs the engine's own Gemma 4 forward (--eager-forward basal)"
+    return None
+
+
+def option_isolation_refused(kind, a):
+    """Why a model trained with isolated options (basal.json "option_isolation") cannot be served with these options,
+    or None. Its prompts are read whole by the engine's own eager Gemma 4 forward (nothing shared or cached before the
+    options; text only) in this version."""
+    if a.soam == "on":
+        return "--soam on: a model with isolated options reads each prompt whole in this version"
+    if getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on":
+        return "--state-cache-gb and --prefix-cache: not with isolated options in this version"
+    if kind != "eager":
+        return "a model with isolated options (basal.json \"option_isolation\") is served with --mode eager"
+    if getattr(a, "eager_forward", None) == "hf":
+        return "a model with isolated options needs the engine's own Gemma 4 forward (--eager-forward basal)"
+    if getattr(a, "media", "off") == "on":
+        return "--media on: not with isolated options in this version (text prompts only)"
     return None
 
 
@@ -802,7 +822,13 @@ class Server:
         self.two_way = model_two_way(md)
         if self.two_way and two_way_refused(kind, a):
             raise SystemExit(f"{a.model}: {two_way_refused(kind, a)}")
-        self.soam = (a.soam or ("off" if self.two_way else "on")) == "on"
+        # isolated options (basal.json "option_isolation"): prompts tokenized piece by piece and read whole
+        self.iso = model_option_isolation(md)
+        if self.iso and (self.two_way or self.fmt != 2):
+            raise SystemExit(f"{a.model}: isolated options need prompt format 2 and one-way reading")
+        if self.iso and option_isolation_refused(kind, a):
+            raise SystemExit(f"{a.model}: {option_isolation_refused(kind, a)}")
+        self.soam = (a.soam or ("off" if self.two_way or self.iso else "on")) == "on"
         self.tau, self.band = a.auto_tau, tuple(a.auto_band)
         shared = self.orders != 1 or self.soam  # prefix sharing: option orders, or the questions of a request
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
@@ -913,6 +939,9 @@ class Server:
         for perm in perms:
             prompt = render(self.tok, q["state"], question, [options[c] for c in perm], q["lang"], self.fmt,
                             getattr(self, "layout", "canonical"))
+            if getattr(self, "iso", False):  # its options go with it: the engine tokenizes it piece by piece
+                prompt = OptionPrompt(prompt)
+                prompt.options = [options[c] for c in perm]
             jobs.append((perm, prompt, self.code_ids(prompt, k)))
         return jobs
 
@@ -926,7 +955,11 @@ class Server:
     def encode(self, branches):
         """Tokenize the prompts of all branches at once (the engine takes the ids) -> (number of prompt tokens, the
         longest prompt of each branch)."""
-        toks = self.tok([p for b in branches for p in b[3]], add_special_tokens=False).input_ids
+        flat = [p for b in branches for p in b[3]]
+        if getattr(self, "iso", False):  # isolated options: the pieces one by one, with their token counts
+            toks = [option_tokens(self.tok, p, p.options, self.fmt) for p in flat]
+        else:
+            toks = self.tok(flat, add_special_tokens=False).input_ids
         longest, j = [], 0
         for b in branches:
             longest.append(max(map(len, toks[j: j + len(b[3])])))
@@ -1665,7 +1698,8 @@ def http_app(srv, mode, mcp=None):
         return JSONResponse(models_payload(srv.name, mode, getattr(srv.backend, "policies", {}), srv.temps,
                                            srv.fmt, srv.orders, getattr(srv.backend, "media_kinds", ()),
                                            getattr(srv, "cal_mismatch", None), getattr(srv.backend, "preset", None),
-                                           getattr(srv, "layout", None), getattr(srv, "two_way", None)))
+                                           getattr(srv, "layout", None), getattr(srv, "two_way", None),
+                                           getattr(srv, "iso", False)))
 
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})

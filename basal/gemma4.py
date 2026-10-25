@@ -152,8 +152,13 @@ class Gemma4Forward:
     # x queries x keys; fp32 in the math kernel: 256 MB), as the graph engine's math kernel (Gemma4Graph.SCORES)
     SCORES = 2 ** 26
 
-    def __init__(self, model, answer_rows=True, attn=None, two_way=None):
+    def __init__(self, model, answer_rows=True, attn=None, two_way=None, option_isolation=False):
         self.model = model
+        # isolated options (basal.json "option_isolation", prompt.model_option_isolation): every prompt is an OptionIds
+        # (its blocks) and is read whole: an option block reads the prefix and itself, never another option, at shared
+        # positions; the suffix reads all of them (_iso_rows, _mask)
+        self.iso = bool(option_isolation)
+        assert not (self.iso and two_way), "isolated options are read one way"
         # two-way reading (basal.json "two_way", prompt.model_two_way): {"max_prompt", "max_record"} or None. The
         # global layers read a prompt's tokens both ways, the sliding-window layers stay causal; a prompt over
         # max_prompt tokens, or every prompt of a request over max_record tokens, is read one way (two_way_rows)
@@ -230,12 +235,22 @@ class Gemma4Forward:
         return torch.where(vis, start.long().cumsum(1) - 1, -1)
 
     # -- one forward --------------------------------------------------------------------------------------------------
-    def _mask(self, t, qpos, kc, pos, valid, qblk, two_way=False):
+    def _mask(self, t, qpos, kc, pos, valid, qblk, two_way=False, iso=None):
         """Boolean attention mask [B, 1, Sq, Lc + S] of layer type t: keys of earlier passes (positions kc [B, Lc],
         -1 = none) then this pass's tokens (positions pos [B, S]; valid = real tokens, a padding query sees itself so
-        that no row is empty). two_way: whole prompts (no earlier keys) read both ways in the global layers."""
+        that no row is empty). two_way: whole prompts (no earlier keys) read both ways in the global layers. iso:
+        (segment ids, option tokens) [B, S] of whole prompts with isolated options: causal in token order, no option
+        token sees another option's, the window over the shared positions."""
         sliding = t == "sliding_attention"
         d = qpos[:, :, None] - pos[:, None, :]
+        if iso is not None:
+            seg, opt = iso
+            i = torch.arange(pos.shape[1], device=pos.device)
+            m = (i[:, None] >= i[None, :])[None] & valid[:, None, :]
+            m = m & ~(opt[:, :, None] & opt[:, None, :] & (seg[:, :, None] != seg[:, None, :]))
+            if sliding:
+                m = m & (d < self.window)
+            return (m | (i[:, None] == i[None, :])[None])[:, None]
         m = d >= 0
         block = None
         if qblk is not None and t in self.block_types:
@@ -344,7 +359,7 @@ class Gemma4Forward:
             h = h + layer.post_per_layer_input_norm(layer.per_layer_projection(g))
         return h * layer.layer_scalar
 
-    def _pass(self, h, pli, pos, valid, ctx=None, grp=None, read=None, blk=None, split=False, two_way=False):
+    def _pass(self, h, pli, pos, valid, ctx=None, grp=None, read=None, blk=None, split=False, two_way=False, iso=None):
         """One forward over token rows [B, S]: embeddings h [B, S, D], per-layer inputs pli [B, S, L, P] or None,
         positions pos [B, S], valid [B, S] (right padding), blk vision block ids or None. ctx: (kv, kpos) of earlier
         tokens, kv {own layer: (K, V) [G, kv heads, Lc, d]}, kpos {layer type: positions [G, Lc]}; row b continues
@@ -352,17 +367,21 @@ class Gemma4Forward:
         keys and values of the last layer that has its own). split: the global layers' attention in _split's parts.
         -> ({own layer: (K, V) of this pass's tokens}, final hidden state at `read` [B, D] or None). A readout pass
         keeps no keys and values ({}): nothing reads them, and ultra's of a 16k-token batch were 14 GB. two_way: rows
-        of whole prompts read both ways in the global layers (_mask)."""
+        of whole prompts read both ways in the global layers (_mask). iso: (segment ids, option tokens) of whole prompts
+        with isolated options (_mask; pos are their shared positions)."""
         assert not (two_way and ctx is not None), "a two-way prompt is read whole, without earlier keys"
+        assert not (iso is not None and ctx is not None), "a prompt with isolated options is read whole"
         B, S = valid.shape
         kv, kpos = ctx if ctx is not None else ({}, {})
         if ctx is not None and grp is None:
             grp = torch.zeros(B, dtype=torch.long, device=pos.device)
         types = set(self.types)
         rope = {t: self.lm.rotary_emb(h, pos, t) for t in types}
-        # a two-way forward's global layers take the masked SDPA kernel (a flash kernel's mask is causal only)
-        kinds = {t: "sdpa" if two_way and t != "sliding_attention" else self._kernel(t, h.dtype, blk) for t in types}
-        masks = {t: self._mask(t, pos, kpos[t][grp] if t in kpos else None, pos, valid, blk, two_way)
+        # a two-way forward's global layers take the masked SDPA kernel (a flash kernel's mask is causal only), and so
+        # does every layer of a forward with isolated options
+        kinds = {t: "sdpa" if iso is not None or two_way and t != "sliding_attention" else self._kernel(t, h.dtype, blk)
+                 for t in types}
+        masks = {t: self._mask(t, pos, kpos[t][grp] if t in kpos else None, pos, valid, blk, two_way, iso)
                  for t in types if kinds[t] in SDPA_KERNELS}
         kval = {t: torch.cat([kpos[t][grp] >= 0, valid], 1) if t in kpos else valid
                 for t in types if kinds[t] in VARLEN_KERNELS}
@@ -522,9 +541,27 @@ class Gemma4Forward:
                     out[g][j] = x
             cur = [r] if r is not None else []
 
-    def _singles(self, items, groups, out, media=None, two_way=False):
-        """Prompts without a shared prefix (each at most CHUNK tokens; two-way ones at most max_prompt): batched by
-        length, one forward each batch."""
+    def _iso_rows(self, prompts, valid):
+        """Segment ids (0 the prefix, k + 1 option k, n + 1 the suffix), option tokens and shared positions [B, S] of
+        OptionIds rows (right padding): every option block starts at the prefix length, the suffix after the longest
+        block."""
+        B, S = valid.shape
+        seg, pos = [], []
+        for p in prompts:
+            bl = list(getattr(p, "blocks", ()))
+            assert len(bl) >= 4 and sum(bl) == len(p), "an OptionIds row without its blocks"
+            P, n, longest = bl[0], len(bl) - 2, max(bl[1:-1])
+            s = [0] * P + [k + 1 for k in range(n) for _ in range(bl[k + 1])] + [n + 1] * bl[-1]
+            q = list(range(P)) + [P + i for b in bl[1:-1] for i in range(b)] + [P + longest + i for i in range(bl[-1])]
+            seg.append(s + [-1] * (S - len(s)))
+            pos.append(q + [0] * (S - len(q)))
+        seg = torch.tensor(seg, device=valid.device)
+        last = seg.max(1, keepdim=True).values
+        return (seg, (seg > 0) & (seg < last)), torch.tensor(pos, device=valid.device)
+
+    def _singles(self, items, groups, out, media=None, two_way=False, iso=False):
+        """Prompts without a shared prefix (each at most CHUNK tokens; two-way ones at most max_prompt; with isolated
+        options any length): batched by length, one forward each batch."""
         items = sorted(items, key=lambda x: len(groups[x[0]][x[1]]))
         cur = []
         for it in items + [None]:
@@ -534,7 +571,10 @@ class Gemma4Forward:
             if cur:
                 prompts = [groups[g][j] for g, j in cur]
                 h, pli, pos, valid, blk, lens = self._rows(prompts, [0] * len(cur), media, prompts)
-                _, hid = self._pass(h, pli, pos, valid, read=lens - 1, blk=blk, two_way=two_way)
+                segs = None
+                if iso:
+                    segs, pos = self._iso_rows(prompts, valid)
+                _, hid = self._pass(h, pli, pos, valid, read=lens - 1, blk=blk, two_way=two_way, iso=segs)
                 for (g, j), x in zip(cur, hid):
                     out[g][j] = x
             cur = [it] if it is not None else []
@@ -554,7 +594,12 @@ class Gemma4Forward:
         group share a prefix (the option orders of a question, or every question of a request); media ({kind: soft
         tokens}, media_features) are those of every prompt (one request). A two-way model: each group is a request;
         its two-way prompts are read whole, one by one (nothing shared: their state depends on the question), the
-        others one way as below."""
+        others one way as below. Isolated options: every prompt (OptionIds) whole, nothing shared."""
+        if self.iso:
+            assert not media, "isolated options: text prompts only"
+            out = [[None] * len(g) for g in groups]
+            self._singles([(gi, j) for gi, g in enumerate(groups) for j in range(len(g))], groups, out, iso=True)
+            return out
         if not self.two_way:
             return self._one_way(groups, media)
         out = [[None] * len(g) for g in groups]

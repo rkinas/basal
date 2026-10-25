@@ -92,6 +92,14 @@ benchmarking a GPU.
   `--state-cache-gb` / `--prefix-cache`, by `--mode eager` (the engine's own Gemma 4 forward) or the CUDA graph
   engine (`fast`, `fast-nocompile`: every prompt a plain row of its own, the math kernel in the global layers; not
   with `--batches compact`, `--lean`, `--template-prefix` or `--long-lane`). `/v1/models` reports the limits.
+- **Isolated options** (basal.json `"option_isolation": true`, a Gemma 4 model trained so): each option is read in a
+  block of its own, after the state and the question but not after the other options, and every block starts at the
+  same position; the answer reads all the blocks. The options are then read as a set: apart from its code, an option's
+  reading does not depend on where it stands in the list. The prompt is tokenized piece by piece (prefix, one block per
+  option, suffix), as such a model is trained; the tokenizer must tokenize those pieces as the whole prompt (Gemma 4
+  does; the engine checks it at start). In this version each prompt is read whole by the engine's own eager Gemma 4
+  forward: `--mode eager`, SOAM off (its default for such a model; `--soam on` is refused), no `--state-cache-gb` /
+  `--prefix-cache`, text only. `/v1/models` reports `"option_isolation": true`.
 - **Long states**: `--context-overflow truncate` (the default) cuts the middle of a state that does not fit the
   context (the first 1/3 and the last 2/3 of the kept tokens, `--truncate-head`; the question and options stay whole)
   and says what was cut in `usage.truncated`; `--context-overflow refuse` returns HTTP 422 instead. The context is
