@@ -2,12 +2,17 @@
 answers during start-up."""
 import asyncio
 import json
+import os
+import signal
 import socket
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 
 import httpx
+import pytest
 from starlette.testclient import TestClient
 
 from basal import router as R
@@ -178,3 +183,103 @@ def test_route_by_script():
         assert c.post("/v1/systemone", json={"state": "Raport z incydentu", "questions": q}).json()["replica"] == main
         m = c.get("/metrics").text
         assert 'basal_router_script_total{script="cyrillic"} 1' in m and 'basal_router_script_total{script="latin"} 1' in m
+# --gpus replicas: the processes basal-router starts must end with it, whatever ends it (2.5 gate: a replica outlived
+# a router stopped by SIGTERM, since uvicorn re-raises the signal after its shutdown, past main's finally)
+SLEEPER = ("import os, sys, time\n"
+           "port = sys.argv[sys.argv.index('--port') + 1]\n"
+           "open(os.path.join(os.environ['PIDDIR'], port), 'w').write(str(os.getpid()))\n"
+           "time.sleep(600)\n")
+EXITER = "import sys; sys.exit(3)\n"
+ROUTER = ("import sys\n"
+          "from basal import router as R\n"
+          "R.SERVE = [sys.executable, '-c', sys.argv[1]]\n"
+          "R.POLL_S = 0.2\n"
+          "R.main(sys.argv[2:])\n")
+posix = pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups (POSIX)")
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # a zombie (exited, not reaped by its parent) is not running
+        return open(f"/proc/{pid}/stat").read().split(") ")[1][0] != "Z"
+    except OSError:
+        return True
+
+
+def _router(tmp_path, replica=SLEEPER, gpus="0,1"):
+    """basal-router --gpus in a subprocess whose replicas are `replica` (pid files in tmp_path) -> (process, pids)."""
+    port, rport = _free_port(), _free_port()
+    env = dict(os.environ, PIDDIR=str(tmp_path), PYTHONPATH=os.pathsep.join(sys.path))
+    p = subprocess.Popen([sys.executable, "-c", ROUTER, replica, "--gpus", gpus, "--port", str(port),
+                          "--replica-port", str(rport)], env=env)
+    n = len(gpus.split(","))
+    for _ in range(300):
+        pids = [int(f.read_text()) for f in tmp_path.iterdir() if f.read_text()]
+        up = False
+        try:
+            up = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) is not None
+        except urllib.error.HTTPError:
+            up = True  # 503: no replica answers /health (they only sleep)
+        except OSError:
+            pass
+        if len(pids) == n and up:
+            return p, pids
+        time.sleep(0.05)
+    p.kill()
+    raise AssertionError("the router or its replicas did not start")
+
+
+def _gone(pids, seconds=20):
+    for _ in range(int(seconds * 20)):
+        if not any(_alive(x) for x in pids):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@posix
+def test_spawned_replicas_have_their_own_process_groups(tmp_path, monkeypatch):
+    monkeypatch.setenv("PIDDIR", str(tmp_path))
+    monkeypatch.setattr(R, "SERVE", [sys.executable, "-c", SLEEPER])
+    procs, urls = R.spawn(["0", "1"], _free_port(), [])
+    reps = R.Replicas(procs)
+    try:
+        assert len(urls) == 2 and all(os.getpgid(p.pid) == p.pid != os.getpgrp() for p in procs)
+    finally:
+        reps.stop(timeout=5)
+    assert all(p.poll() is not None for p in procs)
+    reps.stop()  # once only
+
+
+@posix
+@pytest.mark.parametrize("sig", ["SIGTERM", "SIGINT"])
+def test_router_stopped_by_a_signal_stops_its_replicas(tmp_path, sig):
+    p, pids = _router(tmp_path)
+    p.send_signal(getattr(signal, sig))
+    p.wait(timeout=30)
+    assert _gone(pids), "a replica outlived the router"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG (Linux)")
+def test_replicas_end_when_the_router_is_killed(tmp_path):
+    p, pids = _router(tmp_path)
+    p.kill()
+    p.wait(timeout=30)
+    assert _gone(pids), "a replica outlived a killed router"
+
+
+@posix
+def test_router_exits_1_when_every_replica_exited(tmp_path):
+    port, rport = _free_port(), _free_port()
+    p = subprocess.Popen([sys.executable, "-c", ROUTER, EXITER, "--gpus", "0,1", "--port", str(port),
+                          "--replica-port", str(rport)], env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)))
+    assert p.wait(timeout=60) == 1
