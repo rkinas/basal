@@ -74,3 +74,20 @@ def test_bits_need_a_state_cache():
     assert parser().parse_args([]).state_cache_bits == 16
     with pytest.raises(SystemExit, match="--state-cache-bits 8 / 4 needs"):
         Server(parser().parse_args(["--mode", "fast", "--state-cache-bits", "8"]))
+
+
+def test_one_prompt_cut_at_its_state_is_cached_and_read_back():
+    """A group of one prompt with a cut (one option order, as a readout of the calibration set) splits at the cut, so
+    its state is stored by the first call and read from the cache by the second."""
+    m = tiny("31b", torch.float32)
+    be = Stub(m)
+    be.state_cache = StateCache(1 << 30, bits=8)
+    toks = [[1, 5, 9, 11, 3, 4, 6, 12, 13, 14, 15, 16, 20, 21, 30]]
+    groups = [(toks, [[7, 8, 9]], 12)]
+    first = be.run_shared(groups)[0]
+    assert be.state_cache.stats()["entries"] == 1 and be.state_cache.stats()["hits"] == 0
+    second = be.run_shared(groups)[0]
+    assert be.state_cache.stats()["hits"] == 1
+    ref = separate(m, toks, [[7, 8, 9]])[0]
+    assert torch.allclose(torch.tensor(first[0]), ref, atol=1e-6)
+    assert torch.allclose(torch.tensor(second[0]), ref, atol=1e-2)
