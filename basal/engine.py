@@ -522,8 +522,9 @@ def quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4, fp8_c
     if quant_load not in ("gpu", "cpu"):
         return f"--quant-load {quant_load!r}: gpu or cpu"
     if quant_load == "cpu" and (fp8_checkpoint or not gemma4 or not (
-            quant == "fp8" and fp8_scaling == "block" or quant == "nvfp4" and nvfp4_amax is not None)):
-        return ("--quant-load cpu: basal-omni (Gemma 4) in --mode fp8 (block scaling) or --mode nvfp4 with "
+            quant == "fp8" and fp8_scaling == "block" or quant == "nvfp4" and nvfp4_amax is not None
+            or quant == "int8")):
+        return ("--quant-load cpu: basal-omni (Gemma 4) in --mode fp8 (block scaling), int8, or nvfp4 with "
                 "--nvfp4-amax, from its bf16 weights")
     return None
 
@@ -1080,6 +1081,10 @@ class GraphBackend(EagerBackend):
             batches = "default" if batches == "auto" else batches
         if quant == "fp8" and fp8_refused():
             raise ValueError(fp8_refused())
+        if quant == "int8":
+            from .int8block import int8_refused
+            if int8_refused():
+                raise ValueError(int8_refused())
         torch.backends.cuda.enable_cudnn_sdp(False)  # before capture: a captured graph keeps its attention kernel
         from . import gemma4_graph
         # every captured graph keeps its own cuBLAS workspace (32 MB on an H100): basal-omni-1.1-max's ~400 graphs held
@@ -1100,6 +1105,8 @@ class GraphBackend(EagerBackend):
             if why:
                 raise ValueError(why)
         self.fp8_scaling, self.fp8_bf16_layers = fp8_scaling, fp8_bf16_layers
+        if quant == "int8" and not gemma4_graph.is_gemma4_dir(model_dir):
+            raise ValueError("--mode int8 (block-scaled int8 weights and activations) is for basal-omni (Gemma 4)")
         why = quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4_graph.is_gemma4_dir(model_dir),
                                  self.fp8_checkpoint)
         if why:
@@ -1195,7 +1202,8 @@ class GraphBackend(EagerBackend):
         torch.cuda.empty_cache()
         block = quant == "fp8" and fp8_scaling == "block"  # --fp8-scaling block: basal/fp8block.py, after merging
         fp4 = quant == "nvfp4" and nvfp4_amax is not None  # basal/nvfp4.py with calibrated input scales (--nvfp4-amax)
-        if quant and not block and not fp4:  # NVFP4: its vLLM ports failed (15 Oct); torchao FP8 (per-row scales) on 1.1-max failed
+        int8 = quant == "int8"  # basal/int8block.py: fp8block's blocks with int8 values (GPUs without FP8)
+        if quant and not block and not fp4 and not int8:  # NVFP4: its vLLM ports failed (15 Oct); torchao FP8 (per-row scales) on 1.1-max failed
             # the port gate (2-10 options at margin >= 0.2: 0.9892, bar 0.9893; 20 Oct). The -FP8 checkpoints run in
             # --mode fast / fp8 as stored
             raise ValueError(f"--mode {quant} quantisation at load time is not available for basal-omni (Gemma 4) "
@@ -1216,7 +1224,7 @@ class GraphBackend(EagerBackend):
         # merged projections: bf16 linears only (an FP8 checkpoint's FP8Linear layers keep theirs); block FP8 quantises
         # the merged weights
         self.gemma = gemma4_graph.Gemma4Graph(self.model, kernels, compile=compile, merge=merge is True,
-                                              fp8="block" if block else "nvfp4" if fp4 else None,
+                                              fp8="block" if block else "nvfp4" if fp4 else "int8" if int8 else None,
                                               fp8_bf16_layers=fp8_bf16_layers, nvfp4_amax=nvfp4_amax,
                                               nvfp4_scope=nvfp4_scope, stream=stream)
         self.softcap, self.merged, self.lean = self.gemma.softcap, self.gemma.merged, None

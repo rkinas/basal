@@ -20,10 +20,11 @@ def same_weights(a, b):
 @pytest.mark.parametrize("kind", ["e4b", "31b"])
 @pytest.mark.parametrize("merge", [False, True])
 @pytest.mark.parametrize("keep", [0, 2])
-def test_layer_by_layer_equals_all_at_once(kind, merge, keep):
+@pytest.mark.parametrize("quant", ["block", "int8"])
+def test_layer_by_layer_equals_all_at_once(kind, merge, keep, quant):
     ref, m = tiny(kind), tiny(kind)
-    g0 = Gemma4Graph(ref, merge=merge, fp8="block", fp8_bf16_layers=keep)
-    g1 = Gemma4Graph(m, merge=merge, fp8="block", fp8_bf16_layers=keep, stream=torch.device("cpu"))
+    g0 = Gemma4Graph(ref, merge=merge, fp8=quant, fp8_bf16_layers=keep)
+    g1 = Gemma4Graph(m, merge=merge, fp8=quant, fp8_bf16_layers=keep, stream=torch.device("cpu"))
     assert (g1.fp8, g1.merged) == (g0.fp8, g0.merged) and g1.fp8 > 0
     assert same_weights(ref, m)
     assert [type(x.mlp.down_proj) for x in m.model.layers] == [type(x.mlp.down_proj) for x in ref.model.layers]
@@ -43,6 +44,7 @@ def test_refused_without_a_load_time_quantisation():
     assert quant_load_refused("gpu", None, "row", None, False, False) is None
     assert quant_load_refused("cpu", "fp8", "block", None, True, False) is None
     assert quant_load_refused("cpu", "nvfp4", "row", {"0.q_proj": 1.0}, True, False) is None
+    assert quant_load_refused("cpu", "int8", "row", None, True, False) is None
     for args in [("cpu", None, "row", None, True, False), ("cpu", "fp8", "row", None, False, False),
                  ("cpu", "fp8", "block", None, True, True), ("cpu", "nvfp4", "row", None, True, False)]:
         assert "--quant-load cpu" in quant_load_refused(*args)

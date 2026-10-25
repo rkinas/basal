@@ -73,6 +73,7 @@ MODES = {
     "fast-exit": ("exit", None, True),      # "fast" + trained early exits, policy chosen per request
     "fp8": ("graph", "fp8", True),          # "fast" with torchao FP8 (Hopper / Blackwell)
     "nvfp4": ("graph", "nvfp4", True),      # "fast" with torchao NVFP4 (Blackwell, experimental)
+    "int8": ("graph", "int8", True),        # "fast" with block-scaled int8 (basal-omni; Ampere and newer, no FP8 needed)
     "vllm": ("vllm", None, False),          # vLLM, for the ModelOpt FP8 / NVFP4 checkpoints
     "sglang": ("sglang", None, False),      # SGLang offline engine (1.5)
     "mlx": ("mlx", None, False),            # Apple Silicon, MLX (1.5): the MLX fp8 / fp4 exports or bf16 weights
@@ -557,10 +558,10 @@ def check_calibration(cal, fmt, path):
 
 
 def calibration_name(kind, quant, preset=None):
-    """Engine name of the per-engine calibration file CALIBRATION.<engine>.json: the quantised CUDA modes (fp8, nvfp4),
+    """Engine name of the per-engine calibration file CALIBRATION.<engine>.json: the quantised CUDA modes (fp8, nvfp4, int8),
     the engines other than the basal bf16 path and a --vllm-preset other than the default (vllm.<preset>); None =
     CALIBRATION.json."""
-    if kind in ("graph", "exit") and quant in ("fp8", "nvfp4"):
+    if kind in ("graph", "exit") and quant in ("fp8", "nvfp4", "int8"):
         return quant
     if kind == "vllm" and preset not in (None, "default"):
         return f"vllm.{preset}"
@@ -1019,8 +1020,9 @@ class Server:
             raise SystemExit("--fp8-scaling block needs --mode fp8")
         if getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS) < 0:
             raise SystemExit("--fp8-bf16-layers: give 0 or more layers")
-        if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4")):
-            raise SystemExit("--quant-load cpu needs --mode fp8 or nvfp4 (the CUDA graph engine)")
+        if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4",
+                                                                                                        "int8")):
+            raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
         attn = getattr(a, "attn", "auto")
@@ -1855,8 +1857,8 @@ def add_engine_args(ap):
     ap.add_argument("--mode", choices=list(MODES), default=None,
                     help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx / mlx-lm), tpu on a TPU VM "
                          "with basal[tpu], eager otherwise")
-    ap.add_argument("--quant", choices=["fp8", "nvfp4", "q8"], default=None,
-                    help="override the quantisation of the mode (fp8 / nvfp4: CUDA graph modes, q8: mlx)")
+    ap.add_argument("--quant", choices=["fp8", "nvfp4", "int8", "q8"], default=None,
+                    help="override the quantisation of the mode (fp8 / nvfp4 / int8: CUDA graph modes, q8: mlx)")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--media", choices=["off", "on"], default="off",
                     help="on: requests may carry images / audio (\"media\", basal/media.py); --mode eager or vllm "
@@ -2000,13 +2002,13 @@ def add_engine_args(ap):
                          "128 weight block and per 128 features of each token (basal-omni ultra only; other "
                          "basal-omni models are refused); auto: block for basal-omni, row otherwise")
     ap.add_argument("--fp8-bf16-layers", dest="fp8_bf16_layers", type=int, default=FP8_BF16_LAYERS,
-                    help="--mode fp8 with block scaling: the first and the last this many decoder layers keep bf16 "
-                         f"weights (default {FP8_BF16_LAYERS}; 0 = every layer in FP8)")
+                    help="--mode fp8 with block scaling, int8, nvfp4: the first and the last this many decoder layers "
+                         f"keep bf16 weights (default {FP8_BF16_LAYERS}; 0 = every layer quantised)")
     ap.add_argument("--quant-load", dest="quant_load", choices=["gpu", "cpu"], default="gpu",
-                    help="--mode fp8 (block scaling) / nvfp4 with basal-omni: where the bf16 weights are held while they "
-                         "are quantised. gpu: all on the GPU first (needs their full size); cpu: in host memory, one "
-                         "decoder layer at a time to the GPU, quantised there (GPU memory about the quantised size: "
-                         "ultra's FP8 on cards under 64 GB; the same weights)")
+                    help="--mode fp8 (block scaling) / int8 / nvfp4 with basal-omni: where the bf16 weights are held "
+                         "while they are quantised. gpu: all on the GPU first (needs their full size); cpu: in host "
+                         "memory, one decoder layer at a time to the GPU, quantised there (GPU memory about the "
+                         "quantised size: ultra in FP8 or int8 on cards under 64 GB; the same weights)")
     ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
                     help="--mode nvfp4 with basal-omni ultra (other basal-omni models are refused): the calibrated "
                          "input amax of each decoder linear (JSON, {\"amax\": {\"<layer>.<proj>\": value}}; default: the "

@@ -226,6 +226,8 @@ class Gemma4Graph:
             self.merged = self._merge() if merge else 0
             # after merging: a merged weight's parts are its blocks
             self.fp8 = self._fp8_block(fp8_bf16_layers) if fp8 == "block" else 0
+            if fp8 == "int8":
+                self.fp8 = self._fp8_block(fp8_bf16_layers, int8=True)
             if fp8 == "nvfp4":
                 self.fp8 = self._nvfp4(nvfp4_amax, fp8_bf16_layers, nvfp4_scope)
         else:  # the decoder layers come from host memory (--quant-load cpu): each one to `stream` (the GPU), merged and
@@ -238,8 +240,8 @@ class Gemma4Graph:
             for i, layer in enumerate(self.layers):
                 layer.to(stream)
                 self.merged += self._merge([i]) if merge else 0
-                if fp8 == "block":
-                    self.fp8 += self._fp8_block(fp8_bf16_layers, [i])
+                if fp8 in ("block", "int8"):
+                    self.fp8 += self._fp8_block(fp8_bf16_layers, [i], int8=fp8 == "int8")
                 elif fp8 == "nvfp4":
                     self.fp8 += self._nvfp4(nvfp4_amax, fp8_bf16_layers, nvfp4_scope, [i])
         if compile or self.flex:  # flex: uncompiled code calls one compiled flex_attention (_flex_attention), an
@@ -293,16 +295,20 @@ class Gemma4Graph:
         return n
 
     @torch.no_grad()
-    def _fp8_block(self, keep=0, layers=None):
+    def _fp8_block(self, keep=0, layers=None, int8=False):
         """Block-scaled FP8 weights (basal/fp8block.py: 128 x 128 blocks, activations in 1 x 128 tiles) for the
         projections the layers run: q / k / v / o and gate / up / down, merged or not (every size is a multiple of 128,
         so a merged weight's blocks are its parts' blocks; the parts become views of it and transformers' forward of
         the model still runs). The per-layer input projections (E2B / E4B), the embeddings and the head stay as loaded.
         Layer by layer, so the bf16 weights are freed as it goes (31B: 59 GB -> 31 GB). The first `keep` and the last
-        `keep` layers stay bf16 (--fp8-bf16-layers). layers: their indices (default every layer). -> the number of
-        GEMMs."""
+        `keep` layers stay bf16 (--fp8-bf16-layers). layers: their indices (default every layer). int8: block-scaled
+        int8 instead (basal/int8block.py, --mode int8; the same blocks). -> the number of GEMMs."""
         from .fp8block import BLOCK, BlockFP8Linear, fits, sm90
-        sm90()  # which GEMM the layers run, decided before they are compiled
+        if int8:
+            from .int8block import Int8BlockLinear as BlockFP8Linear, build
+            build()  # the Triton kernel, before any layer is compiled
+        else:
+            sm90()  # which GEMM the layers run, decided before they are compiled
         n = 0
 
         def ok(merged):
