@@ -28,6 +28,9 @@ alone in the same engine.
 --questions FILE adds your own simple items (state / question / options) to the single questions; --against MODEL
 takes the reference forwards from another model with the same tokenizer (the bf16 weights of an FP8 checkpoint), so
 the agreement then measures the quantisation too.
+
+The same check for every backend against the native engine, with question independence and bootstrap intervals, is
+basal-agree (basal/agree.py), which also runs this gate: basal-agree --identity.
 """
 import argparse
 import json
@@ -38,53 +41,12 @@ from pathlib import Path
 
 import torch
 
-from . import synth
+from .agree import QUESTIONS, build, compare, decisions, orders  # noqa: F401 (shared with basal-agree)
 from .engine import ATTN, GraphBackend, resolve
 from .server import lean_arg, merge_arg
-from .prompt import letter_ids, model_format, render
+from .prompt import model_format
 
 GATE = 0.999
-
-QUESTIONS = {
-    "pl": [("Który dział powinien obsłużyć ostatnie zgłoszenie?", ["Reklamacje", "Płatności", "Logistyka", "Sprzedaż"]),
-           ("Czy klient zgłosił uszkodzenie przesyłki?", ["Tak", "Nie"]),
-           ("Jak pilne jest ostatnie zgłoszenie?", ["niska pilność", "średnia pilność", "wysoka pilność"]),
-           ("Jaki status ma ostatnie zgłoszenie?", ["przyjęte", "w toku", "czeka na klienta", "przekazane", "zamknięte",
-                                                   "nie wiadomo"]),
-           ("Czy w historii są co najmniej trzy zgłoszenia tej samej osoby?", ["Tak", "Nie"])],
-    "en": [("Which department should handle the latest ticket?", ["Complaints", "Payments", "Logistics", "Sales"]),
-           ("Did the customer report a damaged parcel?", ["Yes", "No"]),
-           ("How urgent is the latest ticket?", ["low urgency", "medium urgency", "high urgency"]),
-           ("What is the status of the latest ticket?", ["received", "in progress", "waiting for customer", "forwarded",
-                                                         "closed", "unknown"]),
-           ("Are there at least three tickets from the same person in the history?", ["Yes", "No"])],
-}
-
-
-def orders(tok, fmt, state, question, options):
-    """Both option orders of one question -> (token lists, code ids)."""
-    k = len(options)
-    prompts = [render(tok, state, question, [options[c] for c in perm], fmt=fmt)
-               for perm in (list(range(k)), list(range(k))[::-1])]
-    ids = letter_ids(tok, prompts[0], k, fmt)
-    if ids is None:
-        raise ValueError("option codes are not single tokens for this tokenizer")
-    return tok(prompts, add_special_tokens=False).input_ids, [ids, ids]
-
-
-def build(tok, fmt, n_single, n_multi, n_long, seed=0, questions=None):
-    """Synthetic single questions (plus the simple items of `questions`, a list of dicts with state / question /
-    options), five-question requests over one state, long states."""
-    items = synth.items(n_single, 1500, seed=seed) + list(questions or [])
-    single = [orders(tok, fmt, it["state"], it["question"], it["options"]) for it in items]
-    multi = []
-    for i, it in enumerate(synth.items(n_multi, 1500, seed=seed + 1)):
-        lang = "pl" if i % 2 == 0 else "en"
-        req = [orders(tok, fmt, it["state"], q, o) for q, o in QUESTIONS[lang]]
-        multi.append(([t for r in req for t in r[0]], [x for r in req for x in r[1]]))
-    long = [orders(tok, fmt, it["state"], it["question"], it["options"])
-            for it in synth.items(n_long, 5600, seed=seed + 2, spread=0.4)]
-    return single, multi, long
 
 
 @torch.no_grad()
@@ -108,29 +70,6 @@ def reference_gemma(be, toks, ids):
     if be.softcap:
         z = torch.tanh(z / be.softcap) * be.softcap
     return torch.softmax(z, -1).tolist()
-
-
-def compare(ref, got):
-    """Lists of probability vectors -> agreement, |dp| statistics, near-tie disagreements."""
-    agree, dps, ties = 0, [], 0
-    for r, g in zip(ref, got):
-        a, b = max(range(len(r)), key=r.__getitem__), max(range(len(g)), key=g.__getitem__)
-        agree += a == b
-        if a != b:
-            top = sorted(r, reverse=True)
-            ties += top[0] - top[1] < 0.02
-        dps.append(max(abs(x - y) for x, y in zip(r, g)))
-    dps.sort()
-    return dict(readouts=len(ref), agreement=agree / len(ref), max_dp=dps[-1], p99_dp=dps[int(0.99 * (len(dps) - 1))],
-                disagreements=len(ref) - agree, near_ties=ties)
-
-
-def decisions(readouts):
-    """Readouts of the single questions (order 1, reversed order, per item) -> the averaged canonical probabilities."""
-    out = []
-    for o1, o2 in zip(readouts[0::2], readouts[1::2]):
-        out.append([(x + y) / 2 for x, y in zip(o1, o2[::-1])])
-    return out
 
 
 def run_path(be, groups, per_call):

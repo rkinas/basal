@@ -45,6 +45,7 @@ test = [
 basal-serve = "basal.server:main"
 basal-router = "basal.router:main"
 basal-bench = "basal.bench:main"
+basal-agree = "basal.agree:main"
 basal-loadtest = "basal.loadtest:main"
 basal-run = "basal.run:main"
 basal-export-gguf = "basal.gguf_export:main"
