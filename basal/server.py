@@ -569,6 +569,8 @@ def lanes_refused(a, kind):
         return "--lanes is not combined with --long-lane"
     if lean_arg(getattr(a, "lean", "off")):
         return "--lanes is not combined with --lean"
+    if os.environ.get("BASAL_EXPERIMENTAL_LANES") != "1":
+        return "--lanes is experimental in this version: BASAL_EXPERIMENTAL_LANES=1 turns it on"
     return None
 
 
@@ -1931,7 +1933,7 @@ def add_engine_args(ap):
     ap.add_argument("--lanes", type=int, default=1,
                     help="--deterministic with the CUDA graph engine: N requests at once, each in its own copy of the "
                          "graphs on its own CUDA stream; the answers stay those of one request at a time (GPU memory "
-                         "and start-up grow with N)")
+                         "and start-up grow with N). Experimental: needs BASAL_EXPERIMENTAL_LANES=1")
     ap.add_argument("--max-batch", dest="max_batch", type=int, default=64)
     ap.add_argument("--wait-ms", dest="wait_ms", type=float, default=0.0,
                     help="extra time to wait for more requests before a forward (default 0: adaptive batching)")

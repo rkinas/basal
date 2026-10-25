@@ -66,8 +66,11 @@ def args(*extra):
     return parser().parse_args(list(extra))
 
 
-def test_lanes_refused():
+def test_lanes_refused(monkeypatch):
+    monkeypatch.delenv("BASAL_EXPERIMENTAL_LANES", raising=False)
     assert parser().parse_args([]).lanes == 1 and lanes_refused(args(), "graph") is None
+    assert "experimental" in lanes_refused(args("--lanes", "4", "--deterministic"), "graph")
+    monkeypatch.setenv("BASAL_EXPERIMENTAL_LANES", "1")
     assert lanes_refused(args("--lanes", "4", "--deterministic"), "graph") is None
     assert "at least 1" in lanes_refused(args("--lanes", "0"), "graph")
     assert "needs --deterministic" in lanes_refused(args("--lanes", "2"), "graph")
