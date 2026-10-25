@@ -4,10 +4,13 @@ import asyncio
 import sys
 import threading
 import time
+import types
 
 import pytest
+import torch
 
 import basal.server as server_module
+from basal.engine import GraphBackend
 from basal.server import Server, lanes_refused, parser
 
 
@@ -79,3 +82,56 @@ def test_lanes_refused_before_a_model_is_read(monkeypatch):
     monkeypatch.setattr(server_module, "_recurrent", lambda *_, **__: pytest.fail("must reject before reading a model"))
     with pytest.raises(SystemExit, match="--lanes needs --deterministic"):
         server_module.main()
+
+
+class Engine(GraphBackend):
+    """The graph engine's lane state without a model or CUDA graphs."""
+
+    def __init__(self, model=None, dev="cpu"):
+        self.model, self.dev, self._wrows, self.graphs = model, torch.device(dev), {}, {}
+
+
+def test_a_lane_has_its_own_graphs_lock_and_row_cache():
+    base = Engine(model=object())
+    base._wrows[(1, 2)] = "rows"
+    new = base._lane_copy()
+    assert new.model is base.model                                      # the weights are shared
+    assert new._wrows == {} and new._wrows is not base._wrows           # rows are written on the lane's own stream
+    assert new.graphs == {} and new._launch is not base._launch and not new.frozen and new.stream is None
+    assert new._eager_lock is base._eager_lock                          # one lock for every lane
+
+
+def test_a_frozen_lane_keeps_its_eager_forward_per_shape():
+    calls = []
+
+    def fn(x):
+        calls.append(1)
+        return x * 2
+    e = Engine()
+    e.frozen = True
+    x = torch.ones(3)
+    g = e._capture(("p", 1, 3), fn, x)
+    assert e.graphs[("p", 1, 3)] is g and len(calls) == 1 and torch.equal(g[-1], x * 2)  # kept: the next call finds it
+    x.fill_(3)
+    g[0].replay()  # (callers fill the static inputs, then replay, as with a graph)
+    assert len(calls) == 2 and torch.equal(g[-1], torch.full((3,), 6.0))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA streams")
+def test_rows_a_lane_reads_are_written_on_its_own_stream():
+    """_rows fills its cache on the stream of the call that asks first. With that lane's stream held back, another lane
+    (its own stream) must still read the head's rows, not memory the first stream has not written yet."""
+    torch.manual_seed(0)
+    head = torch.nn.Linear(256, 4096, bias=False).cuda()
+    a = Engine(model=types.SimpleNamespace(lm_head=head), dev="cuda")
+    b = a._lane_copy()
+    sa, sb, lids = torch.cuda.Stream(), torch.cuda.Stream(), [[11, 12, 13], [500, 11]]
+    torch.cuda.synchronize()
+    with torch.cuda.stream(sa):
+        torch.cuda._sleep(int(5e8))  # the first lane's stream is busy (about a quarter of a second)
+        a._rows(lids)
+    with torch.cuda.stream(sb):
+        w, _, _ = b._rows(lids)
+        got = w.clone()
+    torch.cuda.synchronize()
+    assert torch.equal(got, head.weight[[11, 12, 500]].float())
