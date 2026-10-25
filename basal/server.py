@@ -44,8 +44,8 @@ from pathlib import Path
 import torch
 
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
-                     MLXBackend, MPSBackend, OllamaBackend, SGLangBackend, VLLM_PRESETS, VLLMBackend, fp8_refused,
-                     gemma_fast_kernels, recurrent_layers, recurrent_refused, resolve, set_fp8_fast_accum)
+                     FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend, VLLM_PRESETS, VLLMBackend,
+                     fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused, resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
@@ -83,6 +83,17 @@ MODES = {
     "llamacpp": ("llamacpp", None, False),  # llama.cpp server with the GGUF exports (1.5); --llamacpp-url
     "tpu": ("tpu", None, False),            # Google TPU (experimental, basal[tpu]): JAX / XLA, SOAM, one program per shape
 }
+
+
+def nvfp4_args(a):
+    """--nvfp4-amax / --nvfp4-scope as GraphBackend arguments (none when not given)."""
+    path = getattr(a, "nvfp4_amax", None)
+    if not path:
+        return {}
+    import json
+    with open(path) as f:
+        amax = json.load(f)
+    return dict(nvfp4_amax=amax.get("amax", amax), nvfp4_scope=getattr(a, "nvfp4_scope", "all"))
 
 
 def default_mode(model=None, revision=None):
@@ -949,6 +960,10 @@ class Server:
         refuse_lean_flex(a.lean, a.tree)
         if getattr(a, "batches", "default") not in ("default", "auto") and kind not in ("graph", "exit"):
             raise SystemExit("--batches needs the CUDA graph engine (fast, fast-nocompile, fast-exit, fp8, nvfp4)")
+        if getattr(a, "fp8_scaling", "auto") == "block" and (a.quant or quant) != "fp8":
+            raise SystemExit("--fp8-scaling block needs --mode fp8")
+        if getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS) < 0:
+            raise SystemExit("--fp8-bf16-layers: give 0 or more layers")
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
         attn = getattr(a, "attn", "auto")
@@ -1067,7 +1082,10 @@ class Server:
                                         batches=getattr(a, "batches", "default"),
                                         readout_layer=getattr(a, "readout_layer", "off"),
                                         template=getattr(a, "template_prefix", "off"),
-                                        gemma_attn=getattr(a, "gemma_attn", "auto"))
+                                        gemma_attn=getattr(a, "gemma_attn", "auto"),
+                                        fp8_scaling=getattr(a, "fp8_scaling", "auto"),
+                                        fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
+                                        **nvfp4_args(a))
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
         if getattr(a, "lanes", 1) > 1:
             t = time.time()
@@ -1910,6 +1928,19 @@ def add_engine_args(ap):
                     help="CUDA graph engine with compact rows: the template prefix of the prompts (chat template, system "
                          "prompt, the user header up to the state) is computed once at start-up and every prompt runs "
                          "only its own tokens over its keys and values (auto: on)")
+    ap.add_argument("--fp8-scaling", dest="fp8_scaling", choices=["auto", "row", "block"], default="auto",
+                    help="--mode fp8: row = torchao, one scale per token and per weight row; block = scales per 128 x "
+                         "128 weight block and per 128 features of each token (basal-omni only); auto: block for "
+                         "basal-omni, row otherwise")
+    ap.add_argument("--fp8-bf16-layers", dest="fp8_bf16_layers", type=int, default=FP8_BF16_LAYERS,
+                    help="--mode fp8 with block scaling: the first and the last this many decoder layers keep bf16 "
+                         f"weights (default {FP8_BF16_LAYERS}; 0 = every layer in FP8)")
+    ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
+                    help="--mode nvfp4 with basal-omni: the calibrated input amax of each decoder linear (JSON, "
+                         "{\"amax\": {\"<layer>.<proj>\": value}}): NVFP4 weights and activations (basal/nvfp4.py); "
+                         "--fp8-bf16-layers keeps the edge layers bf16")
+    ap.add_argument("--nvfp4-scope", dest="nvfp4_scope", choices=["all", "mlp"], default="all",
+                    help="--mode nvfp4 with --nvfp4-amax: all decoder projections, or gate / up / down only")
     ap.add_argument("--fp8-accum", dest="fp8_accum", choices=["fast", "full"], default="fast",
                     help="FP8 checkpoints in the CUDA graph engine: cuBLAS fast accumulation (rounding depends on the "
                          "batch's kernel) or full accumulation (decisions independent of batching, as --deterministic)")

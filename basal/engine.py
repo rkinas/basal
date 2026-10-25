@@ -511,6 +511,18 @@ def fp8_refused():
     return None
 
 
+# block FP8 (basal-omni): the first and the last this many decoder layers keep bf16 weights (--fp8-bf16-layers)
+FP8_BF16_LAYERS = 2
+
+
+def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
+    """--fp8-scaling auto -> block for basal-omni's bf16 weights under --mode fp8 (torchao's per-row FP8 failed its
+    port gate there), row otherwise; an FP8 checkpoint keeps its stored weights. row / block are kept as given."""
+    if scaling != "auto":
+        return scaling
+    return "block" if quant == "fp8" and gemma4 and not fp8_checkpoint else "row"
+
+
 def _copy_same(dst, src):
     """dst.copy_(src) for a captured graph's shared output: the same dtype and shape, so the copy is exact."""
     if dst.dtype != src.dtype or dst.shape != src.shape:
@@ -1013,7 +1025,8 @@ class GraphBackend(EagerBackend):
 
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
-                 readout_layer="off", template="off", gemma_attn="auto"):
+                 readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
+                 nvfp4_amax=None, nvfp4_scope="all"):
         what = recurrent_layers(model_dir)  # before anything is loaded
         if what:
             from .gdn_graph import is_gdn
@@ -1039,8 +1052,15 @@ class GraphBackend(EagerBackend):
         # (deterministic cuBLAS needs it)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:2")
         self.fp8_checkpoint = modelopt_fp8(model_dir)  # the -FP8 repositories: FP8 weights with static scales
-        # likewise: the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs)
-        self.attn = set_attention(attn, fp8=self.fp8_checkpoint or quant == "fp8")
+        fp8_scaling = fp8_scaling_of(fp8_scaling, quant, gemma4_graph.is_gemma4_dir(model_dir), self.fp8_checkpoint)
+        if fp8_scaling == "block" and (quant != "fp8" or not gemma4_graph.is_gemma4_dir(model_dir)):
+            raise ValueError("--fp8-scaling block: --mode fp8 with basal-omni (Gemma 4) only")
+        if fp8_bf16_layers < 0:
+            raise ValueError(f"--fp8-bf16-layers {fp8_bf16_layers}: give 0 or more layers")
+        self.fp8_scaling, self.fp8_bf16_layers = fp8_scaling, fp8_bf16_layers
+        # likewise: the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs; the Gemma 4
+        # forward picks its own kernels, --gemma-attn)
+        self.attn = set_attention(attn, fp8=self.fp8_checkpoint or quant == "fp8" and fp8_scaling != "block")
         if batches == "compact" and self.attn != "fa3":  # refused before the weights are loaded
             why = ("Gemma 4 needs --gemma-attn fa3" if gemma4_graph.is_gemma4_dir(model_dir)
                    else torch_varlen_available(getattr(torch, dtype)))
@@ -1059,7 +1079,7 @@ class GraphBackend(EagerBackend):
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL
         if gemma4_graph.is_gemma4(self.model):
-            self._gemma_init(gemma_attn, quant, compile, merge)
+            self._gemma_init(gemma_attn, quant, compile, merge, fp8_scaling, fp8_bf16_layers, nvfp4_amax, nvfp4_scope)
         else:
             causal_sdpa(self.model)
             self._llama_init(merge, quant, lean, tree, compile)
@@ -1098,7 +1118,8 @@ class GraphBackend(EagerBackend):
             self.warm()
         self.one_forward = self._one_forward_tokens()
 
-    def _gemma_init(self, kernels, quant, compile, merge):
+    def _gemma_init(self, kernels, quant, compile, merge, fp8_scaling="row", fp8_bf16_layers=0, nvfp4_amax=None,
+                    nvfp4_scope="all"):
         """basal-omni (Gemma 4): the forward of basal/gemma4_graph.py under the same packing, graphs and caches. Its
         own layer code reads the code rows at the readout positions (`ro`), so its plain graphs take them as an
         input; pass 2 with flex takes the trie as a TreeMask.
@@ -1117,10 +1138,13 @@ class GraphBackend(EagerBackend):
             if getattr(self.model.model, name, None) is not None:
                 setattr(self.model.model, name, None)
         torch.cuda.empty_cache()
-        if quant:  # NVFP4: its vLLM ports failed (15 Oct); torchao FP8 on 1.1-max failed the port gate (2-10 options at
-            # margin >= 0.2: 0.9892, bar 0.9893; 20 Oct). The -FP8 checkpoints run in --mode fast / fp8 as stored
-            raise ValueError(f"--mode {quant} quantisation at load time is not available for basal-omni (Gemma 4); "
-                             "serve its -FP8 checkpoint instead")
+        block = quant == "fp8" and fp8_scaling == "block"  # --fp8-scaling block: basal/fp8block.py, after merging
+        fp4 = quant == "nvfp4" and nvfp4_amax is not None  # basal/nvfp4.py with calibrated input scales (--nvfp4-amax)
+        if quant and not block and not fp4:  # NVFP4: its vLLM ports failed (15 Oct); torchao FP8 (per-row scales) on 1.1-max failed
+            # the port gate (2-10 options at margin >= 0.2: 0.9892, bar 0.9893; 20 Oct). The -FP8 checkpoints run in
+            # --mode fast / fp8 as stored
+            raise ValueError(f"--mode {quant} quantisation at load time is not available for basal-omni (Gemma 4) "
+                             "except --mode fp8 --fp8-scaling block; or serve its -FP8 checkpoint")
         if kernels == "auto":
             kernels = (gemma_fast_kernels() if compile else None) or "math"
         if self.two_way:  # two-way rows: the math kernel in the global layers (their mask is not causal)
@@ -1134,8 +1158,12 @@ class GraphBackend(EagerBackend):
         # agreement with eager 0.998-0.999 on dev v2, mini and 1.1-max); the compiled forward comes with the flex /
         # fa3 kernels
         compile = compile and kernels != "math"
-        # merged projections: bf16 linears only (an FP8 checkpoint's FP8Linear layers keep theirs)
-        self.gemma = gemma4_graph.Gemma4Graph(self.model, kernels, compile=compile, merge=merge is True)
+        # merged projections: bf16 linears only (an FP8 checkpoint's FP8Linear layers keep theirs); block FP8 quantises
+        # the merged weights
+        self.gemma = gemma4_graph.Gemma4Graph(self.model, kernels, compile=compile, merge=merge is True,
+                                              fp8="block" if block else "nvfp4" if fp4 else None,
+                                              fp8_bf16_layers=fp8_bf16_layers, nvfp4_amax=nvfp4_amax,
+                                              nvfp4_scope=nvfp4_scope)
         self.softcap, self.merged, self.lean = self.gemma.softcap, self.gemma.merged, None
         self.fwd, self.fwd_sfx = self.gemma.forward, self.gemma.forward_suffix
         self.flex = all(k != "math" for k in self.gemma.kernels.values())

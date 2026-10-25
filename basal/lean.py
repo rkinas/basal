@@ -13,6 +13,7 @@ from collections import namedtuple
 import torch
 import torch.nn.functional as F
 
+from . import fp8block, nvfp4
 from .engine import FP8_FAST_ACCUM, FP8Linear, _ATTN
 
 E4M3 = torch.float8_e4m3fn
@@ -53,16 +54,26 @@ def supports(model):
 
 
 def _params(m):
-    """A linear module -> its weights as arguments: (weight, bias) or (weight, weight_scale, input_scale, bias)."""
+    """A linear module -> its weights as arguments: (weight, bias), (weight, weight_scale, input_scale, bias) of an
+    FP8Linear or (weight, block scales, bias) of a fp8block.BlockFP8Linear."""
     if isinstance(m, FP8Linear):
         return (m.weight, m.weight_scale, m.input_scale, m.bias)
+    if isinstance(m, fp8block.BlockFP8Linear):
+        return (m.weight, m.weight_scale, m.bias)
+    if isinstance(m, nvfp4.NVFP4Linear):
+        return (m.weight, m.weight_scale, m.alpha, m.inv_g, m.bias)
     return (m.weight, m.bias)
 
 
 def linear(x, p):
-    """F.linear, or FP8Linear's arithmetic (static input scale, rows padded to 16, one scaled GEMM, bias fused)."""
+    """F.linear, FP8Linear's arithmetic (static input scale, rows padded to 16, one scaled GEMM, bias fused) or the
+    block-scaled FP8 GEMM (fp8block.linear)."""
     if len(p) == 2:
         return F.linear(x, p[0], p[1])
+    if len(p) == 3:
+        return fp8block.linear(x, *p)
+    if len(p) == 5:
+        return nvfp4.linear(x, *p)
     w, ws, xs, b = p
     shape, dt = x.shape, x.dtype
     x = x.reshape(-1, shape[-1])

@@ -168,7 +168,8 @@ class Gemma4Graph:
     BLOCK = 128   # "flex": block size of the block masks
     SMEM = None   # shared memory per block of the GPU (flex's tiles, _flex)
 
-    def __init__(self, model, kernels="math", compile=False, merge=False):
+    def __init__(self, model, kernels="math", compile=False, merge=False, fp8=None, fp8_bf16_layers=0, nvfp4_amax=None,
+                 nvfp4_scope="all"):
         lm = self.lm = text_model(model)
         cfg = self.cfg = lm.config
         n = cfg.num_hidden_layers
@@ -205,6 +206,10 @@ class Gemma4Graph:
         self.flex = any(k != "math" for k in kernels.values())  # fa3 is flex where a mask is needed
         self.qkv, self.gu = {}, {}  # merged projections per layer: (linear, output sizes)
         self.merged = self._merge() if merge else 0
+        # after merging: a merged weight's parts are its blocks
+        self.fp8 = self._fp8_block(fp8_bf16_layers) if fp8 == "block" else 0
+        if fp8 == "nvfp4":
+            self.fp8 = self._nvfp4(nvfp4_amax, fp8_bf16_layers, nvfp4_scope)
         if compile or self.flex:  # flex: uncompiled code calls one compiled flex_attention (_flex_attention), an
             # entry per mask kind, head size and rows-only pass: 13 for mini's long states, past the default 8, after
             # which flex_attention runs its unfused reference (fast-nocompile, 2026-10-20)
@@ -252,6 +257,112 @@ class Gemma4Graph:
             n += i in self.qkv or i in self.gu
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        return n
+
+    @torch.no_grad()
+    def _fp8_block(self, keep=0):
+        """Block-scaled FP8 weights (basal/fp8block.py: 128 x 128 blocks, activations in 1 x 128 tiles) for the
+        projections the layers run: q / k / v / o and gate / up / down, merged or not (every size is a multiple of 128,
+        so a merged weight's blocks are its parts' blocks; the parts become views of it and transformers' forward of
+        the model still runs). The per-layer input projections (E2B / E4B), the embeddings and the head stay as loaded.
+        Layer by layer, so the bf16 weights are freed as it goes (31B: 59 GB -> 31 GB). The first `keep` and the last
+        `keep` layers stay bf16 (--fp8-bf16-layers). -> the number of GEMMs."""
+        from .fp8block import BLOCK, BlockFP8Linear, fits, sm90
+        sm90()  # which GEMM the layers run, decided before they are compiled
+        n = 0
+
+        def ok(merged):
+            return merged is not None and fits(merged[0]) and all(k % BLOCK == 0 for k in merged[1])
+
+        def merged(lin, sizes, mod, names):
+            f, o = BlockFP8Linear.of(lin), 0
+            for name, k in zip(names, sizes):
+                setattr(mod, name, f.part(o, k))
+                o += k
+            return f
+
+        for i, layer in enumerate(self.layers):
+            if i < keep or i >= len(self.layers) - keep:
+                continue
+            a, m = layer.self_attn, layer.mlp
+            names = ["q_proj"] + (["k_proj"] + (["v_proj"] if a.v_proj is not None else []) if self.own[i] else [])
+            if ok(self.qkv.get(i)):
+                self.qkv[i] = (merged(self.qkv[i][0], self.qkv[i][1], a, names), self.qkv[i][1])
+                n += 1
+            elif i not in self.qkv:  # (a merged weight that does not fit stays bf16, as one GEMM)
+                for name in names:
+                    if fits(getattr(a, name)):
+                        setattr(a, name, BlockFP8Linear.of(getattr(a, name)))
+                        n += 1
+            if ok(self.gu.get(i)):
+                self.gu[i] = (merged(self.gu[i][0], self.gu[i][1], m, ["gate_proj", "up_proj"]), self.gu[i][1])
+                n += 1
+            elif i not in self.gu:
+                for name in ("gate_proj", "up_proj"):
+                    if fits(getattr(m, name)):
+                        setattr(m, name, BlockFP8Linear.of(getattr(m, name)))
+                        n += 1
+            for mod, name in ((a, "o_proj"), (m, "down_proj")):
+                if fits(getattr(mod, name)):
+                    setattr(mod, name, BlockFP8Linear.of(getattr(mod, name)))
+                    n += 1
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return n
+
+    @torch.no_grad()
+    def _nvfp4(self, amax, keep=0, scope="all"):
+        """NVFP4 weights (basal/nvfp4.py) for q / k / v / o and gate / up / down (scope "all") or gate / up / down only
+        ("mlp": attention stays bf16), merged or not, with the input global scales of `amax` (a JSON file or dict
+        {"<layer>.<projection>": the calibrated largest |input|}). The first and the last `keep` layers stay bf16, as
+        do the embeddings and the head. Layer by layer, the bf16 weights freed as it goes. -> the number of GEMMs."""
+        import json
+        from .nvfp4 import NVFP4Linear, build, fits
+        if scope not in ("all", "mlp"):
+            raise ValueError(f"--nvfp4-scope {scope!r}: all or mlp")
+        if not isinstance(amax, dict):
+            with open(amax) as f:
+                amax = json.load(f)
+        build()
+        n = 0
+
+        def one(i, mod, name):
+            lin = getattr(mod, name)
+            if fits(lin):
+                setattr(mod, name, NVFP4Linear.of(lin, amax[f"{i}.{name}"]))
+                return 1
+            return 0
+
+        def merged(i, pair, mod, names):
+            lin, sizes = pair
+            if not (fits(lin) and all(k % 128 == 0 for k in sizes)):
+                return pair, 0
+            f, o = NVFP4Linear.of(lin, max(amax[f"{i}.{x}"] for x in names)), 0
+            for name, k in zip(names, sizes):
+                setattr(mod, name, f.part(o, k))
+                o += k
+            return (f, sizes), 1
+
+        for i, layer in enumerate(self.layers):
+            if i < keep or i >= len(self.layers) - keep:
+                continue
+            a, m = layer.self_attn, layer.mlp
+            if scope == "all":
+                names = ["q_proj"] + (["k_proj"] + (["v_proj"] if a.v_proj is not None else []) if self.own[i] else [])
+                if i in self.qkv:
+                    self.qkv[i], k = merged(i, self.qkv[i], a, names)
+                    n += k
+                else:
+                    n += sum(one(i, a, x) for x in names)
+                n += one(i, a, "o_proj")
+            if i in self.gu:
+                self.gu[i], k = merged(i, self.gu[i], m, ["gate_proj", "up_proj"])
+                n += k
+            else:
+                n += one(i, m, "gate_proj") + one(i, m, "up_proj")
+            n += one(i, m, "down_proj")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         return n
 
     # -- the layer --------------------------------------------------------------------------------------------------
