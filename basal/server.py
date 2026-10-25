@@ -85,15 +85,34 @@ MODES = {
 }
 
 
-def nvfp4_args(a):
-    """--nvfp4-amax / --nvfp4-scope as GraphBackend arguments (none when not given)."""
+NVFP4_AMAX = "NVFP4_AMAX.json"  # a model folder's own calibrated input amax for --mode nvfp4 (basal-omni ultra)
+
+
+def nvfp4_args(a, md=None, quant=None):
+    """--nvfp4-amax / --nvfp4-scope as GraphBackend arguments (none when not given). Without --nvfp4-amax, --mode
+    nvfp4 reads the model folder's NVFP4_AMAX.json when it ships one."""
     path = getattr(a, "nvfp4_amax", None)
+    if not path and quant == "nvfp4" and md is not None and (Path(md) / NVFP4_AMAX).exists():
+        path = Path(md) / NVFP4_AMAX
     if not path:
         return {}
     import json
     with open(path) as f:
         amax = json.load(f)
     return dict(nvfp4_amax=amax.get("amax", amax), nvfp4_scope=getattr(a, "nvfp4_scope", "all"))
+
+
+def nvfp4_calibration_refused(md, kind, quant, a):
+    """None, or why basal-omni in NVFP4 is refused: it serves only with its own calibration (CALIBRATION.nvfp4.json in
+    the model folder, or --calibration). NVFP4 changes about 2% of the top answers and makes them more confident, so
+    the thresholds fitted on bf16 readouts do not hold."""
+    if quant != "nvfp4" or kind not in ("graph", "exit") or a.calibration or getattr(a, "no_calibration", False):
+        return None
+    from .gemma4_graph import is_gemma4_dir
+    if not is_gemma4_dir(md) or (Path(md) / "CALIBRATION.nvfp4.json").exists():
+        return None
+    return ("--mode nvfp4 with basal-omni needs its own calibration: CALIBRATION.nvfp4.json in the model folder or "
+            "--calibration <file> (fitted on NVFP4 readouts; the bf16 thresholds do not hold)")
 
 
 def default_mode(model=None, revision=None):
@@ -1024,6 +1043,9 @@ class Server:
         shared = self.orders != 1 or self.soam  # prefix sharing: option orders, or the questions of a request
         self.name = a.name or a.model.rstrip("/").split("/")[-1]
         quant = a.quant or quant
+        why = nvfp4_calibration_refused(md, kind, quant, a)
+        if why:
+            raise SystemExit(why)
         if getattr(a, "media", "off") == "on" and kind not in ("eager", "vllm"):
             raise SystemExit("--media on needs --mode eager or vllm (the media paths of basal-omni)")
         if getattr(a, "ple_offload", "off") == "on" and kind != "eager":
@@ -1085,7 +1107,7 @@ class Server:
                                         gemma_attn=getattr(a, "gemma_attn", "auto"),
                                         fp8_scaling=getattr(a, "fp8_scaling", "auto"),
                                         fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
-                                        **nvfp4_args(a))
+                                        **nvfp4_args(a, md, quant))
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
         if getattr(a, "lanes", 1) > 1:
             t = time.time()
@@ -1930,15 +1952,16 @@ def add_engine_args(ap):
                          "only its own tokens over its keys and values (auto: on)")
     ap.add_argument("--fp8-scaling", dest="fp8_scaling", choices=["auto", "row", "block"], default="auto",
                     help="--mode fp8: row = torchao, one scale per token and per weight row; block = scales per 128 x "
-                         "128 weight block and per 128 features of each token (basal-omni only); auto: block for "
-                         "basal-omni, row otherwise")
+                         "128 weight block and per 128 features of each token (basal-omni ultra only; other "
+                         "basal-omni models are refused); auto: block for basal-omni, row otherwise")
     ap.add_argument("--fp8-bf16-layers", dest="fp8_bf16_layers", type=int, default=FP8_BF16_LAYERS,
                     help="--mode fp8 with block scaling: the first and the last this many decoder layers keep bf16 "
                          f"weights (default {FP8_BF16_LAYERS}; 0 = every layer in FP8)")
     ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
-                    help="--mode nvfp4 with basal-omni: the calibrated input amax of each decoder linear (JSON, "
-                         "{\"amax\": {\"<layer>.<proj>\": value}}): NVFP4 weights and activations (basal/nvfp4.py); "
-                         "--fp8-bf16-layers keeps the edge layers bf16")
+                    help="--mode nvfp4 with basal-omni ultra (other basal-omni models are refused): the calibrated "
+                         "input amax of each decoder linear (JSON, {\"amax\": {\"<layer>.<proj>\": value}}; default: the "
+                         "model's NVFP4_AMAX.json): NVFP4 weights and activations (basal/nvfp4.py); --fp8-bf16-layers "
+                         "keeps the edge layers bf16. Needs the model's CALIBRATION.nvfp4.json or --calibration")
     ap.add_argument("--nvfp4-scope", dest="nvfp4_scope", choices=["all", "mlp"], default="all",
                     help="--mode nvfp4 with --nvfp4-amax: all decoder projections, or gate / up / down only")
     ap.add_argument("--fp8-accum", dest="fp8_accum", choices=["fast", "full"], default="fast",

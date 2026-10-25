@@ -7,6 +7,12 @@
   orders 222 -> 179 ms, one prompt over 3,000 tokens 5.3 -> 3.0 s; basal-2.0-mini-MLX-8bit 2-4% faster on short
   prompts. Top answers equal the default path on 184 of 184 readouts per model. Details in
   [QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon).
+- **basal-omni-1.0-ultra in block FP8 or NVFP4** (opt-in, ultra only): `--mode fp8` quantises ultra's bf16 weights as
+  they load (128 x 128 block scales, the first and last 2 layers in bf16): one 80 GB H100 at 1.35x the decisions/s of
+  bf16 and 53 instead of 74 GB at 16 clients. `--mode nvfp4` with ultra's calibrated input scales and its own
+  calibration file: 2.3x bf16's scoring speed on Blackwell, 2.4% of top answers change. Other basal-omni models are
+  refused in both modes; they failed the accuracy check. Details in
+  [QUANTIZATION.md](QUANTIZATION.md#basal-omni-10-ultra-quantised-at-load-time-25).
 
 # What is new in basal 2.4.1
 

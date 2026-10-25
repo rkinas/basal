@@ -238,6 +238,27 @@ answers too, its decisions must agree with the bf16 model's at least as often as
 answer, is reported separately. The 4.5B export: agreement 0.950 overall and 0.991 at a margin of at least 0.2
 (basal-1.5 FP8: 0.947 / 0.991), accuracy −0.2 points, ECE 0.054 against 0.061; on 11–255 options agreement 0.90.
 
+## basal-omni-1.0-ultra quantised at load time (2.5)
+
+The CUDA graph engine can quantise ultra's bf16 weights (31B, 59 GB) as it loads them. Both modes are opt-in and
+serve basal-omni-1.0-ultra only: on basal-omni-1.0-max (12B) both lost too much accuracy against bf16, so basal-serve
+refuses them for every other basal-omni model before any weight is loaded.
+
+| | block FP8 | NVFP4 |
+|---|---|---|
+| command | `--mode fp8` (block scaling is the default for basal-omni) | `--mode nvfp4`, with the calibrated input amax (`--nvfp4-amax <file>` or the model's `NVFP4_AMAX.json`) and its own calibration (`CALIBRATION.nvfp4.json` or `--calibration`) |
+| GPUs | Hopper, Blackwell; 80 GB (the bf16 weights are loaded on the GPU before they are quantised) | Blackwell |
+| numbers | weights: one scale per 128 x 128 block; activations: one scale per 128 features of each token | e2m1 values, one FP8 scale per 16 inputs and a global scale per tensor; activations with a fixed global scale from calibration, block scales per token |
+| bf16 layers | the first and the last 2 decoder layers (`--fp8-bf16-layers`), embeddings and head | the same |
+| top answer as bf16 (calibration test) | 99.3% | 97.6% |
+| error of the answers accepted at the 1% target | 0.57% (bf16 0.47%) | 0.72% |
+| speed | H100: 8.1 decisions/s single (bf16 6.0, 1.35x), 5.9 questions/s with several per request (1.23x); 52.9 GB peak at 16 clients (bf16 74.1 GB) | RTX PRO 6000 Blackwell: scoring 2.3x faster than bf16 on the same GPU |
+
+Both kept the paired check against bf16 that a quantised mode has to pass (accepted answers at the 1% and 5% targets,
+with confidence bounds), NVFP4 by a narrow margin. Use block FP8 when ultra has to fit one 80 GB GPU with room for
+traffic; use NVFP4 when throughput on Blackwell matters more than the last half point of accuracy. `--nvfp4-scope mlp`
+quantises the MLP only (1.6x); it was not better than the full variant.
+
 ## basal-1.5: the ModelOpt checkpoints
 
 `Remek/basal-1.5-4.5B-FP8` / `-NVFP4`, `Remek/basal-1.5-max-FP8` / `-NVFP4` and `Remek/basal-1.5-mini-FP8` were produced with [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) post-training quantisation

@@ -523,6 +523,31 @@ def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
     return "block" if quant == "fp8" and gemma4 and not fp8_checkpoint else "row"
 
 
+# basal-omni quantised at load time (--mode fp8 with block scaling, --mode nvfp4 --nvfp4-amax) serves only the text
+# shapes (hidden size, decoder layers) that kept the paired accuracy rule against bf16 with their own calibration:
+# ultra (31B) in both modes (NVFP4 by a narrow margin, 2.4% of top answers change); max (12B) failed both
+OMNI_QUANT_SHAPES = {(5376, 60): "basal-omni ultra (31B)"}
+
+
+def omni_quant_refused(model_dir, quant, nvfp4_amax=None):
+    """None when basal-omni at `model_dir` may be quantised at load time with `quant` (fp8 = block FP8, nvfp4 = NVFP4
+    with calibrated input scales), else why not; read from config.json before any weight is loaded."""
+    if quant == "nvfp4" and nvfp4_amax is None:
+        return ("--mode nvfp4 with basal-omni (Gemma 4) needs the calibrated input amax of each decoder linear: "
+                "--nvfp4-amax <file>, or NVFP4_AMAX.json in the model folder")
+    try:
+        cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    text = cfg.get("text_config") or cfg
+    shape = (text.get("hidden_size"), text.get("num_hidden_layers"))
+    if shape in OMNI_QUANT_SHAPES:
+        return None
+    return (f"--mode {quant} at load time passed its accuracy gate on {', '.join(OMNI_QUANT_SHAPES.values())} only; "
+            f"this model (hidden size {shape[0]}, {shape[1]} layers) is refused. Serve it with --mode fast (bf16) or "
+            "its -FP8 checkpoint")
+
+
 def _copy_same(dst, src):
     """dst.copy_(src) for a captured graph's shared output: the same dtype and shape, so the copy is exact."""
     if dst.dtype != src.dtype or dst.shape != src.shape:
@@ -1057,6 +1082,10 @@ class GraphBackend(EagerBackend):
             raise ValueError("--fp8-scaling block: --mode fp8 with basal-omni (Gemma 4) only")
         if fp8_bf16_layers < 0:
             raise ValueError(f"--fp8-bf16-layers {fp8_bf16_layers}: give 0 or more layers")
+        if gemma4_graph.is_gemma4_dir(model_dir) and (fp8_scaling == "block" or quant == "nvfp4"):
+            why = omni_quant_refused(model_dir, quant, nvfp4_amax)
+            if why:
+                raise ValueError(why)
         self.fp8_scaling, self.fp8_bf16_layers = fp8_scaling, fp8_bf16_layers
         # likewise: the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs; the Gemma 4
         # forward picks its own kernels, --gemma-attn)
