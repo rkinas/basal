@@ -997,6 +997,7 @@ class GraphBackend(EagerBackend):
     _deferred = None              # warm(): graphs warmed up, captured the largest first (_capture_deferred)
     stream = None                 # a lane's own CUDA stream (lane(); None: every thread's current stream)
     frozen = False                # a serving lane: a graph missing at run time runs eagerly instead of being captured
+    _eager_lock = threading.Lock()  # every lane: the first run of such a forward (it may compile: Dynamo / Inductor)
 
     def __new__(cls, model_dir=None, *args, **kwargs):
         """GraphBackend(model_dir, ...) of a Qwen3.5 model (Gated DeltaNet and attention layers, from its config.json)
@@ -1369,16 +1370,25 @@ class GraphBackend(EagerBackend):
         would change shapes); afterwards neither lane captures (frozen: a missing graph runs eagerly)."""
         if self.dev.type != "cuda":
             raise ValueError("--lanes needs a CUDA GPU")
-        new = copy.copy(self)
-        new.graphs, new.pool = {}, torch.cuda.graph_pool_handle()
-        new._out, new._side, new._deferred = None, None, None
-        new._launch, new.frozen, new.stream = threading.Lock(), False, None
+        new = self._lane_copy()
+        new.pool = torch.cuda.graph_pool_handle()
         new._kv_buffers()
         new.warm()
         self.frozen = new.frozen = True
         new.stream = torch.cuda.Stream(self.dev)
         if self.stream is None:
             self.stream = torch.cuda.Stream(self.dev)
+        return new
+
+    def _lane_copy(self):
+        """The copy lane() starts from: the weights, tokenizer, compiled forwards and grid shared; its own graphs, lock
+        and the caches its calls fill. The fp32 head rows of _rows are written on the stream of the lane that first
+        asks for them, so another lane, on its own stream, must not read them before that stream ran (an H100 with 4
+        lanes answered NaN)."""
+        new = copy.copy(self)
+        new.graphs, new.pool, new._wrows = {}, None, {}
+        new._out, new._side, new._deferred = None, None, None
+        new._launch, new.frozen, new.stream = threading.Lock(), False, None
         return new
 
     def _warm_long_sfx(self):
@@ -1676,9 +1686,11 @@ class GraphBackend(EagerBackend):
                 self._warm_up(fn, static)
                 self._deferred[key] = (fn, static)
             return None
-        if self.frozen:  # a capture would collide with the other lanes' work on the GPU
-            eager = _EagerGraph(fn, static)
-            return (eager, *static, eager.out)
+        if self.frozen:  # a capture would collide with the other lanes' work on the GPU: the forward runs eagerly,
+            with self._eager_lock:  # kept for the shape; its first run one lane at a time (torch.compile is not
+                eager = _EagerGraph(fn, static)  # thread-safe)
+            self.graphs[key] = (eager, *static, eager.out)
+            return self.graphs[key]
         self._warm_up(fn, static)
         return self._record(key, fn, static)
 
