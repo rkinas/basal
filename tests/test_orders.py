@@ -1,7 +1,11 @@
-"""--orders 1 | 2 | auto: which option orders are asked, and how they are combined."""
+"""--orders 1 | 2 | auto and --order-average K: which option orders are asked, and how they are combined."""
 import asyncio
+import itertools
+from types import SimpleNamespace
 
-from basal.server import default_orders, parser
+import pytest
+
+from basal.server import default_orders, option_orders, orders_for, parser, served_orders
 from tests.test_server import FakeServer
 
 
@@ -83,3 +87,39 @@ def test_orders_auto_on_multi_labels():
     r = asyncio.run(srv._run(body))
     assert r["usage"]["second_order_branches"] == 1 and len(srv.seen) == 4
     assert any("„Zwrot”" in s and "A. Nie" in s for s in srv.seen)
+
+
+def test_option_orders_given_reversed_then_rotations():
+    assert option_orders(3, 2) == [[0, 1, 2], [2, 1, 0]]
+    assert option_orders(4, 4) == [[0, 1, 2, 3], [3, 2, 1, 0], [1, 2, 3, 0], [0, 3, 2, 1]]
+    assert sorted(map(tuple, option_orders(3, 99))) == sorted(itertools.permutations(range(3)))  # every one, once
+    for k in (3, 4, 5):  # 2k orders: every option at every position twice
+        perms = option_orders(k, 2 * k)
+        assert len({tuple(p) for p in perms}) == 2 * k
+        assert all(sorted(p[pos] for p in perms) == sorted(list(range(k)) * 2) for pos in range(k))
+    assert option_orders(4, 12)[8:] == [[0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1], [0, 3, 1, 2]]  # then lexicographic
+    assert orders_for(6, 2) == 2 and orders_for(6, 3) == 6 and orders_for(4, 5) == 4 and orders_for(2, 5) == 2
+
+
+def test_order_average_flag():
+    assert parser().parse_args(["--order-average", "4"]).order_average == 4
+    assert parser().parse_args([]).order_average is None
+    for bad in ("1", "0", "x"):
+        with pytest.raises(SystemExit):
+            parser().parse_args(["--order-average", bad])
+    assert served_orders(SimpleNamespace(orders=None, order_average=None), 2) == 1  # off: as before
+    assert served_orders(SimpleNamespace(orders=None, order_average=4), 2) == 4
+    with pytest.raises(SystemExit, match="replaces --orders"):
+        served_orders(SimpleNamespace(orders="2", order_average=4), 2)
+
+
+def test_order_average_means_over_k_orders():
+    table = {**TABLE, "IT": [0.1, 0.1, 0.8]}
+    srv = server(4, by_first_option(table))
+    ans = asyncio.run(srv._run(BODY))["answers"]
+    assert len(srv.seen) == 4 + 2 + 2  # 3 options: 4 of the 6 orders; 2 options: both orders
+    # sure, P(r) in each order: 0.9 (given), 0.9 (reversed), 0.8 (rotation 1, IT first), 0.9 (its reverse)
+    assert abs(ans["sure"]["probabilities"]["r"] - (0.9 + 0.9 + 0.8 + 0.9) / 4) < 1e-6
+    assert abs(ans["unsure"]["probabilities"]["a"] - (0.55 + 0.7) / 2) < 1e-6
+    two = server(2, by_first_option(table))
+    assert asyncio.run(two._run(BODY))["answers"]["unsure"] == ans["unsure"]

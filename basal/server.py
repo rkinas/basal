@@ -30,6 +30,7 @@ import asyncio
 import functools
 import gc
 import hashlib
+import itertools
 import json
 import sys
 import math
@@ -740,6 +741,16 @@ def default_orders(orders, fmt):
     return orders if orders == "auto" or str(orders).startswith("2le") else int(orders)
 
 
+def served_orders(a, fmt):
+    """The option orders served: --order-average K (K orders, their mean), else --orders (default_orders)."""
+    k = getattr(a, "order_average", None)
+    if k is None:
+        return default_orders(a.orders, fmt)
+    if a.orders is not None:
+        raise SystemExit("--order-average K replaces --orders: give one of them")
+    return k
+
+
 def orders_arg(value):
     """--orders values: 1, 2, auto, 2le<N> (N >= 2)."""
     if value in ("1", "2", "auto") or (value.startswith("2le") and value[3:].isdigit() and int(value[3:]) >= 2):
@@ -748,12 +759,37 @@ def orders_arg(value):
 
 
 def orders_for(orders, k):
-    """Option orders of a question with k options under --orders (auto: 1 in the first pass)."""
+    """Option orders of a question with k options under --orders (auto: 1 in the first pass) or --order-average K (at
+    most the k! distinct orders)."""
     if orders == 2:
         return 2
+    if isinstance(orders, int) and orders > 2:
+        return min(orders, math.factorial(k))
     if isinstance(orders, str) and orders.startswith("2le"):
         return 2 if k <= int(orders[3:]) else 1
     return 1
+
+
+def option_orders(k, n):
+    """The first n option orders (permutations of range(k)): the given order, the reversed one, then each rotation
+    followed by its reverse, then the other permutations in lexicographic order. --orders 2 asks the first two;
+    --order-average K the first K, so that with 2k orders every option is read at every position twice."""
+    first, seen, out = list(range(k)), set(), []
+    for perm in itertools.chain((first, first[::-1]), *(((first[r:] + first[:r]), (first[r:] + first[:r])[::-1])
+                                                          for r in range(1, k)), map(list, itertools.permutations(first))):
+        if len(out) == n:
+            break
+        if tuple(perm) not in seen:
+            seen.add(tuple(perm))
+            out.append(list(perm))
+    return out
+
+
+def order_average_arg(value):
+    """--order-average K: K >= 2 option orders."""
+    if value.isdigit() and int(value) >= 2:
+        return int(value)
+    raise argparse.ArgumentTypeError(f"--order-average needs K >= 2 option orders, got {value!r}")
 
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
@@ -1017,7 +1053,7 @@ class Server:
         md = resolve(a.model, a.revision, metadata_only=kind in ("gguf", "ollama", "llamacpp"))
         self.fmt = model_format(md)  # prompt format of the model (basal.json "prompt"; 1 when absent)
         self.max_options = max_options(self.fmt)
-        self.orders = default_orders(a.orders, self.fmt)
+        self.orders = served_orders(a, self.fmt)
         # the prompt layout (prompt.LAYOUTS; 2.4.1): --layout, else the model's basal.json "layout", else canonical
         self.layout = getattr(a, "layout", None) or model_layout(md)
         if self.layout != "canonical" and self.fmt != 2:
@@ -1170,7 +1206,8 @@ class Server:
         options = q["options"] if options is None else options
         k = len(options)
         if perms is None:
-            perms = [list(range(k)), list(range(k))[::-1]][: orders_for(self.orders, k)]
+            n = orders_for(self.orders, k)
+            perms = [list(range(k)), list(range(k))[::-1]][:n] if n <= 2 else option_orders(k, n)
         jobs = []
         for perm in perms:
             prompt = render(self.tok, q["state"], question, [options[c] for c in perm], q["lang"], self.fmt,
@@ -1862,6 +1899,12 @@ def add_engine_args(ap):
                          "order 1, and the reversed order only where order 1 is uncertain (--auto-tau, --auto-band); "
                          "2le<N> = both orders for questions with at most N options, one above (e.g. 2le3). "
                          "Default: 2 for prompt-format-1 models, 1 for prompt-format-2 models")
+    ap.add_argument("--order-average", dest="order_average", type=order_average_arg, default=None, metavar="K",
+                    help="the mean of the probabilities over K option orders (the given order, the reversed one, then "
+                         "each rotation and its reverse), every order reading the request's state once; off by "
+                         "default. --order-average 2 = --orders 2. A calibration fitted on other orders keeps its "
+                         "temperatures only and the answers are marked unvalidated, unless the model ships "
+                         "CALIBRATION.o<K>.json (basal-calibrate --order-average K fits one)")
     ap.add_argument("--auto-tau", dest="auto_tau", type=float, default=0.6,
                     help="--orders auto: a second order when the top probability is below this (choice, score)")
     ap.add_argument("--auto-band", dest="auto_band", type=float, nargs=2, default=[0.2, 0.8],
