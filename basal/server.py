@@ -1019,6 +1019,8 @@ class Server:
             raise SystemExit("--fp8-scaling block needs --mode fp8")
         if getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS) < 0:
             raise SystemExit("--fp8-bf16-layers: give 0 or more layers")
+        if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4")):
+            raise SystemExit("--quant-load cpu needs --mode fp8 or nvfp4 (the CUDA graph engine)")
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
         attn = getattr(a, "attn", "auto")
@@ -1143,7 +1145,7 @@ class Server:
                                         gemma_attn=getattr(a, "gemma_attn", "auto"),
                                         fp8_scaling=getattr(a, "fp8_scaling", "auto"),
                                         fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
-                                        **nvfp4_args(a, md, quant))
+                                        quant_load=getattr(a, "quant_load", "gpu"), **nvfp4_args(a, md, quant))
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
         if getattr(a, "lanes", 1) > 1:
             t = time.time()
@@ -2000,6 +2002,11 @@ def add_engine_args(ap):
     ap.add_argument("--fp8-bf16-layers", dest="fp8_bf16_layers", type=int, default=FP8_BF16_LAYERS,
                     help="--mode fp8 with block scaling: the first and the last this many decoder layers keep bf16 "
                          f"weights (default {FP8_BF16_LAYERS}; 0 = every layer in FP8)")
+    ap.add_argument("--quant-load", dest="quant_load", choices=["gpu", "cpu"], default="gpu",
+                    help="--mode fp8 (block scaling) / nvfp4 with basal-omni: where the bf16 weights are held while they "
+                         "are quantised. gpu: all on the GPU first (needs their full size); cpu: in host memory, one "
+                         "decoder layer at a time to the GPU, quantised there (GPU memory about the quantised size: "
+                         "ultra's FP8 on cards under 64 GB; the same weights)")
     ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
                     help="--mode nvfp4 with basal-omni ultra (other basal-omni models are refused): the calibrated "
                          "input amax of each decoder linear (JSON, {\"amax\": {\"<layer>.<proj>\": value}}; default: the "

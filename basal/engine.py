@@ -515,6 +515,19 @@ def fp8_refused():
 FP8_BF16_LAYERS = 2
 
 
+def quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4, fp8_checkpoint):
+    """Why --quant-load cannot be used as given (None when it can): cpu keeps the bf16 weights in host memory and
+    quantises one decoder layer at a time on the GPU, so it needs a quantisation made at load time (--mode fp8 with
+    block scaling, --mode nvfp4 with --nvfp4-amax) of a basal-omni (Gemma 4) model."""
+    if quant_load not in ("gpu", "cpu"):
+        return f"--quant-load {quant_load!r}: gpu or cpu"
+    if quant_load == "cpu" and (fp8_checkpoint or not gemma4 or not (
+            quant == "fp8" and fp8_scaling == "block" or quant == "nvfp4" and nvfp4_amax is not None)):
+        return ("--quant-load cpu: basal-omni (Gemma 4) in --mode fp8 (block scaling) or --mode nvfp4 with "
+                "--nvfp4-amax, from its bf16 weights")
+    return None
+
+
 def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
     """--fp8-scaling auto -> block for basal-omni's bf16 weights under --mode fp8 (torchao's per-row FP8 failed its
     port gate there), row otherwise; an FP8 checkpoint keeps its stored weights. row / block are kept as given."""
@@ -1051,7 +1064,7 @@ class GraphBackend(EagerBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
-                 nvfp4_amax=None, nvfp4_scope="all"):
+                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu"):
         what = recurrent_layers(model_dir)  # before anything is loaded
         if what:
             from .gdn_graph import is_gdn
@@ -1087,6 +1100,10 @@ class GraphBackend(EagerBackend):
             if why:
                 raise ValueError(why)
         self.fp8_scaling, self.fp8_bf16_layers = fp8_scaling, fp8_bf16_layers
+        why = quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4_graph.is_gemma4_dir(model_dir),
+                                 self.fp8_checkpoint)
+        if why:
+            raise ValueError(why)
         # likewise: the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs; the Gemma 4
         # forward picks its own kernels, --gemma-attn)
         self.attn = set_attention(attn, fp8=self.fp8_checkpoint or quant == "fp8" and fp8_scaling != "block")
@@ -1103,9 +1120,13 @@ class GraphBackend(EagerBackend):
             if quant not in (None, "fp8"):
                 raise ValueError(f"{model_dir} is an FP8 checkpoint; serve it without --quant {quant}")
             self.model, quant = load_modelopt_fp8(model_dir, "cuda", getattr(torch, dtype)), None
+        elif quant_load == "cpu":  # the bf16 weights stay in host memory until _gemma_init moves them, layer by layer
+            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).eval()
         else:
             self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).cuda().eval()
-        self.dev = next(self.model.parameters()).device
+        self.quant_load = quant_load
+        self.dev = (torch.device("cuda", torch.cuda.current_device()) if quant_load == "cpu"
+                    else next(self.model.parameters()).device)
         self.prefill = PREFILL
         if gemma4_graph.is_gemma4(self.model):
             self._gemma_init(gemma_attn, quant, compile, merge, fp8_scaling, fp8_bf16_layers, nvfp4_amax, nvfp4_scope)
@@ -1166,6 +1187,11 @@ class GraphBackend(EagerBackend):
         for name in ("vision_tower", "audio_tower", "embed_vision", "embed_audio"):  # text only here (31B: ~1.7 GB)
             if getattr(self.model.model, name, None) is not None:
                 setattr(self.model.model, name, None)
+        stream = None
+        if self.quant_load == "cpu":  # all but the decoder layers to the GPU now; Gemma4Graph brings the layers one at a
+            # time and quantises each before the next (the GPU holds one bf16 layer at most, not all 59 GB of ultra's)
+            stream = self.dev
+            gemma4_graph.move_except(self.model, stream, gemma4_graph.text_model(self.model).layers)
         torch.cuda.empty_cache()
         block = quant == "fp8" and fp8_scaling == "block"  # --fp8-scaling block: basal/fp8block.py, after merging
         fp4 = quant == "nvfp4" and nvfp4_amax is not None  # basal/nvfp4.py with calibrated input scales (--nvfp4-amax)
@@ -1192,7 +1218,7 @@ class GraphBackend(EagerBackend):
         self.gemma = gemma4_graph.Gemma4Graph(self.model, kernels, compile=compile, merge=merge is True,
                                               fp8="block" if block else "nvfp4" if fp4 else None,
                                               fp8_bf16_layers=fp8_bf16_layers, nvfp4_amax=nvfp4_amax,
-                                              nvfp4_scope=nvfp4_scope)
+                                              nvfp4_scope=nvfp4_scope, stream=stream)
         self.softcap, self.merged, self.lean = self.gemma.softcap, self.gemma.merged, None
         self.fwd, self.fwd_sfx = self.gemma.forward, self.gemma.forward_suffix
         self.flex = all(k != "math" for k in self.gemma.kernels.values())

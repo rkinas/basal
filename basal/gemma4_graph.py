@@ -43,6 +43,23 @@ def text_model(model):
     return getattr(model.model, "language_model", model.model)
 
 
+@torch.no_grad()
+def move_except(model, dev, skip):
+    """Moves the parameters and buffers of model's modules to dev in place, except those of the modules under `skip`
+    (a module whose submodules stay where they are). Parameters keep their identity (.data is replaced), so tied ones
+    stay tied."""
+    out = {id(m) for m in skip.modules()}
+    for m in model.modules():
+        if id(m) in out:
+            continue
+        for p in m._parameters.values():
+            if p is not None:
+                p.data = p.data.to(dev)
+        for k, b in m._buffers.items():
+            if b is not None:
+                m._buffers[k] = b.to(dev)
+
+
 def is_gemma4(model):
     return str(getattr(model.config, "model_type", "")).startswith("gemma4")
 
@@ -169,7 +186,7 @@ class Gemma4Graph:
     SMEM = None   # shared memory per block of the GPU (flex's tiles, _flex)
 
     def __init__(self, model, kernels="math", compile=False, merge=False, fp8=None, fp8_bf16_layers=0, nvfp4_amax=None,
-                 nvfp4_scope="all"):
+                 nvfp4_scope="all", stream=None):
         lm = self.lm = text_model(model)
         cfg = self.cfg = lm.config
         n = cfg.num_hidden_layers
@@ -205,11 +222,26 @@ class Gemma4Graph:
             raise ValueError("fa3 runs the sliding-window layers only (FlashAttention 3 takes heads up to 256 wide)")
         self.flex = any(k != "math" for k in kernels.values())  # fa3 is flex where a mask is needed
         self.qkv, self.gu = {}, {}  # merged projections per layer: (linear, output sizes)
-        self.merged = self._merge() if merge else 0
-        # after merging: a merged weight's parts are its blocks
-        self.fp8 = self._fp8_block(fp8_bf16_layers) if fp8 == "block" else 0
-        if fp8 == "nvfp4":
-            self.fp8 = self._nvfp4(nvfp4_amax, fp8_bf16_layers, nvfp4_scope)
+        if stream is None:
+            self.merged = self._merge() if merge else 0
+            # after merging: a merged weight's parts are its blocks
+            self.fp8 = self._fp8_block(fp8_bf16_layers) if fp8 == "block" else 0
+            if fp8 == "nvfp4":
+                self.fp8 = self._nvfp4(nvfp4_amax, fp8_bf16_layers, nvfp4_scope)
+        else:  # the decoder layers come from host memory (--quant-load cpu): each one to `stream` (the GPU), merged and
+            # quantised there before the next, the same operations on the same weights as above
+            self.merged = self.fp8 = 0
+            if fp8 == "nvfp4" and not isinstance(nvfp4_amax, dict):
+                import json
+                with open(nvfp4_amax) as f:
+                    nvfp4_amax = json.load(f)
+            for i, layer in enumerate(self.layers):
+                layer.to(stream)
+                self.merged += self._merge([i]) if merge else 0
+                if fp8 == "block":
+                    self.fp8 += self._fp8_block(fp8_bf16_layers, [i])
+                elif fp8 == "nvfp4":
+                    self.fp8 += self._nvfp4(nvfp4_amax, fp8_bf16_layers, nvfp4_scope, [i])
         if compile or self.flex:  # flex: uncompiled code calls one compiled flex_attention (_flex_attention), an
             # entry per mask kind, head size and rows-only pass: 13 for mini's long states, past the default 8, after
             # which flex_attention runs its unfused reference (fast-nocompile, 2026-10-20)
@@ -238,15 +270,16 @@ class Gemma4Graph:
         return lin, [x.out_features for x in mods]
 
     @torch.no_grad()
-    def _merge(self):
+    def _merge(self, layers=None):
         """One q / k / v GEMM per layer with its own keys and values (q / k with attention_k_eq_v) and one gate / up
-        GEMM per layer, for plain bf16 / fp32 linears without bias (FP8 and torchao linears keep theirs). -> the
-        number of layers merged."""
+        GEMM per layer, for plain bf16 / fp32 linears without bias (FP8 and torchao linears keep theirs); layers: their
+        indices (default every layer). -> the number of layers merged."""
         def plain(mods):
             return all(type(x) is torch.nn.Linear and x.bias is None for x in mods) \
                 and len({x.weight.dtype for x in mods}) == 1
         n = 0
-        for i, layer in enumerate(self.layers):
+        for i in range(len(self.layers)) if layers is None else layers:
+            layer = self.layers[i]
             a, m = layer.self_attn, layer.mlp
             if self.own[i]:
                 qkv = [a.q_proj, a.k_proj] + ([a.v_proj] if a.v_proj is not None else [])
@@ -260,13 +293,14 @@ class Gemma4Graph:
         return n
 
     @torch.no_grad()
-    def _fp8_block(self, keep=0):
+    def _fp8_block(self, keep=0, layers=None):
         """Block-scaled FP8 weights (basal/fp8block.py: 128 x 128 blocks, activations in 1 x 128 tiles) for the
         projections the layers run: q / k / v / o and gate / up / down, merged or not (every size is a multiple of 128,
         so a merged weight's blocks are its parts' blocks; the parts become views of it and transformers' forward of
         the model still runs). The per-layer input projections (E2B / E4B), the embeddings and the head stay as loaded.
         Layer by layer, so the bf16 weights are freed as it goes (31B: 59 GB -> 31 GB). The first `keep` and the last
-        `keep` layers stay bf16 (--fp8-bf16-layers). -> the number of GEMMs."""
+        `keep` layers stay bf16 (--fp8-bf16-layers). layers: their indices (default every layer). -> the number of
+        GEMMs."""
         from .fp8block import BLOCK, BlockFP8Linear, fits, sm90
         sm90()  # which GEMM the layers run, decided before they are compiled
         n = 0
@@ -281,9 +315,10 @@ class Gemma4Graph:
                 o += k
             return f
 
-        for i, layer in enumerate(self.layers):
+        for i in range(len(self.layers)) if layers is None else layers:
             if i < keep or i >= len(self.layers) - keep:
                 continue
+            layer = self.layers[i]
             a, m = layer.self_attn, layer.mlp
             names = ["q_proj"] + (["k_proj"] + (["v_proj"] if a.v_proj is not None else []) if self.own[i] else [])
             if ok(self.qkv.get(i)):
@@ -311,11 +346,12 @@ class Gemma4Graph:
         return n
 
     @torch.no_grad()
-    def _nvfp4(self, amax, keep=0, scope="all"):
+    def _nvfp4(self, amax, keep=0, scope="all", layers=None):
         """NVFP4 weights (basal/nvfp4.py) for q / k / v / o and gate / up / down (scope "all") or gate / up / down only
         ("mlp": attention stays bf16), merged or not, with the input global scales of `amax` (a JSON file or dict
         {"<layer>.<projection>": the calibrated largest |input|}). The first and the last `keep` layers stay bf16, as
-        do the embeddings and the head. Layer by layer, the bf16 weights freed as it goes. -> the number of GEMMs."""
+        do the embeddings and the head. Layer by layer, the bf16 weights freed as it goes; layers: their indices (default
+        every layer). -> the number of GEMMs."""
         import json
         from .nvfp4 import NVFP4Linear, build, fits
         if scope not in ("all", "mlp"):
@@ -343,9 +379,10 @@ class Gemma4Graph:
                 o += k
             return (f, sizes), 1
 
-        for i, layer in enumerate(self.layers):
+        for i in range(len(self.layers)) if layers is None else layers:
             if i < keep or i >= len(self.layers) - keep:
                 continue
+            layer = self.layers[i]
             a, m = layer.self_attn, layer.mlp
             if scope == "all":
                 names = ["q_proj"] + (["k_proj"] + (["v_proj"] if a.v_proj is not None else []) if self.own[i] else [])
