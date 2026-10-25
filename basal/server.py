@@ -957,6 +957,8 @@ class Server:
                              "nvfp4)")
         if getattr(a, "mlx_packed", False) and kind != "mlx":
             raise SystemExit("--mlx-packed needs --mode mlx (or mlx-q8)")
+        if getattr(a, "mlx_forward", "mlx-lm") != "mlx-lm" and kind != "mlx":
+            raise SystemExit("--mlx-forward needs --mode mlx (or mlx-q8)")
         if kind == "mps" and a.device == "cuda":
             raise SystemExit("--mode mps runs on Apple Silicon or the CPU (--device mps / cpu); on CUDA: --mode fast")
         if kind in ("graph", "exit"):  # before the weights are downloaded (mps: MPSBackend, when it shares prefixes)
@@ -1040,7 +1042,8 @@ class Server:
         elif kind == "sglang":
             self.backend = SGLangBackend(md, a.dtype, mem=a.gpu_memory, max_len=a.max_len)
         elif kind == "mlx":
-            self.backend = MLXBackend(md, quant=quant, packed=getattr(a, "mlx_packed", False))
+            self.backend = MLXBackend(md, quant=quant, packed=getattr(a, "mlx_packed", False),
+                                      forward=getattr(a, "mlx_forward", "mlx-lm"))
         elif kind == "mps":
             self.backend = MPSBackend(md, a.dtype, shared=shared, device=a.device)
         elif kind == "gguf":
@@ -1798,6 +1801,11 @@ def add_engine_args(ap):
                          "instead of a KV cache plus a continuation; faster on short prompts, exact in fp32, but in "
                          "bf16 / 8-bit the probabilities move slightly, so check it against CALIBRATION.mlx.json "
                          "(fitted on the default path) before relying on the calibrated thresholds")
+    ap.add_argument("--mlx-forward", dest="mlx_forward", choices=["mlx-lm", "basal"], default="mlx-lm",
+                    help="--mode mlx: mlx-lm (default) = mlx-lm's forward; basal (opt-in, 2.5) = basal's own forward "
+                         "over mlx-lm's layers for Llama and Gemma 4: the last layers at the readout rows only, merged "
+                         "projections checked bit for bit at load; the probabilities equal mlx-lm's up to float "
+                         "rounding, not bit for bit. Other architectures always use mlx-lm's")
     ap.add_argument("--device", default=None, choices=["cuda", "mps", "cpu"],
                     help="device for --mode eager (default: BASAL_DEVICE, else cuda, else Apple Silicon mps, else cpu) "
                          "and --mode mps (mps or cpu; default: mps on Apple Silicon, else cpu: a request's state "
@@ -2139,8 +2147,10 @@ def main():
         raise SystemExit(f"basal: start-up failed: {type(e).__name__}: {e}") from None
     attn = getattr(srv.backend, "attn", None)
     rows = getattr(srv.backend, "compact_kernel", None)  # compact rows: their kernel, and the template prefix with them
+    fwd = getattr(srv.backend, "forward", None)  # MLX: basal's forward (what it merged) or mlx-lm's
     info = (f" attention {attn}" if attn else "") + (f" compact rows {rows}" if rows else "") \
-        + (" template prefix" if rows and getattr(srv.backend, "template", None) else "")
+        + (" template prefix" if rows and getattr(srv.backend, "template", None) else "") \
+        + (f" forward {fwd}" if isinstance(fwd, str) else "")
     # everything built so far (weights, graphs, compiled code) lives as long as the server: out of the garbage
     # collector's sight, so a full collection no longer walks it (up to 1.4 s each at the end of start-up on 4.5B, and
     # a 2.9 s stall of one request under nsys, 20 Oct)

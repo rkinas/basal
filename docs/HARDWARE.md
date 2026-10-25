@@ -256,6 +256,10 @@ Serve with `basal-serve --model Remek/<model>-MLX-8bit --mode mlx` ([QUANTIZATIO
 
 For Ollama (GGUF), see [QUANTIZATION.md](QUANTIZATION.md#gguf-for-ollama-and-llamacpp).
 
+basal-omni on a Mac: `--mlx-forward basal` (2.5, opt-in) runs the last 19 of 42 layers at the readout rows only; on an
+Apple M4 Pro basal-omni-1.0-mini-MLX answers one question in two orders in 179 instead of 222 ms
+([QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon)).
+
 **`mps`, `mlx-q8` and `gguf`** (Apple M4 Pro, 24 GB, basal-1.5-mini, `basal-bench` on the 44 bundled examples, which
 are shorter than the 500-decision sample above; reference: bf16 `eager` on MPS; GB: MLX allocator peak, MPS memory held
 by the Metal driver):

@@ -111,6 +111,32 @@ path. The automated decisions made no error on either path. `--mlx-packed` stays
 basal-2.0-4.5B-MLX-8bit the lower bound of the change in the automated share at 5% (-0.60 pt) is below our -0.5 pt
 bar for a change of path under a shipped calibration file.
 
+`--mlx-forward basal` (opt-in, 2.5; the default `mlx-lm` is the path above) runs Llama (basal-1.x, 2.x) and Gemma 4
+(basal-omni) through basal's own loop over mlx-lm's layers and weights. From the last layer with its own keys and
+values on, only the readout rows run (that layer still computes its keys and values at every position): for Llama
+the last layer, for Gemma 4 E2B / E4B the last 19 of 42 layers (the
+last 18 reuse the keys and values of earlier layers). A shared state stops after that layer's keys and values. The
+projections that read one input become one matrix where a self-check at load finds the same bits (on our models
+gate / up; q / k / v stays separate). With every layer at every position this forward equals mlx-lm's bit for bit;
+the readout rows only change the rounding. Our checks on an Apple M4 Pro (24 GB): 184 readouts per model (the 44
+bundled items in two orders, and four questions in two orders over 1,000- and 3,000-token states), against PyTorch
+eager on MPS, and the median of 7 (mini) or 5 (omni) interleaved runs:
+
+| | basal-2.0-mini-MLX-8bit | basal-omni-1.0-mini-MLX |
+|---|---|---|
+| top answer = eager bf16, `mlx-lm` -> `basal` | 178 -> 178 / 184 | 181 -> 181 / 184 |
+| top answer = default path | 184 / 184 | 184 / 184 |
+| mean / largest probability change vs the default path | 0.0001 / 0.0008 | 0.0019 / 0.070 |
+| one prompt (ms) | 93 -> 90 | 225 -> 131 |
+| one question, two orders (ms) | 126 -> 121 | 222 -> 179 |
+| four questions x two orders over 1,000 tokens (ms) | 972 -> 972 | 1,717 -> 1,462 |
+| one prompt over 3,000 tokens (ms) | 1,877 -> 1,922 | 5,341 -> 3,003 |
+
+In fp32 (basal-2.0-mini) both forwards give eager-fp32's top answer on all 184 readouts. The gain is where the skipped
+layers are: basal-omni at its readout rows, little for Llama (one layer of 32). The shipped `CALIBRATION.mlx.json`
+was fitted on the default path, so check `--mlx-forward basal` against it before relying on the calibrated
+thresholds; on basal-omni the probabilities move more (8-bit matmuls of a few rows round differently).
+
 - `-MLX-8bit`: affine 8-bit decoder weights (group 64, a bf16 scale and bias per group);
 - `-MLX-fp4`: MLX `nvfp4` decoder weights (4-bit floating point E2M1, group 16, FP8 scales);
 - in both, the token embeddings and the output head stay in bf16, because the decision is read from the output head's
