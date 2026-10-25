@@ -62,6 +62,13 @@ benchmarking a GPU.
   probabilities (the default for basal-1.5 and basal-1.0); both orders share the state and the question text, so the
   second order costs only its options. `auto` asks order 1 and the reversed order only where order 1 is uncertain
   (`--auto-tau`, `--auto-band`). See [FORMATS.md](FORMATS.md#option-orders).
+- **Mean over K option orders** (`--order-average K`, 2.5, off by default): the probabilities are averaged over K
+  orders: the given order, the reversed one, then each rotation and its reverse (with 2k orders every option is read at
+  every position twice). All K orders read the request's state once, so each order costs only its question and
+  options. `--order-average 2` equals `--orders 2`; a question with k options gets at most k! orders. The model's
+  calibration was fitted on its own orders: without a `CALIBRATION.o<K>.json` its temperatures are kept, its
+  thresholds are dropped and the answers are marked unvalidated (`basal-calibrate --order-average K` fits a file for
+  K orders). Measure first whether it helps your model and data with `basal-bench --order-check` (below).
 - **SOAM** (`--soam on`, default; off for a two-way model, below): every question and option order of a request is one
   packed row over the state.
   `--soam off` restores the per-question path of basal-1.0 (same answers in fp32). See [SOAM.md](SOAM.md).
@@ -321,6 +328,9 @@ basal-bench --identity --model Remek/basal-2.0-4.5B                    # fp32; -
 
 # agreement: any backends against the native engine (eager fp32, every prompt alone; its rows are cached)
 basal-agree --model Remek/basal-2.0-mini --backends mps mlx mlx=Remek/basal-2.0-mini-MLX-8bit
+
+# option order: how often the top answer changes under other option orders; gain and cost of --order-average K
+basal-bench --order-check --model Remek/basal-omni-1.0-mini --questions my_items.jsonl --average 1 2 4
 ```
 
 `basal-loadtest` reports the median and p95 latency of sequential requests and the decisions per second with
@@ -333,6 +343,14 @@ mean / p99 / max |Δp|, the decisions with both orders averaged, the paired accu
 with gold, and question independence (each question of a five-question request asked alone through the same backend
 gives the answer it gives in the request). The exit status is 0 when every backend passes `--gate` (default 0.99, top
 answers outside near ties); `basal-agree --identity` runs the identity gate.
+
+`basal-bench --order-check` (2.5) reads every question in its given, reversed and rotated option orders (one call per
+question over one state) and reports the share of questions whose top answer flips (`flip_reversed`, `flip_rotated`,
+`flip_any`), how often the top answer sits at the first position against chance (`first_share`), and for each K of
+`--average` the accuracy of the mean over K orders (`acc_mean<K>`, with gold), its agreement with the given order and
+the latency of one question with K orders at batch size 1. A model that reads the options' content flips rarely and
+gains little from `--order-average`; a high flip rate with a gain in `acc_mean<K>` is the case where averaging pays for
+its cost.
 
 **Your own data.** 44 examples are enough to check that everything works, not for precise numbers. For numbers that
 describe *your* workload, write a JSONL file with a few hundred items in the same simple format (`{"state": ...,

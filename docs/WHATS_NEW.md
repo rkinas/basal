@@ -13,6 +13,10 @@
   calibration file: 2.3x bf16's scoring speed on Blackwell, 2.4% of top answers change. Other basal-omni models are
   refused in both modes; they failed the accuracy check. Details in
   [QUANTIZATION.md](QUANTIZATION.md#basal-omni-10-ultra-quantised-at-load-time-25).
+- **Option-order check and averaging** (opt-in): `basal-bench --order-check` measures how often the top answer flips
+  when the options are reversed or rotated, and what averaging gains; `basal-serve --order-average K` serves the mean
+  over K option orders, every order reading the request's state once. Off by default: answers are unchanged.
+  [SERVING.md](SERVING.md#serving-modes).
 
 # What is new in basal 2.4.1
 

@@ -3,6 +3,7 @@
   basal-bench --model Remek/basal-1.5-4.5B --modes eager-fp32 fast fp8              # bundled examples
   basal-bench --model Remek/basal-1.5-4.5B --modes eager-fp32 fast --questions my_items.jsonl
   basal-bench --identity --model Remek/basal-1.5-4.5B       # identity gate of the fast path (basal/identity.py)
+  basal-bench --order-check --model Remek/basal-1.5-4.5B    # top-pick flips under other option orders (ordercheck.py)
 
 Questions file (JSONL): {"state": ..., "question": ..., "options": [...], "gold": <index, optional>}.
 Measured per mode (same definitions as in the technical report):
@@ -216,6 +217,10 @@ def main():
         from .identity import main as identity
         rows = identity([x for x in sys.argv[1:] if x != "--identity"])
         return 0 if all(r["gate"] == "pass" for r in rows) else 1  # the exit status of basal-bench --identity
+    if "--order-check" in sys.argv[1:]:  # option-order flips and --order-average K (basal/ordercheck.py)
+        from .ordercheck import main as order_check
+        order_check([x for x in sys.argv[1:] if x != "--order-check"])
+        return 0
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Remek/basal-1.5-4.5B")
     ap.add_argument("--vllm-model", dest="vllm_model", default=None, help="checkpoint for --modes vllm (e.g. the NVFP4 repo)")
