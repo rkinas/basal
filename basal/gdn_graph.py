@@ -516,10 +516,12 @@ class GDNGraphBackend(GraphBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
-                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu"):
+                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
         # engine; quantisation is refused here)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)  # before loading
+        if state_cache_bits != 16 and not why:
+            why = "--state-cache-bits 8 / 4 is for attention keys and values; recurrent states are cached as computed"
         if why:
             raise ValueError(f"{model_dir}: {why}")
         cuda = torch.cuda.is_available()

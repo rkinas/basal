@@ -880,17 +880,68 @@ def graph_two_way_refused(model_dir, state_cache_gb=0, prefix=False, batches="de
     return None
 
 
+KV_GROUP = 128  # low-bit state cache: tokens per group of a key channel
+KV_GROUP_D = 64  # and channels per group of a value token
+
+
+@torch.no_grad()
+def kv_quant(x, bits, keys):
+    """One layer's keys or values [heads, tokens, head size] -> (codes, scales, lows, shape, dtype): asymmetric
+    integers of `bits` (8 or 4: two per byte), each group with its own fp16 low value and step. Keys per channel
+    (groups of KV_GROUP tokens of one channel: a key channel keeps its size across tokens), values per token (groups of
+    KV_GROUP_D channels of one token)."""
+    H, T, D = x.shape
+    levels = 2 ** bits - 1
+    xf = x.float()
+    if keys:
+        pad = -T % KV_GROUP
+        if pad:  # the last group padded with its last token (no new extremes)
+            xf = torch.cat([xf, xf[:, -1:].expand(H, pad, D)], 1)
+        g = xf.view(H, (T + pad) // KV_GROUP, KV_GROUP, D)
+        lo, hi = g.amin(2, keepdim=True), g.amax(2, keepdim=True)
+    else:
+        G = KV_GROUP_D if D % KV_GROUP_D == 0 else D
+        g = xf.view(H, T, D // G, G)
+        lo, hi = g.amin(-1, keepdim=True), g.amax(-1, keepdim=True)
+    lo = lo.half()
+    step = ((hi - lo.float()) / levels).half().clamp(min=2 ** -14)  # (fp16 normal range: never 0)
+    q = ((g - lo.float()) / step.float()).round().clamp(0, levels).to(torch.uint8).flatten()
+    if bits == 4:
+        q = q[0::2] | (q[1::2] << 4)
+    return q, step, lo, (H, T, D), x.dtype
+
+
+@torch.no_grad()
+def kv_dequant(e, bits, keys):
+    """kv_quant's tuple -> the keys or values [heads, tokens, head size] in their dtype."""
+    q, step, lo, (H, T, D), dtype = e
+    if bits == 4:
+        q = torch.stack([q & 15, q >> 4], -1).flatten()
+    if keys:
+        Tp = T + (-T % KV_GROUP)
+        x = q.view(H, Tp // KV_GROUP, KV_GROUP, D).float() * step.float() + lo.float()
+        return x.view(H, Tp, D)[:, :T].to(dtype).contiguous()
+    G = KV_GROUP_D if D % KV_GROUP_D == 0 else D
+    return (q.view(H, T, D // G, G).float() * step.float() + lo.float()).view(H, T, D).to(dtype)
+
+
 class StateCache:
     """Keys and values of request states (the root of a unit cut at the state boundary: template and state), keyed by a
     hash of their token ids, kept on the GPU within a byte budget with least-recently-used eviction. A request whose
     state is cached runs only its questions and options (pass 2 over the cached keys and values). An entry stored with
     its token ids is also found by a state that only begins with it (a growing agent trace or chat history, or an edited
-    one): longest() finds the cached state sharing the longest prefix, through chained hashes of 256-token blocks."""
+    one): longest() finds the cached state sharing the longest prefix, through chained hashes of 256-token blocks.
+
+    bits (--state-cache-bits): 16 keeps the keys and values as computed; 8 or 4 stores them as integers with a scale per
+    group (kv_quant: keys per channel, values per token), 2x / ~3.5x more states per GB, given back in their dtype."""
 
     BLOCK = 256  # tokens per block of the prefix index
 
-    def __init__(self, budget_bytes, salt=b""):
+    def __init__(self, budget_bytes, salt=b"", bits=16):
         from collections import OrderedDict
+        if bits not in (16, 8, 4):
+            raise ValueError(f"--state-cache-bits {bits}: 16, 8 or 4")
+        self.bits = bits
         self.budget, self.used, self.salt = int(budget_bytes), 0, salt
         self.entries, self.lock = OrderedDict(), threading.Lock()
         self.index = {}  # chained hash of a state's first i blocks -> the key of an entry beginning with them
@@ -919,6 +970,7 @@ class StateCache:
             else:
                 return None
             kv, _, own = self.entries[key]
+            kv = self._unpack(kv)
             t, n = np.asarray(tokens, dtype=np.int64), min(len(own), len(tokens))
             m = (i + 1) * self.BLOCK
             diff = np.nonzero(own[m:n] != t[m:n])[0]
@@ -948,7 +1000,7 @@ class StateCache:
                 return None
             self.entries.move_to_end(key)
             self.hits += 1
-            return e[0]
+            return self._unpack(e[0])
 
     def has(self, key):
         """Whether a state is cached (no recency update, not counted as a hit or a miss)."""
@@ -958,7 +1010,11 @@ class StateCache:
     def put(self, key, kv, tokens=None, replaces=None):
         """Stores a state's keys / values; with its token ids (tokens) it is also found by states that begin with it.
         replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step)."""
-        size = sum(k.numel() * k.element_size() + v.numel() * v.element_size() for k, v in kv)
+        if self.bits != 16:
+            kv = [(kv_quant(k, self.bits, True), kv_quant(v, self.bits, False)) for k, v in kv]
+            size = sum(t.numel() * t.element_size() for e in kv for x in e for t in x[:3])
+        else:
+            size = sum(k.numel() * k.element_size() + v.numel() * v.element_size() for k, v in kv)
         if size > self.budget:
             return
         with self.lock:
@@ -975,6 +1031,12 @@ class StateCache:
             while self.used > self.budget:
                 self._drop(next(iter(self.entries)))
                 self.evictions += 1
+
+    def _unpack(self, kv):
+        """A stored entry's keys / values in their dtype (dequantised for 8 / 4 bits)."""
+        if self.bits == 16:
+            return kv
+        return [(kv_dequant(k, self.bits, True), kv_dequant(v, self.bits, False)) for k, v in kv]
 
     def stats(self):
         with self.lock:
@@ -1065,7 +1127,7 @@ class GraphBackend(EagerBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
-                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu"):
+                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16):
         what = recurrent_layers(model_dir)  # before anything is loaded
         if what:
             from .gdn_graph import is_gdn
@@ -1164,7 +1226,7 @@ class GraphBackend(EagerBackend):
                 and type(last.self_attn).__name__ == "LlamaAttention" and type(last.mlp).__name__ == "LlamaMLP"
         self.prefix = bool(prefix) and shared
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
-        self.state_cache = StateCache(gb * 2 ** 30) if gb and shared else None
+        self.state_cache = StateCache(gb * 2 ** 30, bits=state_cache_bits) if gb and shared else None
         self._alloc_kv()
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix token ids)]
         if self.compact and template in ("on", "auto") and self.gemma is None:  # (Gemma 4's template: 7 tokens)

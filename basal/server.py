@@ -1004,6 +1004,10 @@ class Server:
             deterministic_setup(kind)
         elif getattr(a, "fp8_accum", "fast") == "full":  # FP8 checkpoints: the same GEMM arithmetic as --deterministic
             set_fp8_fast_accum(False)
+        if getattr(a, "state_cache_bits", 16) != 16 and (kind != "graph" or not (
+                getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on")):
+            raise SystemExit("--state-cache-bits 8 / 4 needs --state-cache-gb or --prefix-cache on in the CUDA graph "
+                             "engine (fast, fast-nocompile, fp8, int8, nvfp4)")
         if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit")):
             raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) and is "
                              "not combined with --deterministic (a cached state changes the shapes of the forwards)")
@@ -1147,7 +1151,8 @@ class Server:
                                         gemma_attn=getattr(a, "gemma_attn", "auto"),
                                         fp8_scaling=getattr(a, "fp8_scaling", "auto"),
                                         fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
-                                        quant_load=getattr(a, "quant_load", "gpu"), **nvfp4_args(a, md, quant))
+                                        quant_load=getattr(a, "quant_load", "gpu"),
+                                        state_cache_bits=getattr(a, "state_cache_bits", 16), **nvfp4_args(a, md, quant))
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
         if getattr(a, "lanes", 1) > 1:
             t = time.time()
@@ -1980,6 +1985,10 @@ def add_engine_args(ap):
                     help="CUDA graph engine: keep the keys and values of request states on the GPU up to this many GB "
                          "(least recently used evicted); a later request with the same state computes only its "
                          "questions and options (0: off)")
+    ap.add_argument("--state-cache-bits", dest="state_cache_bits", type=int, choices=[16, 8, 4], default=16,
+                    help="--state-cache-gb / --prefix-cache: 16 keeps the cached keys and values as computed; 8 or 4 "
+                         "stores them as integers with a scale per group (keys per channel, values per token): about "
+                         "2x / 3.5x more cached states per GB, answers close to (not equal to) the uncached ones")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
                     help="CUDA graph engine: compute the template prefix (chat template, system prompt, the header up "
                          "to the state) once and run short requests over its cached keys and values")
