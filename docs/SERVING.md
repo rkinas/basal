@@ -160,6 +160,9 @@ benchmarking a GPU.
     the ring (`--load-factor`).
   - **Requests without a state** go to the less loaded of two random replicas.
   - **Readiness:** a replica gets requests only while its `/health` answers 200.
+  - **Replicas it starts** (`--gpus`) end with the router: each runs in its own process group, which the router
+    ends when it stops (SIGTERM, SIGINT, SIGHUP, an error; SIGKILL after 30 s); on Linux a replica also gets
+    SIGTERM when the router is killed. When every replica has exited, the router exits with status 1.
 - **`GET /metrics`** (basal-serve and basal-router) is Prometheus text.
   - **basal-serve:** requests waiting and running (also under vLLM's names `vllm:num_requests_waiting` /
     `vllm:num_requests_running`, which routers such as llm-d read), requests served and failed with their time, and
