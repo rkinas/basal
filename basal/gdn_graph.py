@@ -515,7 +515,10 @@ class GDNGraphBackend(GraphBackend):
 
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
-                 readout_layer="off", template="off", gemma_attn="auto"):
+                 readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
+                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu"):
+        # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
+        # engine; quantisation is refused here)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)  # before loading
         if why:
             raise ValueError(f"{model_dir}: {why}")

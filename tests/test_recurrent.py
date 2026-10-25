@@ -424,3 +424,10 @@ def test_fp8_refused_in_the_engine_too(monkeypatch, llama):
                         lambda *a, **k: pytest.fail("refused before loading"))
     with pytest.raises(ValueError, match="sm_86"):
         GraphBackend(str(llama), quant="fp8")
+
+
+def test_gdn_engine_takes_every_graph_engine_option():
+    """GraphBackend(...) of a Qwen3.5 model builds GDNGraphBackend with the same arguments (basal-serve passes the
+    quantisation options to every graph engine), so its __init__ takes every parameter GraphBackend's takes."""
+    graph = set(inspect.signature(GraphBackend.__init__).parameters)
+    assert graph <= set(inspect.signature(GDNGraphBackend.__init__).parameters)
