@@ -376,6 +376,11 @@ claude mcp add --transport http basal http://127.0.0.1:8000/mcp     # Claude Cod
 No authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway in front. Details:
 [docs/MCP.md](docs/MCP.md).
 
+For LangChain, LlamaIndex and CrewAI agents, `from basal.adapters import langchain_tool, llamaindex_tool,
+crewai_tool` gives a tool over a running server, with ready question sets (`preset="triage"`, `"moderation"`,
+`"compliance"`; also `basal-run --preset`). Install the framework yourself; see
+[SERVING.md](docs/SERVING.md#agent-frameworks-and-ready-question-sets-25).
+
 ## Documentation
 
 | | |

@@ -291,6 +291,45 @@ Ready-to-run examples (Polish and English) in `basal/examples/` of the repositor
 for f in choice noul score complex; do basal-run --input $EX/$f.jsonl --output answers_$f.jsonl; done
 ```
 
+## Agent frameworks and ready question sets (2.5)
+
+`basal.adapters` wraps a running basal server's HTTP API (`/v1/systemone`) as a tool for LangChain, LlamaIndex or
+CrewAI. Each function returns the framework's own tool object, named `basal_decide`:
+
+```python
+from basal.adapters import langchain_tool, llamaindex_tool, crewai_tool
+
+tool = langchain_tool("http://127.0.0.1:8000")                    # the agent passes state and questions
+triage = crewai_tool("http://127.0.0.1:8000", preset="triage")    # the agent passes the state only
+review = llamaindex_tool("http://127.0.0.1:8000", preset="compliance", lang="en")
+```
+
+- `langchain_tool` returns a LangChain `StructuredTool`, `llamaindex_tool` a LlamaIndex `FunctionTool` and
+  `crewai_tool` a CrewAI `BaseTool` (whose result is the answers as JSON text).
+- Without a preset the tool takes `state` and `questions`: the HTTP API's questions object ([API.md](API.md)); JSON
+  text is accepted too. With `preset=` the questions are fixed and the agent passes only the state; `lang="pl"` or
+  `"en"` picks the wording (default: the language of the state).
+- The frameworks are not dependencies of basal: install the one you use (`uv pip install langchain-core`,
+  `llama-index-core` or `crewai`). An adapter whose framework is missing says which package to install.
+- MCP hosts need no adapter: `basal-serve --mcp on` serves the same decisions at `/mcp`, and `basal-mcp` is a stdio
+  bridge for hosts that start local processes ([MCP.md](MCP.md)).
+
+**Presets** are ready question sets in Polish and English (`basal/presets.py`):
+
+| preset | questions |
+|---|---|
+| `triage` | `urgency` (score: low / medium / high), `category` (choice: complaint, billing, technical, account, other), `needs_human` (yes / no) |
+| `moderation` | `harmful`, `spam`, `personal_data` (yes / no each) |
+| `compliance` | `personal_data`, `deadline`, `legal_review` (yes / no each) |
+
+```bash
+basal-run --list-presets
+basal-run --preset triage --input tickets.jsonl --output out.jsonl     # input lines: {"state": "..."}; --lang pl|en
+```
+
+In Python: `Basal(url).preset(state, "triage")` (`from basal.client import Basal`). A preset holds plain HTTP-API
+questions, so it is a starting point: copy one and edit it for your own rules.
+
 ## See how a decision is made
 
 `basal-viz` (contributed by [@lukaspoloki](https://github.com/lukaspoloki), [#2](https://github.com/rkinas/basal/pull/2))
