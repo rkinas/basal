@@ -399,6 +399,7 @@ crewai_tool` gives a tool over a running server, with ready question sets (`pres
 | | |
 |---|---|
 | [INSTALL](docs/INSTALL.md) | engines, the model files and every install path: NVIDIA (bf16, FP8), vLLM, SGLang, Apple Silicon, Ollama / llama.cpp, CPU, basal-omni |
+| [BACKEND](docs/BACKEND.md) | use basal-serve as the local backend of code that asked a hosted LLM for decisions |
 | [API](docs/API.md) | request, response, question types, using the confidence, how to ask |
 | [SERVING](docs/SERVING.md) | serving modes and flags, inference on a JSONL file, benchmarking your GPU |
 | [RESULTS](docs/RESULTS.md) | results against basal-1.5: Werdykt, other benchmarks, speed |
