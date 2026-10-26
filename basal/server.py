@@ -864,6 +864,9 @@ def two_way_refused(kind, a):
         return "--long-lane: not with a two-way model (its long prompts are read one way, like the others)"
     if getattr(a, "eager_forward", None) == "hf":
         return "a two-way model needs the engine's own Gemma 4 forward (--eager-forward basal)"
+    if getattr(a, "reread", None) is not None:
+        return ("--reread reads the state twice (the state_twice layout); a two-way model reads it once, with each "
+                "question, and was not trained on that layout")
     return None
 
 

@@ -118,7 +118,8 @@ benchmarking a GPU.
   such a model is served with SOAM off (`--soam` defaults to off for it; `--soam on` is refused) and without
   `--state-cache-gb` / `--prefix-cache`, by `--mode eager` (the engine's own Gemma 4 forward) or the CUDA graph
   engine (`fast`, `fast-nocompile`: every prompt a plain row of its own, the math kernel in the global layers; not
-  with `--batches compact`, `--lean`, `--template-prefix` or `--long-lane`). `/v1/models` reports the limits.
+  with `--batches compact`, `--lean`, `--template-prefix` or `--long-lane`). `--reread` is refused too: it reads the
+  state twice (the state_twice layout), which a two-way model was not trained on. `/v1/models` reports the limits.
 - **Long states**: `--context-overflow truncate` (the default) cuts the middle of a state that does not fit the
   context (the first 1/3 and the last 2/3 of the kept tokens, `--truncate-head`; the question and options stay whole)
   and says what was cut in `usage.truncated`; `--context-overflow refuse` returns HTTP 422 instead. The context is

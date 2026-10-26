@@ -158,6 +158,8 @@ def test_server_refusals():
     assert "--mode eager, fast" in two_way_refused("vllm", a)
     assert "--long-lane" in two_way_refused("graph", ap.parse_args(["--long-lane", "on"]))
     assert "forward" in two_way_refused("eager", ap.parse_args(["--eager-forward", "hf"]))
+    for kind in ("eager", "graph"):
+        assert "--reread" in two_way_refused(kind, ap.parse_args(["--reread", "0.7"]))
     entry = models_payload("m", "eager", {}, two_way=TWO_WAY)["models"][0]
     assert entry["two_way"] == TWO_WAY
     assert "two_way" not in models_payload("m", "eager", {})["models"][0]
