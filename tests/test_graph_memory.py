@@ -64,19 +64,26 @@ def test_pinned_free_memory_is_measured_less_the_offset(monkeypatch, capsys):
     assert not be._room()
 
 
-def test_one_forward_limit_as_on_the_smaller_card(monkeypatch):
-    """After the same use of memory, the pinned big card and the small card compute the same one-forward limit."""
+def test_one_forward_limit_follows_the_set_memory_alone(monkeypatch):
+    """Two pinned servers with the same N compute the same one-forward limit whatever the warm-up left free (ST3, 26 Oct:
+    20,554 against 20,758 tokens when it was measured); without N it is measured, as before."""
     cfg = SimpleNamespace(intermediate_size=21504, hidden_size=5376)
     body = SimpleNamespace(embed_tokens=SimpleNamespace(weight=torch.zeros(1, dtype=torch.bfloat16)))
-    small = backend(monkeypatch, [14 * GiB])
-    small.gemma, small.model = None, SimpleNamespace(config=cfg, model=body)
-    small_n = small._one_forward_tokens()
-    free = [46 * GiB]
-    pinned = backend(monkeypatch, free, graph_memory=20 * GiB)
-    pinned._pin_memory()
-    free[0] = 40 * GiB  # 6 GiB used since the weights: 14 GiB left of the 20
-    pinned.gemma, pinned.model = None, SimpleNamespace(config=cfg, model=body)
-    assert pinned._one_forward_tokens() == small_n
+    got = []
+    for before, after in ((46 * GiB, 38 * GiB), (13 * GiB, 4.9 * GiB)):
+        free = [before]
+        be = backend(monkeypatch, free, graph_memory=10 * GiB)
+        be._pin_memory()
+        free[0] = after
+        be.gemma, be.model = None, SimpleNamespace(config=cfg, model=body)
+        got.append(be._one_forward_tokens())
+    assert got[0] == got[1] > 0
+    free = [14 * GiB]
+    plain = backend(monkeypatch, free)
+    plain.gemma, plain.model = None, SimpleNamespace(config=cfg, model=body)
+    n14 = plain._one_forward_tokens()
+    free[0] = 7 * GiB
+    assert plain._one_forward_tokens() < n14
 
 
 def test_default_measures(monkeypatch):

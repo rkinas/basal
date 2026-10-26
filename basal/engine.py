@@ -1723,12 +1723,16 @@ class GraphBackend(EagerBackend):
     # that runs out of memory anyway is redone in chunks): ultra on an 80 GB H100 has 8-12 GB free after warm-up, and
     # one forward of 32k tokens ran in one start-up and out of memory in another (20 Oct): at the edge, so chunked
     ONE_FORWARD_SHARE = 0.5
+    # with --graph-memory-gb N: the share of N counted as free after warm-up, so the limit follows N alone (the warm-up's
+    # own use, measured, moved it by ~200 tokens between two servers with the same N; ultra in fp8, N = 10: 0.81 free)
+    ONE_FORWARD_PINNED = 0.75
 
     def _one_forward_tokens(self):
         """The longest prompt or state beyond the largest graph that runs as one forward (2.3.0's path, the fastest);
-        longer ones are prefilled in chunks (_continue). From the free memory after warm-up and an estimate of one
-        forward's memory per token: the MLP's gate / up rows, a few hidden-size rows, and the keys / values a root keeps
-        (Gemma 4: its global layers; sliding layers keep their window). Ultra: 32k tokens on an 80 GB H100."""
+        longer ones are prefilled in chunks (_continue). From the free memory after warm-up (with --graph-memory-gb N:
+        ONE_FORWARD_PINNED x N, the same on every GPU) and an estimate of one forward's memory per token: the MLP's
+        gate / up rows, a few hidden-size rows, and the keys / values a root keeps (Gemma 4: its global layers; sliding
+        layers keep their window). Ultra: 32k tokens on an 80 GB H100."""
         if self.dev.type != "cuda":
             return 1 << 30
         cfg = self.gemma.cfg if self.gemma is not None else self.model.config
@@ -1736,7 +1740,8 @@ class GraphBackend(EagerBackend):
         kept = self.gemma.kv_lens(1 << 30) if self.gemma is not None else [1 << 30] * len(self.kv_shapes)
         kv = sum(2 * H * D * b for (H, D), t in zip(self.kv_shapes, kept) if t >= 1 << 30)
         per = (2 * cfg.intermediate_size + 4 * cfg.hidden_size) * b + kv
-        n = int(self.ONE_FORWARD_SHARE * self._free_memory() / per)
+        free = self._free_memory() if self.graph_memory is None else int(self.ONE_FORWARD_PINNED * self.graph_memory)
+        n = int(self.ONE_FORWARD_SHARE * free / per)
         print(f"basal: states beyond {n} tokens are prefilled in chunks of {self.CHUNK}", flush=True)
         return n
 
@@ -1948,7 +1953,8 @@ class GraphBackend(EagerBackend):
 
     def _pin_memory(self):
         """--graph-memory-gb: the grid (_fit_grid), the pass-2 graphs captured (_room) and the long-state one-forward
-        limit (_one_forward_tokens) follow graph_memory instead of the free memory measured at start-up, so two GPUs
+        limit (_one_forward_tokens: from graph_memory alone) follow graph_memory instead of the free memory measured at
+        start-up, so two GPUs
         with different free memory run the same graph shapes, and give bit-identical answers, when both take the same
         value. (By default a 48 GB card runs smaller shapes than an 80 GB one, whose answers differ in the last bits:
         H100, basal-omni ultra in FP8 under a 32 GB ballast, 1,216 of 1,700 rows identical, 26 Oct.) Measured once,
