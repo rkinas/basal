@@ -340,6 +340,49 @@ basal-run --preset triage --input tickets.jsonl --output out.jsonl     # input l
 In Python: `Basal(url).preset(state, "triage")` (`from basal.client import Basal`). A preset holds plain HTTP-API
 questions, so it is a starting point: copy one and edit it for your own rules.
 
+### Guardrails and routing (2.5)
+
+| preset | questions |
+|---|---|
+| `guard_input` | about what a user sent: `jailbreak` (rule break, prompt injection), `harmful`, `medical` (asks for medical advice), `self_harm` (yes / no each), `severity` (score 0-3: none, low, moderate, severe) |
+| `guard_output` | about what the assistant is about to say: `policy_break`, `harmful`, `medical`, `self_harm` (yes / no each), `severity` (0-3) |
+| `route_intent` | `intent` (choice: question, action, complaint, sales, chitchat, other) and `complexity` (score: simple, moderate, complex) in one request |
+
+The questions are plain HTTP-API questions. Two helpers turn the answers into an action:
+
+```python
+b = Basal("http://127.0.0.1:8000")
+r = b.guard(user_message, kind="input", policy="strict")          # kind="output" for a reply
+r["action"]      # "pass" | "review" | "block" | "support"
+r["reason"]      # the check that set it, e.g. "self_harm"; r["checks"] has every check; r["answers"] the raw answers
+b.route(ticket)  # {"route": "billing" | ... | "human", "complexity": "moderate", "level": 1, ...}
+```
+
+**Policies.** `strict` and `permissive` (`presets.POLICIES`) map each hazard to an action: `jailbreak`, `policy_break`
+and `harmful` block, `self_harm` is `support` (show help, do not just refuse), `medical` is a review under `strict` and
+allowed under `permissive`. `severity` blocks from level 2 (`strict`) or 3 (`permissive`), and sends level 1 or 2 to
+review. The precedence is fixed: **support > block > review > pass**, over all checks. A missing answer (a skipped
+question) is a review, never a pass. A policy is a plain dict (`act_at`, `review_at`, `severity`, `hazards`): pass your own
+to `guard(answers, policy)`.
+
+**Where the thresholds come from.** Two modes:
+
+- *Hand-picked* (default): a hazard acts at probability `act_at` (0.5 `strict`, 0.85 `permissive`) and goes to review from
+  `review_at` (0.15 and 0.5). These are starting values; they are not certified.
+- *Certified*: `b.guard(state, max_error=0.05)` (and `b.route(state, max_error=0.05)`) asks every question with
+  `max_error`, so the server marks an answer `abstain` when its confidence is below the threshold the model's
+  calibration certifies for that error target and question type ([CALIBRATION.md](CALIBRATION.md)). An abstaining answer
+  is a review (route: `human`); a confident answer acts as the policy says (a hazard is hit at probability 0.5 or more).
+  Without a calibration for your model, or a target it cannot certify, every answer abstains, and everything goes to
+  review: use a target the calibration file certifies (its `thresholds` keys, [CALIBRATION.md](CALIBRATION.md)), or calibrate on your own data first. The certificate
+  covers each question's own confidence on data like the calibration's, not the whole battery or your traffic.
+
+`route_intent` without `max_error` sends the request to `human` when the intent's confidence is below
+`min_confidence` (default 0.6). The default intents are examples: copy the preset and put your own routes in `intent`.
+
+TypeScript: `await basal.guard(text, {kind: "input", policy: "strict", maxError: 0.05})` and `await basal.route(text)`
+(`clients/typescript`; the pure functions `guard(answers, policy, maxError)` and `route(answers)` are exported too).
+
 ## See how a decision is made
 
 `basal-viz` (contributed by [@lukaspoloki](https://github.com/lukaspoloki), [#2](https://github.com/rkinas/basal/pull/2))
