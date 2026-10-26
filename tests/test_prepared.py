@@ -59,9 +59,18 @@ def test_locate_model_dir_then_cache(tmp_path, monkeypatch):
 
 
 def test_save_and_load(tmp_path, monkeypatch):
+    """Loading writes the artifacts into the compile cache the engine then reads: ~/.cache/basal/torchinductor when
+    TORCHINDUCTOR_CACHE_DIR holds Inductor's /tmp default (engine.persist_compile_cache, which the engine calls only
+    when it is built, after the load)."""
+    import os
+
+    from torch._inductor.runtime.cache_dir_utils import default_cache_dir
     calls = {}
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", default_cache_dir())  # as Inductor sets it on import
     monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"kernels", None))
-    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda b: calls.setdefault("loaded", b))
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts",
+                        lambda b: calls.setdefault("loaded", (b, os.environ["TORCHINDUCTOR_CACHE_DIR"])))
     monkeypatch.setattr(gdn_graph, "fla_record", lambda p: (p.write_text("{}"), 3)[1])
     f = dict(ENV, architecture="a", mode="fast", dtype="bfloat16", attn="auto")
     man = prepared.save(tmp_path / "p", f, fla=True)
@@ -69,8 +78,12 @@ def test_save_and_load(tmp_path, monkeypatch):
     assert sorted(p.name for p in (tmp_path / "p").iterdir()) == sorted(prepared.FILES)
     monkeypatch.setattr(gdn_graph, "FLA_CONFIGS", gdn_graph.FLA_CONFIGS)  # restored after the test
     out = prepared.load(tmp_path / "p")
-    assert calls["loaded"] == b"kernels" and out["fla"] == str(tmp_path / "p" / "fla_configs.json")
+    assert calls["loaded"] == (b"kernels", str(tmp_path / "home" / ".cache" / "basal" / "torchinductor"))
+    assert out["fla"] == str(tmp_path / "p" / "fla_configs.json")
     assert gdn_graph.FLA_CONFIGS == tmp_path / "p" / "fla_configs.json"  # fla_pin() reads the prepared table
+    from torch._inductor.utils import clear_caches
+    monkeypatch.undo()
+    clear_caches()  # Inductor's memoised paths follow the restored environment again (later tests compile)
 
 
 def test_server_flag():
