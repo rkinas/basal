@@ -36,6 +36,12 @@
   [STRIX_HALO.md](benchmarks/STRIX_HALO.md#what---mode-strix-does). Contributed by Michał Kardyś (@kardysm),
   [#51](https://github.com/rkinas/basal/pull/51); the stall was first seen by @piotrkowski in
   [#21](https://github.com/rkinas/basal/pull/21).
+- **Starts after a reboot reuse the compiled code** (`--mode fast`): torch.compile's cache moves from Inductor's default
+  `/tmp/torchinductor_<user>`, which a reboot empties on most systems, to `~/.cache/basal/torchinductor`
+  (`TORCHINDUCTOR_CACHE_DIR` still takes precedence), as `--mode tpu` keeps JAX's in `~/.cache/basal/jax`. RTX 4060 Ti,
+  the first start after a reboot: basal-2.0-mini 417 -> 238 s, basal-2.0-4.5B 823 -> 519 s; every probability
+  bit-identical to a cold start; the cache takes about 55 MB for both models. Contributed by Miłosz Kucharski
+  (@Butterski), [#47](https://github.com/rkinas/basal/pull/47).
 
 # What is new in basal 2.4.1
 

@@ -39,7 +39,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .engine import GraphBackend, PREFILL, StateCache, _copy_same, set_attention
+from .engine import GraphBackend, PREFILL, StateCache, _copy_same, persist_compile_cache, set_attention
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -519,6 +519,8 @@ class GDNGraphBackend(GraphBackend):
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
         # engine; quantisation is refused here)
+        if compile:
+            persist_compile_cache()  # before anything compiles (GraphBackend.__init__)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)  # before loading
         if state_cache_bits != 16 and not why:
             why = "--state-cache-bits 8 is for attention keys and values; recurrent states are cached as computed"
