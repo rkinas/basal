@@ -1048,10 +1048,15 @@ class StateCache:
             return kv
         return [(kv_dequant(k, self.bits, True), kv_dequant(v, self.bits, False)) for k, v in kv]
 
-    def stats(self):
-        with self.lock:
+    def stats(self, blocking=True):
+        """A CPU-only snapshot; nonblocking readers get None while the cache is busy."""
+        if not self.lock.acquire(blocking=blocking):
+            return None
+        try:
             return dict(entries=len(self.entries), used_bytes=self.used, budget_bytes=self.budget, hits=self.hits,
                         misses=self.misses, evictions=self.evictions, prefix_hits=self.prefix_hits)
+        finally:
+            self.lock.release()
 
 
 class GraphBackend(EagerBackend):

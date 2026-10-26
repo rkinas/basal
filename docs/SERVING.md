@@ -202,11 +202,9 @@ benchmarking a GPU.
   - **Replicas it starts** (`--gpus`) end with the router: each runs in its own process group, which the router
     ends when it stops (SIGTERM, SIGINT, SIGHUP, an error; SIGKILL after 30 s); on Linux a replica also gets
     SIGTERM when the router is killed. When every replica has exited, the router exits with status 1.
-- **`GET /metrics`** (basal-serve and basal-router) is Prometheus text.
-  - **basal-serve:** requests waiting and running (also under vLLM's names `vllm:num_requests_waiting` /
-    `vllm:num_requests_running`, which routers such as llm-d read), requests served and failed with their time, and
-    the state cache when there is one.
-  - **basal-router:** per replica: readiness, requests in flight, requests routed by state and by load, failures.
+- **`GET /metrics`** (basal-serve and basal-router) is Prometheus text: engine version and model, requests waiting and
+  running, requests served and failed, the state cache; per replica on the router ([Prometheus
+  metrics](#prometheus-metrics)).
 - **Start-up:** while the model loads and warms up, the port answers every request with HTTP 503
   `{"status": "starting"}`. A start-up that fails exits with code 1, so a supervisor or the router never sees a
   half-started server.
@@ -248,6 +246,37 @@ basal-serve --model qwen3-4b-basal --mode eager --calibration CALIBRATION.custom
   action and `act` answers say `"calibration": "unvalidated"`. `basal-calibrate` on a few hundred of your labelled
   requests fits its temperatures and certifies its thresholds ([CALIBRATION.md](CALIBRATION.md)).
 - Expect lower accuracy than a basal model of the same size: the model reads the options zero-shot.
+
+## Prometheus metrics
+
+`GET /metrics` (basal-serve and basal-router) answers in the Prometheus text format on the serving port, with no
+extra dependency. A scrape configuration for Prometheus (and Grafana on top of it), for example:
+
+```yaml
+scrape_configs:
+  - job_name: basal
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["127.0.0.1:8000"]
+```
+
+basal-serve exports:
+
+- `basal_build_info{version,model,mode,layout}` (always 1);
+- `basal_requests_waiting` and `basal_requests_running` (the `queued` and `running` of `/health`), also as
+  `vllm:num_requests_waiting` / `vllm:num_requests_running`, which routers such as llm-d read;
+- `basal_requests_total`, `basal_requests_failed_total` and `basal_request_seconds_total` (requests to
+  `/v1/systemone` and `/v1/basal`);
+- with `--state-cache-gb` or `--prefix-cache on`: `basal_state_cache_bytes`, `_budget_bytes`, `_entries`,
+  `_hits_total`, `_misses_total`, `_prefix_hits_total` and `_evictions_total` (all `basal_state_cache_...`). They
+  count cache lookups, not client requests.
+
+The values are read when Prometheus scrapes: nothing is added to the request path, and nothing waits for the GPU. The
+state cache is read without waiting for its lock; while the engine holds it, the last values are reported again, and
+`basal_state_cache_snapshot_timestamp_seconds` gives their Unix time (0 before the first read; the cache values are
+left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP
+API. basal-router's own metrics are per replica: readiness, requests in flight, requests routed by state and by load,
+failures.
 
 ## Inference on a JSONL file
 

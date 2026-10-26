@@ -92,8 +92,8 @@ def test_router_stops_when_every_started_replica_exited():
 
 def test_prometheus_text():
     t = S.prometheus([("a_total", "help a", "counter", [({}, 3)]),
-                      ("b", "help b", "gauge", [({"replica": 'x"y'}, 1.5)])])
-    assert "# TYPE a_total counter\na_total 3" in t and 'b{replica="x\'y"} 1.5' in t
+                      ("b", "help b", "gauge", [({"replica": 'x"y\\z\nw'}, 1.5)])])
+    assert "# TYPE a_total counter\na_total 3" in t and 'b{replica="x\\"y\\\\z\\nw"} 1.5' in t
 
 
 def test_server_metrics_route():
@@ -109,6 +109,45 @@ def test_server_metrics_route():
     with TestClient(S.http_app(Srv(), "fast")) as c:
         m = c.get("/metrics").text
     assert "basal_requests_waiting 2" in m and "vllm:num_requests_running 1" in m and 'mode="fast"' in m
+    from basal import __version__
+    assert f'basal_build_info{{version="{__version__}",model="basal-test",mode="fast",layout="canonical"}} 1' in m
+    assert "basal_state_cache" not in m
+
+
+def test_server_metrics_state_cache_never_waits_for_its_lock():
+    """With a state cache: its counters (#48's evictions and prefix hits too); while the engine holds the cache's lock,
+    /metrics answers at once with the last snapshot and its time."""
+    import torch
+
+    from basal.engine import StateCache
+    cache = StateCache(2 ** 20)
+    cache.put(cache.key([1, 2, 3]), [(torch.zeros(1, 2, 3, 4), torch.zeros(1, 2, 3, 4))], tokens=[1, 2, 3])
+    cache.get(cache.key([1, 2, 3])), cache.get(cache.key([4]))
+
+    class Srv:
+        name, layout, long_tokens = "basal-test", "canonical", None
+        backend = type("B", (), {"state_cache": cache, "policies": {}})()
+
+        def load(self):
+            return {"running": 0, "queued": 0}
+
+        async def worker(self):
+            await asyncio.sleep(3600)
+
+    def values(text):
+        return {ln.split(" ")[0]: float(ln.split(" ")[1]) for ln in text.splitlines() if ln.startswith("basal_state")}
+    with TestClient(S.http_app(Srv(), "fast")) as c:
+        with cache.lock:  # the engine is storing a state: no snapshot yet, so no cache values, timestamp 0
+            first = values(c.get("/metrics").text)
+        second = values(c.get("/metrics").text)
+        cache.put(cache.key([5]), [(torch.zeros(1, 2, 1, 4), torch.zeros(1, 2, 1, 4))])
+        with cache.lock:  # busy again: the last snapshot, with its time
+            third = values(c.get("/metrics").text)
+    assert first == {"basal_state_cache_snapshot_timestamp_seconds": 0.0}
+    assert second["basal_state_cache_hits_total"] == 1 and second["basal_state_cache_misses_total"] == 1
+    assert second["basal_state_cache_entries"] == 1 and second["basal_state_cache_bytes"] == 192
+    assert second["basal_state_cache_evictions_total"] == 0 and second["basal_state_cache_prefix_hits_total"] == 0
+    assert second["basal_state_cache_snapshot_timestamp_seconds"] > 0 and third == second
 
 
 def test_starting_answers_503_then_frees_the_port():

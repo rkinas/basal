@@ -2101,12 +2101,15 @@ def parser():
 
 
 def prometheus(metrics):
-    """Prometheus text exposition of [(name, help, type, [(labels dict, value)])]."""
+    """Prometheus text exposition of [(name, help, type, [(labels dict, value)])]; label values escaped as the format
+    asks (backslash, newline, double quote)."""
+    def esc(v):
+        return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
     out = []
     for name, help_, kind, samples in metrics:
         out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
         for labels, value in samples:
-            lab = ",".join(f'{k}="{str(v).replace(chr(34), chr(39))}"' for k, v in labels.items())
+            lab = ",".join(f'{k}="{esc(v)}"' for k, v in labels.items())
             out.append(f"{name}{{{lab}}} {value}" if lab else f"{name} {value}")
     return "\n".join(out) + "\n"
 
@@ -2160,15 +2163,17 @@ def error_body(e, error_format="basal"):
 
 
 def http_app(srv, mode, mcp=None, error_format="basal"):
-    """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models and /health; mcp: (routes, lifespan) of
-    --mcp on. A failed request answers error_body with http_status: 422 invalid request, 503 out of GPU memory, 500
+    """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models, /health and /metrics; mcp: (routes,
+    lifespan) of --mcp on. A failed request answers error_body with http_status: 422 invalid request, 503 out of GPU memory, 500
     any other server error."""
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse, PlainTextResponse
     from starlette.routing import Route
+    from . import __version__
     counts = {"requests": 0, "failed": 0, "seconds": 0.0}  # GET /metrics
+    cache_seen = {"stats": None, "at": 0}  # the last state-cache snapshot /metrics read, and its Unix time
 
     def failed(e):
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
@@ -2202,11 +2207,13 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
         return JSONResponse({"status": "ok", **srv.load()})
 
     async def metrics(_):
-        """Prometheus metrics (2.5): requests waiting / running (also under vLLM's names, which routers such as llm-d
-        read), requests served / failed and their time, the state cache when there is one."""
+        """Prometheus metrics (2.5): the engine version and the served model, requests waiting / running (also under
+        vLLM's names, which routers such as llm-d read), requests served / failed and their time, the state cache when
+        there is one. The cache is read without waiting for its lock: while the engine holds it, the last snapshot is
+        reported again (its time in basal_state_cache_snapshot_timestamp_seconds)."""
         load = srv.load()
-        info = {"model": srv.name, "mode": mode, "layout": getattr(srv, "layout", "canonical")}
-        m = [("basal_info", "the served model", "gauge", [(info, 1)]),
+        info = {"version": __version__, "model": srv.name, "mode": mode, "layout": getattr(srv, "layout", "canonical")}
+        m = [("basal_build_info", "engine version, served model, mode and prompt layout", "gauge", [(info, 1)]),
              ("basal_requests_waiting", "requests waiting for the engine", "gauge", [({}, load["queued"])]),
              ("basal_requests_running", "requests in flight, not waiting", "gauge", [({}, load["running"])]),
              ("vllm:num_requests_waiting", "as basal_requests_waiting (vLLM's name)", "gauge", [({}, load["queued"])]),
@@ -2218,12 +2225,24 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
               [({}, round(counts["seconds"], 6))])]
         cache = getattr(srv.backend, "state_cache", None)
         if cache is not None:
-            st = cache.stats()
-            m += [("basal_state_cache_bytes", "bytes of cached states", "gauge", [({}, st["used_bytes"])]),
-                  ("basal_state_cache_budget_bytes", "--state-cache-gb", "gauge", [({}, st["budget_bytes"])]),
-                  ("basal_state_cache_entries", "cached states", "gauge", [({}, st["entries"])]),
-                  ("basal_state_cache_hits_total", "requests whose state was cached", "counter", [({}, st["hits"])]),
-                  ("basal_state_cache_misses_total", "requests whose state was not", "counter", [({}, st["misses"])])]
+            st = cache.stats(blocking=False)
+            if st is not None:
+                cache_seen.update(stats=st, at=round(time.time(), 3))
+            st = cache_seen["stats"]
+            if st is not None:
+                m += [("basal_state_cache_bytes", "bytes of cached states", "gauge", [({}, st["used_bytes"])]),
+                      ("basal_state_cache_budget_bytes", "--state-cache-gb", "gauge", [({}, st["budget_bytes"])]),
+                      ("basal_state_cache_entries", "cached states", "gauge", [({}, st["entries"])]),
+                      ("basal_state_cache_hits_total", "requests whose state was cached", "counter",
+                       [({}, st["hits"])]),
+                      ("basal_state_cache_misses_total", "requests whose state was not", "counter",
+                       [({}, st["misses"])]),
+                      ("basal_state_cache_prefix_hits_total", "states that began with a cached one", "counter",
+                       [({}, st["prefix_hits"])]),
+                      ("basal_state_cache_evictions_total", "states evicted for the budget", "counter",
+                       [({}, st["evictions"])])]
+            m.append(("basal_state_cache_snapshot_timestamp_seconds", "Unix time of the cache values above (0: none "
+                      "read yet)", "gauge", [({}, cache_seen["at"])]))
         return PlainTextResponse(prometheus(m), media_type="text/plain; version=0.0.4")
 
     mcp_routes, mcp_run = mcp or ([], None)
