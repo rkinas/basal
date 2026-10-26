@@ -1024,6 +1024,9 @@ class Server:
     def __init__(self, a):
         validate_quant(a.mode, a.quant)
         kind, quant, comp = MODES[a.mode]
+        if getattr(a, "compile_scope", "model") == "layer" and (kind != "graph" or not comp):
+            raise SystemExit(f"--compile-scope layer: the CUDA graph engine's compiled modes (--mode fast), not "
+                             f"--mode {a.mode}")
         if kind == "gguf" and not a.gguf:
             raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
         if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
@@ -1039,14 +1042,15 @@ class Server:
                 getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on")):
             raise SystemExit("--state-cache-bits 8 needs --state-cache-gb or --prefix-cache on in the CUDA graph "
                              "engine (fast, fast-nocompile, fp8, int8, nvfp4)")
-        if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit")):
-            raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) and is "
-                             "not combined with --deterministic (a cached state changes the shapes of the forwards)")
+        if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit", "mlx")):
+            raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or "
+                             "--mode mlx and is not combined with --deterministic (a cached state changes the shapes of "
+                             "the forwards)")
         if getattr(a, "layout", None) not in (None, "canonical"):
             refuse_layout_caches(a.layout, a)
-        if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind != "graph"):
-            raise SystemExit("--prefix-cache needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) and is not "
-                             "combined with --deterministic")
+        if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind not in ("graph", "mlx")):
+            raise SystemExit("--prefix-cache needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or --mode "
+                             "mlx and is not combined with --deterministic")
         a.lean, a.tree = lean_tree(getattr(a, "lean", "off"), getattr(a, "tree", "dense"), kind, comp, a.quant or quant)
         refuse_lean_flex(a.lean, a.tree)
         if getattr(a, "batches", "default") not in ("default", "auto") and kind not in ("graph", "exit"):
@@ -1163,7 +1167,9 @@ class Server:
             self.backend = SGLangBackend(md, a.dtype, mem=a.gpu_memory, max_len=a.max_len)
         elif kind == "mlx":
             self.backend = MLXBackend(md, quant=quant, packed=getattr(a, "mlx_packed", False),
-                                      forward=getattr(a, "mlx_forward", "mlx-lm"))
+                                      forward=getattr(a, "mlx_forward", "mlx-lm"),
+                                      state_cache_gb=getattr(a, "state_cache_gb", 0),
+                                      prefix=getattr(a, "prefix_cache", "off") == "on")
         elif kind == "mps":
             self.backend = MPSBackend(md, a.dtype, shared=shared, device=a.device)
         elif kind == "gguf":
@@ -1179,7 +1185,9 @@ class Server:
             from .tpu import TPUBackend
             self.backend = TPUBackend(md, a.dtype, shared=shared, max_len=a.max_len)
         else:
-            self.backend = GraphBackend(md, a.dtype, quant, compile=comp, shared=shared, attn=attn,
+            scope = getattr(a, "compile_scope", "model")
+            self.backend = GraphBackend(md, a.dtype, quant, compile="layer" if comp and scope == "layer" else comp,
+                                        shared=shared, attn=attn,
                                         state_cache_gb=getattr(a, "state_cache_gb", 0),
                                         merge=merge_arg(a.merge), lean=lean_arg(getattr(a, "lean", "off")),
                                         tree=getattr(a, "tree", "dense"),
@@ -2024,20 +2032,27 @@ def add_engine_args(ap):
                     help="CUDA graph engine, Llama models: one compiled layer function for every layer and shape "
                          "(basal/lean.py) instead of transformers' module tree, in both passes or in pass 2 only. "
                          "auto: pass2 on the CUDA graph engine (with --tree auto / flex), else off")
+    ap.add_argument("--compile-scope", dest="compile_scope", choices=["model", "layer"], default="model",
+                    help="CUDA graph engine, Llama models, compiled modes: torch.compile the transformers model as a "
+                         "whole (model) or each decoder layer, one compiled layer function for all of them (layer: "
+                         "start-up compiles one layer instead of the whole model; kernels fuse within a layer only, "
+                         "so probabilities move by bf16 rounding)")
     ap.add_argument("--tree", choices=["auto", "dense", "flex"], default="dense",
                     help="with --lean pass2: the pass-2 trie mask as a dense additive mask (KV heads repeated) or as a "
                          "FlexAttention mask over the KV heads as they are. auto: flex with --lean pass2, else dense")
     ap.add_argument("--state-cache-gb", dest="state_cache_gb", type=float, default=0,
-                    help="CUDA graph engine: keep the keys and values of request states on the GPU up to this many GB "
-                         "(least recently used evicted); a later request with the same state computes only its "
-                         "questions and options (0: off)")
+                    help="CUDA graph engine and --mode mlx: keep the keys and values of request states on the GPU "
+                         "up to this many GB (least recently used evicted); a later request with the same state "
+                         "computes only its questions and options, one whose state begins with a cached one only its "
+                         "new tokens (0: off)")
     ap.add_argument("--state-cache-bits", dest="state_cache_bits", type=int, choices=[16, 8], default=16,
                     help="--state-cache-gb / --prefix-cache: 16 keeps the cached keys and values as computed; 8 stores "
                          "them as 8-bit integers with a scale per group (keys per channel, values per token): about "
                          "1.7x more cached states per GB, answers close to (not equal to) the uncached ones")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
-                    help="CUDA graph engine: compute the template prefix (chat template, system prompt, the header up "
-                         "to the state) once and run short requests over its cached keys and values")
+                    help="CUDA graph engine and --mode mlx: compute the template prefix (chat template, system "
+                         "prompt, the header up to the state) once and run short requests over its cached keys and "
+                         "values")
     ap.add_argument("--batches", choices=["auto", "compact", "default", "fine"], default="auto",
                     help="CUDA graph engine: compact = single prompts packed back to back into one row (FlashAttention "
                          "3 varlen on Hopper; elsewhere, sm80+, torch's varlen attention, Llama models), no padding to "
@@ -2140,12 +2155,15 @@ def parser():
 
 
 def prometheus(metrics):
-    """Prometheus text exposition of [(name, help, type, [(labels dict, value)])]."""
+    """Prometheus text exposition of [(name, help, type, [(labels dict, value)])]; label values escaped as the format
+    asks (backslash, newline, double quote)."""
+    def esc(v):
+        return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
     out = []
     for name, help_, kind, samples in metrics:
         out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
         for labels, value in samples:
-            lab = ",".join(f'{k}="{str(v).replace(chr(34), chr(39))}"' for k, v in labels.items())
+            lab = ",".join(f'{k}="{esc(v)}"' for k, v in labels.items())
             out.append(f"{name}{{{lab}}} {value}" if lab else f"{name} {value}")
     return "\n".join(out) + "\n"
 
@@ -2199,15 +2217,17 @@ def error_body(e, error_format="basal"):
 
 
 def http_app(srv, mode, mcp=None, error_format="basal"):
-    """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models and /health; mcp: (routes, lifespan) of
-    --mcp on. A failed request answers error_body with http_status: 422 invalid request, 503 out of GPU memory, 500
+    """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models, /health and /metrics; mcp: (routes,
+    lifespan) of --mcp on. A failed request answers error_body with http_status: 422 invalid request, 503 out of GPU memory, 500
     any other server error."""
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse, PlainTextResponse
     from starlette.routing import Route
+    from . import __version__
     counts = {"requests": 0, "failed": 0, "seconds": 0.0}  # GET /metrics
+    cache_seen = {"stats": None, "at": 0}  # the last state-cache snapshot /metrics read, and its Unix time
 
     def failed(e):
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
@@ -2242,11 +2262,13 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
         return JSONResponse({"status": "ok", **srv.load()})
 
     async def metrics(_):
-        """Prometheus metrics (2.5): requests waiting / running (also under vLLM's names, which routers such as llm-d
-        read), requests served / failed and their time, the state cache when there is one."""
+        """Prometheus metrics (2.5): the engine version and the served model, requests waiting / running (also under
+        vLLM's names, which routers such as llm-d read), requests served / failed and their time, the state cache when
+        there is one. The cache is read without waiting for its lock: while the engine holds it, the last snapshot is
+        reported again (its time in basal_state_cache_snapshot_timestamp_seconds)."""
         load = srv.load()
-        info = {"model": srv.name, "mode": mode, "layout": getattr(srv, "layout", "canonical")}
-        m = [("basal_info", "the served model", "gauge", [(info, 1)]),
+        info = {"version": __version__, "model": srv.name, "mode": mode, "layout": getattr(srv, "layout", "canonical")}
+        m = [("basal_build_info", "engine version, served model, mode and prompt layout", "gauge", [(info, 1)]),
              ("basal_requests_waiting", "requests waiting for the engine", "gauge", [({}, load["queued"])]),
              ("basal_requests_running", "requests in flight, not waiting", "gauge", [({}, load["running"])]),
              ("vllm:num_requests_waiting", "as basal_requests_waiting (vLLM's name)", "gauge", [({}, load["queued"])]),
@@ -2258,12 +2280,24 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
               [({}, round(counts["seconds"], 6))])]
         cache = getattr(srv.backend, "state_cache", None)
         if cache is not None:
-            st = cache.stats()
-            m += [("basal_state_cache_bytes", "bytes of cached states", "gauge", [({}, st["used_bytes"])]),
-                  ("basal_state_cache_budget_bytes", "--state-cache-gb", "gauge", [({}, st["budget_bytes"])]),
-                  ("basal_state_cache_entries", "cached states", "gauge", [({}, st["entries"])]),
-                  ("basal_state_cache_hits_total", "requests whose state was cached", "counter", [({}, st["hits"])]),
-                  ("basal_state_cache_misses_total", "requests whose state was not", "counter", [({}, st["misses"])])]
+            st = cache.stats(blocking=False)
+            if st is not None:
+                cache_seen.update(stats=st, at=round(time.time(), 3))
+            st = cache_seen["stats"]
+            if st is not None:
+                m += [("basal_state_cache_bytes", "bytes of cached states", "gauge", [({}, st["used_bytes"])]),
+                      ("basal_state_cache_budget_bytes", "--state-cache-gb", "gauge", [({}, st["budget_bytes"])]),
+                      ("basal_state_cache_entries", "cached states", "gauge", [({}, st["entries"])]),
+                      ("basal_state_cache_hits_total", "requests whose state was cached", "counter",
+                       [({}, st["hits"])]),
+                      ("basal_state_cache_misses_total", "requests whose state was not", "counter",
+                       [({}, st["misses"])]),
+                      ("basal_state_cache_prefix_hits_total", "states that began with a cached one", "counter",
+                       [({}, st["prefix_hits"])]),
+                      ("basal_state_cache_evictions_total", "states evicted for the budget", "counter",
+                       [({}, st["evictions"])])]
+            m.append(("basal_state_cache_snapshot_timestamp_seconds", "Unix time of the cache values above (0: none "
+                      "read yet)", "gauge", [({}, cache_seen["at"])]))
         return PlainTextResponse(prometheus(m), media_type="text/plain; version=0.0.4")
 
     mcp_routes, mcp_run = mcp or ([], None)

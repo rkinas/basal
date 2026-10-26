@@ -492,7 +492,7 @@ class Gemma4Forward:
             # a state over 16k tokens: every global-layer call in parts, from its first part on (its buffers leave
             # no room for the scores of a part over 14k keys in one call: 3.5 GB on ultra at 76k)
             split = len(seq) > self.ATTN_PAIRS // self.CHUNK
-            kv, bufs = {}, {}
+            kv, bufs, kpos = {}, {}, None  # kpos: set with kv's first keys, at the end of the first part
             at = torch.arange(len(seq), device=self.lm.embed_tokens.weight.device)[None]
             for s0, s1 in self._parts(seq, len(seq)):
                 h, pli, pos, valid, blk, _ = self._rows([seq[s0:s1]], [s0], media, seqs)

@@ -90,7 +90,11 @@ def locate(model_dir, fields, spec="auto"):
 
 
 def load(d):
-    """Loads a prepared directory before the engine compiles -> what was loaded (for the start-up line)."""
+    """Loads a prepared directory before the engine compiles -> what was loaded (for the start-up line). Inductor's
+    cache directory is set first, as the compiling engine sets it (engine.persist_compile_cache): the artifacts are
+    written into that directory, so they must land where the engine then looks."""
+    from .engine import persist_compile_cache
+    persist_compile_cache()
     out = {"dir": str(d)}
     f = Path(d) / "inductor.bin"
     if f.exists():

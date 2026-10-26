@@ -26,6 +26,57 @@
   when the options are reversed or rotated, and what averaging gains; `basal-serve --order-average K` serves the mean
   over K option orders, every order reading the request's state once. Off by default: answers are unchanged.
   [SERVING.md](SERVING.md#serving-modes).
+- **No first-request stalls in `--mode strix`** (AMD Strix Halo): start-up compiles every Triton kernel copy a request
+  can need. Triton compiles a kernel once per tile config and per class of each length argument (1, a multiple of 16,
+  other); the start-up of 2.4.1 and earlier ran two lengths only, so the first request that needed a new copy waited
+  0.2-0.3 s for each (in the request matrix, with an empty Triton cache, the first S request with 1 question took
+  1.82 s instead of 0.18 s). basal-2.0-4.5B on the contributor's Radeon 8060S: no kernel compiled during 152 requests of 90-16,000
+  tokens (before: 13 copies in 4 requests, 2.7 s), the same probabilities to the bit on 2,362 prompts; start-up about
+  5 s longer at the first start on a machine, about the same once Triton's disk cache holds the copies. Details in
+  [STRIX_HALO.md](benchmarks/STRIX_HALO.md#what---mode-strix-does). Contributed by Michał Kardyś (@kardysm),
+  [#51](https://github.com/rkinas/basal/pull/51); the stall was first seen by @piotrkowski in
+  [#21](https://github.com/rkinas/basal/pull/21).
+- **Starts after a reboot reuse the compiled code** (`--mode fast`): torch.compile's cache moves from Inductor's default
+  `/tmp/torchinductor_<user>`, which a reboot empties on most systems, to `~/.cache/basal/torchinductor`
+  (`TORCHINDUCTOR_CACHE_DIR` still takes precedence), as `--mode tpu` keeps JAX's in `~/.cache/basal/jax`. RTX 4060 Ti,
+  the first start after a reboot: basal-2.0-mini 417 -> 238 s, basal-2.0-4.5B 823 -> 519 s; every probability
+  bit-identical to a cold start; the cache takes about 55 MB for both models. Contributed by Miłosz Kucharski
+  (@Butterski), [#47](https://github.com/rkinas/basal/pull/47).
+- **Less host work in the CUDA cascade** (`--mode fast`, basal-2.0): the pass 2 without a CUDA graph runs kernel by
+  kernel and waits on the CPU; the cascade (2.3.5) now merges its two attentions in one compiled kernel per layer
+  instead of ~15 small ones and calls FlashAttention's op directly, not through torch's `varlen_attn` (a Python
+  custom op that also allocated a random-number state per call). A100, basal-2.0-mini, one client, against the dense
+  pass: 40 questions over a 1.5k-token state 1.07x -> 1.11x, compress 1.15-1.37x -> 1.19-1.44x; pass 2 alone for 40
+  questions 62.4 -> 48.6 ms (basal-2.0-4.5B: 117 -> 99 ms); every probability bit-identical to 2.3.5.
+  `fast-nocompile` keeps the merge op by op. Contributed by Miłosz Kucharski (@Butterski),
+  [#44](https://github.com/rkinas/basal/pull/44).
+- **`--compile-scope layer`** (opt-in, `--mode fast`, the Llama-based basal-2.0 models): torch.compile compiles one
+  decoder layer, called for every layer, instead of the whole model, so start-up compiles a layer instead of 32-60.
+  The same transformers layers as the whole-model compile; kernels fuse within a layer only, so probabilities move by
+  bf16 rounding. RTX 4060 Ti, graph warm-up from cold compile caches: basal-2.0-mini 235 -> 95 s, basal-2.0-4.5B 515
+  -> 251 s; five questions at a time as fast, single questions 2-3% slower on mini and as fast on the 4.5B (within
+  run-to-run noise); identity readouts: the same top answer on 416 / 420 (mini) and 418 / 420 (4.5B), the changed ones
+  near-ties (margins under 0.08), mean |dp| 0.005, as far from fp32 as the whole-model compile (mini: 4.7e-3 against
+  4.8e-3). bf16 Llama weights only (FP8 / NVFP4, Gemma 4, Qwen3.5 and --lean are refused). Contributed by Miłosz
+  Kucharski (@Butterski), [#49](https://github.com/rkinas/basal/pull/49).
+- **State cache on Apple Silicon** (`--mode mlx`, opt-in): `--state-cache-gb N` and `--prefix-cache on` work on the
+  Mac as on the CUDA graph engine, with both `--mlx-forward` paths. A request whose state (or template prefix) is
+  cached computes only its questions; a state that begins with a cached one (a growing agent trace or chat) only its
+  new tokens. A repeated state gives bit-identical probabilities. Against the cache off, the state and the rest of the
+  prompt run in two forwards instead of one, so 8-bit / bf16 probabilities move by rounding (in the contributor's
+  2,303 decisions the top answer stayed wherever its margin was at least 0.2). MacBook Air M4, basal-2.0-4.5B-MLX-8bit,
+  p50 per request: a 2.1k-token moderation policy and a comment 13.7 -> 0.9 s, questions about one paragraph 2.6x,
+  growing dialogues 1.5x (2.7x from 512 tokens). [HARDWARE.md](HARDWARE.md#apple-m4-state-cache-on---mode-mlx).
+  Contributed by Grzegorz Stark (@gstark0), [#50](https://github.com/rkinas/basal/pull/50).
+- **`GET /metrics` additions:** the engine version (`basal_build_info{version,model,mode,layout}`), the state cache's
+  evictions and prefix hits, and a cache read that never waits for the engine's lock (the last values and their time
+  instead). [SERVING.md](SERVING.md#prometheus-metrics). Contributed by Marcin Brzeżański (@marcinbrzezanski),
+  [#48](https://github.com/rkinas/basal/pull/48).
+- **Development commands:** `make help` lists them: `make setup`, `make test`, `make serve MODE=...`, `make bench`,
+  `make run`, `make loadtest`, and `make check`, read-only pre-commit checks with pinned versions (Python syntax and
+  undefined names, merge markers, private keys, TOML / YAML / JSON / JSONL syntax), no Git hook installed. README
+  "Development commands". Contributed by Paweł Kiszczak (@pawelkiszczak),
+  [#46](https://github.com/rkinas/basal/pull/46).
 
 # What is new in basal 2.4.1
 
