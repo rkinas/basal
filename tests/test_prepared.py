@@ -65,9 +65,13 @@ def test_save_and_load(tmp_path, monkeypatch):
     import os
 
     from torch._inductor.runtime.cache_dir_utils import default_cache_dir
+
+    import basal
     calls = {}
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", default_cache_dir())  # as Inductor sets it on import
+    # basal-serve's case: nothing given before basal was imported (a test that loads Triton first sets the default)
+    monkeypatch.setattr(basal, "INDUCTOR_CACHE_DIR_GIVEN", False)
     monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"kernels", None))
     monkeypatch.setattr(torch.compiler, "load_cache_artifacts",
                         lambda b: calls.setdefault("loaded", (b, os.environ["TORCHINDUCTOR_CACHE_DIR"])))
