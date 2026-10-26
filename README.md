@@ -557,7 +557,8 @@ Thank you to the people whose work is in this repository, by pull request:
 - Paweł Kiszczak ([@pawelkiszczak](https://github.com/pawelkiszczak)): the Apple Silicon engines `--mode mlx` /
   `mlx-q8` and `--mode mps`, the in-process GGUF engine `--mode gguf` (llama-cpp-python) and `--mode ollama`, and the
   comparison of Apple Silicon engines and quantised formats (MLX, oMLX oQ, GGUF) with its figures in
-  [HARDWARE.md](docs/HARDWARE.md#apple-silicon) ([#4](https://github.com/rkinas/basal/pull/4)).
+  [HARDWARE.md](docs/HARDWARE.md#apple-silicon) ([#4](https://github.com/rkinas/basal/pull/4)); the development
+  commands (`make`) and read-only pre-commit checks ([#46](https://github.com/rkinas/basal/pull/46)).
 - Piotr Durlej ([@pdurlej](https://github.com/pdurlej)): `basal-export-gguf`, which converts a basal model to GGUF, or
   repairs an existing GGUF file, so that its tokenizer matches the Hugging Face one, as in the official `-GGUF` files
   ([#8](https://github.com/rkinas/basal/pull/8)).
@@ -565,7 +566,8 @@ Thank you to the people whose work is in this repository, by pull request:
   its Colab notebook ([#15](https://github.com/rkinas/basal/pull/15)).
 - Michał Kardyś ([@kardysm](https://github.com/kardysm)): the experimental `--mode strix`, a basal-1.5 / basal-2.0
   forward with Triton kernels for AMD Strix Halo, and its benchmarks
-  ([#14](https://github.com/rkinas/basal/pull/14)).
+  ([#14](https://github.com/rkinas/basal/pull/14)); a start-up that compiles every Triton kernel copy, so no request
+  waits for one ([#51](https://github.com/rkinas/basal/pull/51)).
 - [@lukaspoloki](https://github.com/lukaspoloki): `basal-viz`, a local page that shows every step of a decision, from
   the prompt to the per-layer readout, the calibration and the decision
   ([#2](https://github.com/rkinas/basal/pull/2)).
@@ -583,7 +585,10 @@ Thank you to the people whose work is in this repository, by pull request:
   ([#40](https://github.com/rkinas/basal/pull/40), the same change as 2.3.4's, written in parallel); the questions over
   a long state on CUDA without dense masks, so `compress` runs up to 1.5x faster
   ([#39](https://github.com/rkinas/basal/pull/39)); and basal-2.0-4.5B on 16 GB cards, with pass-2 graphs captured only
-  while GPU memory stays free ([#41](https://github.com/rkinas/basal/pull/41)).
+  while GPU memory stays free ([#41](https://github.com/rkinas/basal/pull/41)); torch.compile's cache kept across
+  reboots ([#47](https://github.com/rkinas/basal/pull/47)), less host work in the CUDA cascade
+  ([#44](https://github.com/rkinas/basal/pull/44)) and `--compile-scope layer`
+  ([#49](https://github.com/rkinas/basal/pull/49)).
 - Grzegorz Brzezinka ([@agentGreg](https://github.com/agentGreg)): the calibration report's per-type ECE as
   `basal-serve` applies the temperatures ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count
   for the 1% target in CALIBRATION.md ([#25](https://github.com/rkinas/basal/pull/25)), the Apple M5 Max
@@ -596,6 +601,12 @@ Thank you to the people whose work is in this repository, by pull request:
   bit-identical edge cases and a similar speed-up ([#21](https://github.com/rkinas/basal/pull/21)).
 - [@lukaszpodgorski-pl](https://github.com/lukaszpodgorski-pl): basal on Windows: kernel checks for torch builds without
   FlashAttention or Triton, and UTF-8 for every text file ([#38](https://github.com/rkinas/basal/pull/38)).
+- Marcin Brzeżański ([@marcinbrzezanski](https://github.com/marcinbrzezanski)): Prometheus metrics: the engine version,
+  the state cache's evictions and prefix hits, and a cache read that never waits for the engine
+  ([#48](https://github.com/rkinas/basal/pull/48)).
+- Grzegorz Stark ([@gstark0](https://github.com/gstark0)): `--state-cache-gb` and `--prefix-cache` on Apple Silicon
+  (`--mode mlx`), with the guard against MLX's fused attention losing precision for a few queries over a cache
+  ([#50](https://github.com/rkinas/basal/pull/50)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),
