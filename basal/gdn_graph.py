@@ -567,7 +567,9 @@ class GDNGraphBackend(GraphBackend):
         layer one flat buffer for keys and one for values, viewed per root bucket L2 as [rows, kv heads, L2, d] (a
         graph of length L <= L2 writes [:b, :, :L]); per Gated DeltaNet layer the recurrent states [rows, heads, dk,
         dv] (fp32) and convolution tails [rows, kernel - 1, channels]. Zeros, not empty: pass 2 reads the masked tail
-        of a root's bucket too, and a masked NaN still poisons a readout (0 x NaN)."""
+        of a root's bucket too, and a masked NaN still poisons a readout (0 x NaN). With --graph-memory-gb the pass-2
+        graphs captured follow it (_pin_memory)."""
+        self._pin_memory()
         self.kv_shapes = self.net.kv_shapes
         self.kv_shape = self.kv_shapes[0]
         R = self.TREE_ROWS[-1]
