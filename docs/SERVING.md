@@ -165,7 +165,8 @@ benchmarking a GPU.
   - Opt-in, off by default: `--lean on|pass2` (one compiled layer function: faster start-up, slower under load),
     `--tree flex` (a FlexAttention mask for the branches of a request), `--readout-layer on`, `--state-cache-gb N`
     (a state cache across requests; 2.3.1: also for states that begin with a cached one, e.g. agent traces, which then
-    compute only their new tokens), `--prefix-cache`, `--long-lane`. Measurements:
+    compute only their new tokens; 2.5: `--state-cache-bits 8` keeps ~1.7x as many states per GB, answers close to the
+    uncached ones), `--prefix-cache`, `--long-lane`. Measurements:
     [HARDWARE.md](HARDWARE.md#kernels-of-the-cuda-graph-engine-one-h100).
 - **vLLM options (2.3):** `--vllm-preset default | deterministic` (deterministic: batch-invariant kernels, no prefix
   cache, no chunked prefill; repeatable answers at a throughput cost) loads `CALIBRATION.vllm.<preset>.json` when the
