@@ -521,7 +521,7 @@ class GDNGraphBackend(GraphBackend):
         # engine; quantisation is refused here)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)  # before loading
         if state_cache_bits != 16 and not why:
-            why = "--state-cache-bits 8 / 4 is for attention keys and values; recurrent states are cached as computed"
+            why = "--state-cache-bits 8 is for attention keys and values; recurrent states are cached as computed"
         if why:
             raise ValueError(f"{model_dir}: {why}")
         cuda = torch.cuda.is_available()

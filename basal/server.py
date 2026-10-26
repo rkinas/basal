@@ -73,7 +73,7 @@ MODES = {
     "fast-exit": ("exit", None, True),      # "fast" + trained early exits, policy chosen per request
     "fp8": ("graph", "fp8", True),          # "fast" with torchao FP8 (Hopper / Blackwell)
     "nvfp4": ("graph", "nvfp4", True),      # "fast" with torchao NVFP4 (Blackwell, experimental)
-    "int8": ("graph", "int8", True),        # "fast" with block-scaled int8 (basal-omni; Ampere and newer, no FP8 needed)
+    "int8": ("graph", "int8", True),        # "fast" with block-scaled int8 (basal-omni ultra; Ampere and newer)
     "vllm": ("vllm", None, False),          # vLLM, for the ModelOpt FP8 / NVFP4 checkpoints
     "sglang": ("sglang", None, False),      # SGLang offline engine (1.5)
     "mlx": ("mlx", None, False),            # Apple Silicon, MLX (1.5): the MLX fp8 / fp4 exports or bf16 weights
@@ -105,16 +105,19 @@ def nvfp4_args(a, md=None, quant=None):
 
 
 def nvfp4_calibration_refused(md, kind, quant, a):
-    """None, or why basal-omni in NVFP4 is refused: it serves only with its own calibration (CALIBRATION.nvfp4.json in
-    the model folder, or --calibration). NVFP4 changes about 2% of the top answers and makes them more confident, so
-    the thresholds fitted on bf16 readouts do not hold."""
-    if quant != "nvfp4" or kind not in ("graph", "exit") or a.calibration or getattr(a, "no_calibration", False):
+    """None, or why basal-omni in NVFP4 or int8 is refused: it serves only with its own calibration
+    (CALIBRATION.nvfp4.json / CALIBRATION.int8.json in the model folder, or --calibration). NVFP4 changes about 2% of
+    the top answers and makes them more confident, so the thresholds fitted on bf16 readouts do not hold; int8 passed
+    its accuracy check with its own file."""
+    if quant not in ("nvfp4", "int8") or kind not in ("graph", "exit") or a.calibration \
+            or getattr(a, "no_calibration", False):
         return None
     from .gemma4_graph import is_gemma4_dir
-    if not is_gemma4_dir(md) or (Path(md) / "CALIBRATION.nvfp4.json").exists():
+    if not is_gemma4_dir(md) or (Path(md) / f"CALIBRATION.{quant}.json").exists():
         return None
-    return ("--mode nvfp4 with basal-omni needs its own calibration: CALIBRATION.nvfp4.json in the model folder or "
-            "--calibration <file> (fitted on NVFP4 readouts; the bf16 thresholds do not hold)")
+    name = quant.upper() if quant == "nvfp4" else quant
+    return (f"--mode {quant} with basal-omni needs its own calibration: CALIBRATION.{quant}.json in the model folder or "
+            f"--calibration <file> (fitted on {name} readouts; the bf16 thresholds do not hold)")
 
 
 def default_mode(model=None, revision=None):
@@ -1006,7 +1009,7 @@ class Server:
             set_fp8_fast_accum(False)
         if getattr(a, "state_cache_bits", 16) != 16 and (kind != "graph" or not (
                 getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on")):
-            raise SystemExit("--state-cache-bits 8 / 4 needs --state-cache-gb or --prefix-cache on in the CUDA graph "
+            raise SystemExit("--state-cache-bits 8 needs --state-cache-gb or --prefix-cache on in the CUDA graph "
                              "engine (fast, fast-nocompile, fp8, int8, nvfp4)")
         if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit")):
             raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) and is "
@@ -1987,10 +1990,10 @@ def add_engine_args(ap):
                     help="CUDA graph engine: keep the keys and values of request states on the GPU up to this many GB "
                          "(least recently used evicted); a later request with the same state computes only its "
                          "questions and options (0: off)")
-    ap.add_argument("--state-cache-bits", dest="state_cache_bits", type=int, choices=[16, 8, 4], default=16,
-                    help="--state-cache-gb / --prefix-cache: 16 keeps the cached keys and values as computed; 8 or 4 "
-                         "stores them as integers with a scale per group (keys per channel, values per token): about "
-                         "2x / 3.5x more cached states per GB, answers close to (not equal to) the uncached ones")
+    ap.add_argument("--state-cache-bits", dest="state_cache_bits", type=int, choices=[16, 8], default=16,
+                    help="--state-cache-gb / --prefix-cache: 16 keeps the cached keys and values as computed; 8 stores "
+                         "them as 8-bit integers with a scale per group (keys per channel, values per token): about "
+                         "1.7x more cached states per GB, answers close to (not equal to) the uncached ones")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
                     help="CUDA graph engine: compute the template prefix (chat template, system prompt, the header up "
                          "to the state) once and run short requests over its cached keys and values")

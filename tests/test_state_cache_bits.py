@@ -72,7 +72,9 @@ def test_cached_state_answers_close_to_separate(bits):
 
 def test_bits_need_a_state_cache():
     assert parser().parse_args([]).state_cache_bits == 16
-    with pytest.raises(SystemExit, match="--state-cache-bits 8 / 4 needs"):
+    with pytest.raises(SystemExit):  # 4 bits failed the accuracy check on max (kept in StateCache, not served)
+        parser().parse_args(["--state-cache-bits", "4"])
+    with pytest.raises(SystemExit, match="--state-cache-bits 8 needs"):
         Server(parser().parse_args(["--mode", "fast", "--state-cache-bits", "8"]))
 
 

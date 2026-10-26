@@ -546,9 +546,10 @@ def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
     return "block" if quant == "fp8" and gemma4 and not fp8_checkpoint else "row"
 
 
-# basal-omni quantised at load time (--mode fp8 with block scaling, --mode nvfp4 --nvfp4-amax) serves only the text
-# shapes (hidden size, decoder layers) that kept the paired accuracy rule against bf16 with their own calibration:
-# ultra (31B) in both modes (NVFP4 by a narrow margin, 2.4% of top answers change); max (12B) failed both
+# basal-omni quantised at load time (--mode fp8 with block scaling, --mode nvfp4 --nvfp4-amax, --mode int8) serves only
+# the text shapes (hidden size, decoder layers) that kept the paired accuracy rule against bf16 with their own
+# calibration: ultra (31B) in all three (NVFP4 by a narrow margin, 2.4% of top answers change; int8 0.6%); max (12B)
+# failed NVFP4 and int8 (int8: 1.13% errors among the answers accepted at the 1% target)
 OMNI_QUANT_SHAPES = {(5376, 60): "basal-omni ultra (31B)"}
 
 
@@ -1171,7 +1172,7 @@ class GraphBackend(EagerBackend):
             raise ValueError("--fp8-scaling block: --mode fp8 with basal-omni (Gemma 4) only")
         if fp8_bf16_layers < 0:
             raise ValueError(f"--fp8-bf16-layers {fp8_bf16_layers}: give 0 or more layers")
-        if gemma4_graph.is_gemma4_dir(model_dir) and (fp8_scaling == "block" or quant == "nvfp4"):
+        if gemma4_graph.is_gemma4_dir(model_dir) and (fp8_scaling == "block" or quant in ("nvfp4", "int8")):
             why = omni_quant_refused(model_dir, quant, nvfp4_amax)
             if why:
                 raise ValueError(why)

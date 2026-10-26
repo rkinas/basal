@@ -82,3 +82,21 @@ def test_kernel_equals_the_maths_and_ignores_the_other_rows(M):
     assert torch.allclose(y.cpu(), ref, rtol=1e-5, atol=1e-5)
     one = int8block.gemm(qa[-1:], sa[-1:], q, s, torch.float32)
     assert torch.equal(one, y[-1:])
+
+
+def test_int8_serves_basal_omni_ultra_only_with_its_own_calibration(tmp_path):
+    """--mode int8 kept the paired accuracy check on ultra and failed it on max (12B), so other basal-omni shapes are
+    refused; it needs CALIBRATION.int8.json (or --calibration), as NVFP4 needs its own file."""
+    from types import SimpleNamespace
+
+    from basal.engine import omni_quant_refused
+    from basal.server import nvfp4_calibration_refused
+    from test_nvfp4 import _omni
+    ultra, mx = _omni(tmp_path, 5376, 60), _omni(tmp_path, 3840, 48)
+    assert omni_quant_refused(ultra, "int8") is None
+    assert "ultra (31B) only" in omni_quant_refused(mx, "int8")
+    a = SimpleNamespace(calibration=None, no_calibration=False)
+    assert "CALIBRATION.int8.json" in nvfp4_calibration_refused(ultra, "graph", "int8", a)
+    (ultra / "CALIBRATION.int8.json").write_text("{}")
+    assert nvfp4_calibration_refused(ultra, "graph", "int8", a) is None
+    assert "CALIBRATION.nvfp4.json" in nvfp4_calibration_refused(ultra, "graph", "nvfp4", a)
