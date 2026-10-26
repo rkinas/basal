@@ -1289,7 +1289,8 @@ class GDNGraphBackend(GraphBackend):
 
 
 class GDNMPSBackend(GDNGraphBackend, MPSBackend):
-    """--mode mps for Qwen3.5 models (MPSBackend(model_dir) of such a model builds this one): GDNGraphBackend's two
+    """--mode mps for Qwen3.5 models, refused in 2.5 (engine.gdn_mps_refused: too slow without a Metal kernel);
+    with BASAL_EXPERIMENTAL_GDN_MPS=1, MPSBackend(model_dir) of such a model builds this one: GDNGraphBackend's two
     passes (the recurrent state carried from each root into one row per leaf) on the Apple GPU through PyTorch MPS, or
     on the CPU, without CUDA graphs or compilation; the Gated DeltaNet layers run transformers' torch kernels, as
     --mode eager does there."""

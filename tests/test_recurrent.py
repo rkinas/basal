@@ -86,12 +86,22 @@ def test_other_recurrent_models_refused_before_loading(monkeypatch, qwen3_next, 
     assert "18 linear_attention layers" in str(e.value) and "--mode vllm" in str(e.value)
 
 
-def test_fast_exit_refuses_qwen35_naming_fast_and_mps(monkeypatch, qwen35):
+def test_fast_exit_refuses_qwen35_naming_fast(monkeypatch, qwen35):
     no_load(monkeypatch)
     with pytest.raises(ValueError, match="--mode fast") as e:
         ExitGraphBackend(str(qwen35))
     assert "18 linear_attention layers" in str(e.value) and "--mode eager" in str(e.value)
-    assert "--mode mps" in str(e.value)
+    assert "--mode mps" not in str(e.value)
+
+
+def test_mps_refuses_qwen35_naming_the_mac_paths(monkeypatch, qwen35):
+    """--mode mps of a Qwen3.5 model is refused in 2.5 (seconds per prompt without fla's kernels), before loading; the
+    message names the Mac paths: the GGUF file on llama.cpp's Metal backend and MLX."""
+    no_load(monkeypatch)
+    monkeypatch.delenv("BASAL_EXPERIMENTAL_GDN_MPS", raising=False)
+    with pytest.raises(ValueError, match="--mode mps is not served") as e:
+        MPSBackend(str(qwen35))
+    assert all(w in str(e.value) for w in ("--mode gguf", "Metal", "--mode mlx", "MLX", "--mode eager"))
 
 
 @pytest.mark.parametrize("kw, words", [({"quant": "fp8"}, "--mode fp8"), ({"quant": "nvfp4"}, "--mode nvfp4")])
@@ -446,10 +456,12 @@ def test_compact_rows_readout_layer(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("device, tol", [("cpu", 1e-5), ("mps", 1e-4)])
 def test_mps_mode_carries_the_state(monkeypatch, tmp_path, device, tol):
-    """--mode mps: MPSBackend of a Qwen3.5 model builds GDNMPSBackend (the two passes, no graphs, uncompiled) on the
-    Apple GPU or the CPU; the answers equal eager's. Without prefix sharing it stays MPSBackend (eager forwards)."""
+    """--mode mps with BASAL_EXPERIMENTAL_GDN_MPS=1: MPSBackend of a Qwen3.5 model builds GDNMPSBackend (the two passes,
+    no graphs, uncompiled) on the Apple GPU or the CPU; the answers equal eager's. Without prefix sharing it stays
+    MPSBackend (eager forwards)."""
     if device == "mps" and not (getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()):
         pytest.skip("no Apple GPU")
+    monkeypatch.setenv("BASAL_EXPERIMENTAL_GDN_MPS", "1")
     tiny_qwen35(tmp_path / "tiny")
     for mod in (engine_module, gdn_module):
         monkeypatch.setattr(mod.AutoTokenizer, "from_pretrained", lambda *a, **k: Tok())
