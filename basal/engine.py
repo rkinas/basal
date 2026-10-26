@@ -526,7 +526,16 @@ def quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4, fp8_c
             or quant == "int8")):
         return ("--quant-load cpu: basal-omni (Gemma 4) in --mode fp8 (block scaling), int8, or nvfp4 with "
                 "--nvfp4-amax, from its bf16 weights")
+    if quant_load == "cpu" and os.environ.get("BASAL_EXPERIMENTAL_QUANT_LOAD") != "1":
+        return QUANT_LOAD_EXPERIMENTAL
     return None
+
+
+# --quant-load cpu loads the same weights as the gpu load (checked on ultra in FP8: every tensor, and every answer on an
+# 80 GB H100), but a GPU with less free memory runs smaller graph shapes, so its answers can differ slightly
+QUANT_LOAD_EXPERIMENTAL = ("--quant-load cpu is experimental in this version: the weights are the same, but answers on "
+                           "a GPU with less free memory can differ slightly from an 80 GB GPU's (its graph shapes "
+                           "follow the free memory); BASAL_EXPERIMENTAL_QUANT_LOAD=1 turns it on")
 
 
 def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):

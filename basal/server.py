@@ -45,8 +45,8 @@ from pathlib import Path
 import torch
 
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
-                     FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend, VLLM_PRESETS, VLLMBackend,
-                     fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused, resolve, set_fp8_fast_accum)
+                     FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, QUANT_LOAD_EXPERIMENTAL, SGLangBackend,
+                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused, resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
@@ -1027,6 +1027,8 @@ class Server:
         if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4",
                                                                                                         "int8")):
             raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
+        if getattr(a, "quant_load", "gpu") == "cpu" and os.environ.get("BASAL_EXPERIMENTAL_QUANT_LOAD") != "1":
+            raise SystemExit(QUANT_LOAD_EXPERIMENTAL)
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
         attn = getattr(a, "attn", "auto")
@@ -2017,7 +2019,8 @@ def add_engine_args(ap):
                     help="--mode fp8 (block scaling) / int8 / nvfp4 with basal-omni: where the bf16 weights are held "
                          "while they are quantised. gpu: all on the GPU first (needs their full size); cpu: in host "
                          "memory, one decoder layer at a time to the GPU, quantised there (GPU memory about the "
-                         "quantised size: ultra in FP8 or int8 on cards under 64 GB; the same weights)")
+                         "quantised size: ultra in FP8 or int8 on cards under 64 GB; the same weights). Experimental: "
+                         "needs BASAL_EXPERIMENTAL_QUANT_LOAD=1")
     ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
                     help="--mode nvfp4 with basal-omni ultra (other basal-omni models are refused): the calibrated "
                          "input amax of each decoder linear (JSON, {\"amax\": {\"<layer>.<proj>\": value}}; default: the "
