@@ -602,9 +602,8 @@ Thank you to the people whose work is in this repository, by pull request:
   a long state on CUDA without dense masks, so `compress` runs up to 1.5x faster
   ([#39](https://github.com/rkinas/basal/pull/39)); and basal-2.0-4.5B on 16 GB cards, with pass-2 graphs captured only
   while GPU memory stays free ([#41](https://github.com/rkinas/basal/pull/41)); torch.compile's cache kept across
-  reboots ([#47](https://github.com/rkinas/basal/pull/47)), less host work in the CUDA cascade
-  ([#44](https://github.com/rkinas/basal/pull/44)) and `--compile-scope layer`
-  ([#49](https://github.com/rkinas/basal/pull/49)).
+  reboots ([#47](https://github.com/rkinas/basal/pull/47)) and less host work in the CUDA cascade
+  ([#44](https://github.com/rkinas/basal/pull/44)).
 - Grzegorz Brzezinka ([@agentGreg](https://github.com/agentGreg)): the calibration report's per-type ECE as
   `basal-serve` applies the temperatures ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count
   for the 1% target in CALIBRATION.md ([#25](https://github.com/rkinas/basal/pull/25)), the Apple M5 Max
