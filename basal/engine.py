@@ -55,7 +55,9 @@ def resolve(name, revision=None, metadata_only=False):
     if p.exists():
         return p
     from huggingface_hub import snapshot_download
-    return Path(snapshot_download(name, revision=revision, allow_patterns=METADATA_FILES if metadata_only else None))
+    # (prepared/: start-up kernels per GPU class; basal-serve fetches its own one, prepared.fetch)
+    return Path(snapshot_download(name, revision=revision, allow_patterns=METADATA_FILES if metadata_only else None,
+                                  ignore_patterns=None if metadata_only else ["prepared/*"]))
 
 
 def default_device():

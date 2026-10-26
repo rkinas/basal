@@ -83,3 +83,82 @@ def test_prepare_needs_a_gpu(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(SystemExit, match="CUDA GPU"):
         prepared.main(["--model", "x"])
+
+
+def gdn_model(d):
+    return model(d, layer_types=["linear_attention", "full_attention"])
+
+
+def test_key_of_a_shipped_directory(tmp_path, monkeypatch):
+    """What a directory built on the release machine must share with a user's start: the Python minor version only
+    (patch releases do not change compiled code); fla's version only for Qwen3.5 models, whose kernels it runs."""
+    monkeypatch.setattr("platform.python_version_tuple", lambda: ("3", "12", "13"))
+    assert prepared.environment()["python"] == "3.12"
+    m, g = model(tmp_path / "m"), gdn_model(tmp_path / "g")
+    assert "fla" not in prepared.key_fields(m, "fast", env=ENV)
+    assert prepared.key(prepared.key_fields(m, "fast", env=ENV)) == prepared.key(
+        prepared.key_fields(m, "fast", env=dict(ENV, fla=None)))  # a Gemma 4 / Llama start with or without fla
+    assert prepared.key_fields(g, "fast", env=ENV)["fla"] == "0.5.2"
+    assert prepared.key(prepared.key_fields(g, "fast", env=ENV)) != prepared.key(
+        prepared.key_fields(g, "fast", env=dict(ENV, fla="0.5.3")))
+
+
+def test_fetch_from_the_model_repository(tmp_path, monkeypatch):
+    """--prepared auto with a Hugging Face model: prepared/<key>/ of its repository only (the files its manifest
+    lists), next to the snapshot; none when the repository has no such key, its fields differ or the Hub fails."""
+    import huggingface_hub
+    snap = gdn_model(tmp_path / "snap")
+    f = prepared.key_fields(snap, "fast", env=ENV)
+    k = prepared.key(f)
+    repo = {f"prepared/{k}/manifest.json": json.dumps(dict(fields=f, key=k, files=["inductor.bin", "manifest.json"])),
+            f"prepared/{k}/inductor.bin": "kernels"}
+    asked = []
+
+    def download(name, filename, revision=None):
+        asked.append((name, filename, revision))
+        if filename not in repo:
+            raise FileNotFoundError(filename)
+        p = snap / filename
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(repo[filename])
+        return str(p)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    d = prepared.fetch("Remek/x", "main", f)
+    assert d == snap / "prepared" / k and (d / "inductor.bin").read_text() == "kernels"
+    assert [a[1] for a in asked] == [f"prepared/{k}/manifest.json", f"prepared/{k}/inductor.bin"]
+    assert prepared.locate(snap, f) == d  # the next start finds it in the snapshot
+    other = prepared.key_fields(snap, "fast", env=dict(ENV, gpu="NVIDIA A100"))
+    assert prepared.fetch("Remek/x", "main", other) is None  # not in the repository
+    repo[f"prepared/{prepared.key(other)}/manifest.json"] = json.dumps(dict(fields=f, key=prepared.key(other)))
+    assert prepared.fetch("Remek/x", "main", other) is None  # a manifest for other fields is not used
+
+
+def test_download_leaves_prepared_out(monkeypatch, tmp_path):
+    import huggingface_hub
+    from basal.engine import resolve
+    seen = {}
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda name, **kw: (seen.update(kw), str(tmp_path))[1])
+    resolve("Remek/x-not-local")
+    assert seen["ignore_patterns"] == ["prepared/*"] and seen["allow_patterns"] is None
+    resolve("Remek/x-not-local", metadata_only=True)
+    assert seen["ignore_patterns"] is None
+
+
+def test_broken_inductor_file_is_left_out(tmp_path, monkeypatch):
+    def broken(b):
+        raise EOFError("truncated")
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", broken)
+    (tmp_path / "inductor.bin").write_bytes(b"x")
+    assert prepared.load(tmp_path)["inductor"] == "not loaded (EOFError)"
+
+
+def test_save_lists_its_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"kernels", None))
+    man = prepared.save(tmp_path / "p", dict(ENV, architecture="a", mode="fast", dtype="bfloat16", attn="auto"))
+    assert man["files"] == ["inductor.bin", "manifest.json"]
+
+
+def test_prepare_into_model_needs_a_local_directory(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    with pytest.raises(SystemExit, match="local model directory"):
+        prepared.main(["--model", "Remek/not-a-dir", "--into-model"])
