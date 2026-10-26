@@ -617,8 +617,10 @@ while without the cache it grows with it:
 | | 256-511 | 53 | 1,002 ms | 530 ms | 1.89x |
 | | >= 512 | 11 | 1,382 ms | 554 ms | **2.5x** |
 
-- Each configuration is deterministic: its two runs give bit-identical probabilities. A cached state gives the same
-  probabilities as its first, uncached request with the cache on, in any order of the requests.
+- Each configuration is deterministic: its two runs give bit-identical probabilities. A repeated state gives the same
+  probabilities as its first request. A state that continues another cached state is computed in two parts (the cached
+  prefix, then its new tokens), so with bf16 / 8-bit weights its probabilities can differ in the last bits from the
+  same state computed whole, i.e. they depend on which states were cached before it, as in the comparison below.
 - Against the server without the cache, the probabilities are not bit-identical. The shared prefix is computed in two
   forwards (the state, then the rest over it) instead of one, and bf16 / 8-bit kernels round differently for other row
   counts. In fp32 the two paths agree:

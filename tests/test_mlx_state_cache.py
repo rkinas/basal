@@ -151,3 +151,33 @@ def test_a_continuation_never_runs_2_to_8_tokens(tmp_path, new):
     got = be.run_shared([([s2 + x for x in q], lids, len(s2))])[0]
     assert seen[0] == be.MIN_CONTINUE
     assert close(reference(m, [s2 + x for x in q], lids), got)
+
+
+@pytest.mark.parametrize("rope, ok", [
+    (None, True),
+    ({"rope_type": "linear", "rope_theta": 1e6, "factor": 2.0}, True),
+    ({"rope_type": "llama3", "rope_theta": 1e6, "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+      "original_max_position_embeddings": 64}, True),
+    ({"rope_type": "dynamic", "rope_theta": 1e6, "factor": 2.0}, False),  # base depends on the length of the call
+    ({"rope_type": "yarn", "rope_theta": 1e6, "factor": 2.0, "original_max_position_embeddings": 64}, False),
+])
+def test_the_cache_needs_a_static_rope(tmp_path, monkeypatch, rope, ok):
+    """Cached keys are continued in forwards of other lengths, so the server refuses the cache for a RoPE that depends
+    on the sequence length; Gemma 4's proportional RoPE (basal-omni) has fixed frequencies and is accepted."""
+    pytest.importorskip("mlx.core")
+    from types import SimpleNamespace
+
+    from basal import engine
+    from tests.test_mlx import tiny_gemma4
+    tiny_llama(tmp_path, rope)
+    assert mlx_stub(tmp_path)._cache_rope_ok() is ok
+    tok = SimpleNamespace(pad_token="<pad>", eos_token="</s>", pad_token_id=0)  # no tokenizer files here
+    monkeypatch.setattr(engine.AutoTokenizer, "from_pretrained", lambda *a, **k: tok)
+    if ok:
+        assert engine.MLXBackend(tmp_path, state_cache_gb=0.1).state_cache is not None
+    else:
+        with pytest.raises(SystemExit, match="RoPE"):
+            engine.MLXBackend(tmp_path, state_cache_gb=0.1)
+        assert engine.MLXBackend(tmp_path).state_cache is None  # without the cache it serves as before
+    tiny_gemma4(tmp_path / "g4")
+    assert mlx_stub(tmp_path / "g4")._cache_rope_ok()

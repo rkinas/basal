@@ -1534,7 +1534,8 @@ def add_engine_args(ap):
                     help="CUDA graph engine and --mode mlx: keep the keys and values of request states on the GPU "
                          "up to this many GB (least recently used evicted); a later request with the same state "
                          "computes only its questions and options, one whose state begins with a cached one only its "
-                         "new tokens (0: off)")
+                         "new tokens (0: off). The cache is shared by all clients: a client can tell from the response "
+                         "time whether a state it guesses is cached")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
                     help="CUDA graph engine and --mode mlx: compute the template prefix (chat template, system "
                          "prompt, the header up to the state) once and run short requests over its cached keys and "
