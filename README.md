@@ -457,7 +457,7 @@ torchao modes require compatible NVIDIA hardware. See [Serving modes](#serving-m
 
 ```bash
 make serve                                      # automatic backend selection
-make serve MODE=mlx MODEL=Remek/basal-1.0-1.5B
+make serve MODE=mlx MODEL=Remek/basal-2.0-mini-MLX-8bit
 make serve MODE=fast-nocompile PORT=8001
 make serve MODE=fast-exit ARGS='--early-exit 0.99'
 make serve MODE=gguf GGUF='/path with spaces/model.gguf'

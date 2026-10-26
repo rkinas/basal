@@ -51,9 +51,19 @@ class MakefileTest(unittest.TestCase):
         self.assertEqual(self.arguments("serve"), ["-m", "basal.server", "--host", "127.0.0.1", "--port", "8000"])
         self.assertEqual(self.arguments("bench"), ["-m", "basal.bench"])
 
+    def help_modes(self):
+        line = next(line for line in self.command("help").stdout.splitlines() if line.startswith("MODE: "))
+        return line.split()[1:]
+
+    def test_help_lists_the_server_modes(self):
+        try:
+            from basal.server import MODES
+        except ImportError:  # the run without basal installed (test_interpreter_path_with_spaces)
+            self.skipTest("basal is not importable here")
+        self.assertEqual(self.help_modes(), list(MODES))
+
     def test_modes_and_quoted_values(self):
-        modes = "eager fast fast-nocompile fast-exit fp8 nvfp4 vllm sglang mlx mlx-q8 mps gguf strix tpu ollama llamacpp"
-        for mode in modes.split():  # basal.server.MODES (2.4.1)
+        for mode in self.help_modes():  # basal.server.MODES (test_help_lists_the_server_modes)
             with self.subTest(mode=mode):
                 args = self.arguments("serve", MODE=mode, MODEL="owner's model; literal", GGUF=self.input,
                                       OLLAMA_MODEL="local import", HOST="127.0.0.1", PORT="8001",
