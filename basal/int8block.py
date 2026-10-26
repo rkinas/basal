@@ -159,7 +159,8 @@ def linear(x, w, ws, bias=None):
 
 
 class Int8BlockLinear(BlockFP8Linear):
-    """A linear layer with a block-scaled int8 weight (quantize) and an optional bias; part(o, n) as BlockFP8Linear's."""
+    """A linear layer with a block-scaled int8 weight (quantize) and an optional bias; part(o, n) as
+    BlockFP8Linear's."""
 
     @classmethod
     def of(cls, lin):

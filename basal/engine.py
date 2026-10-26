@@ -1267,15 +1267,15 @@ class GraphBackend(EagerBackend):
             if getattr(self.model.model, name, None) is not None:
                 setattr(self.model.model, name, None)
         stream = None
-        if self.quant_load == "cpu":  # all but the decoder layers to the GPU now; Gemma4Graph brings the layers one at a
-            # time and quantises each before the next (the GPU holds one bf16 layer at most, not all 59 GB of ultra's)
+        if self.quant_load == "cpu":  # all but the decoder layers to the GPU now; Gemma4Graph brings the layers one at
+            # a time and quantises each before the next (the GPU holds one bf16 layer at most, not all 59 GB of ultra's)
             stream = self.dev
             gemma4_graph.move_except(self.model, stream, gemma4_graph.text_model(self.model).layers)
         torch.cuda.empty_cache()
         block = quant == "fp8" and fp8_scaling == "block"  # --fp8-scaling block: basal/fp8block.py, after merging
         fp4 = quant == "nvfp4" and nvfp4_amax is not None  # basal/nvfp4.py with calibrated input scales (--nvfp4-amax)
         int8 = quant == "int8"  # basal/int8block.py: fp8block's blocks with int8 values (GPUs without FP8)
-        if quant and not block and not fp4 and not int8:  # NVFP4: its vLLM ports failed (15 Oct); torchao FP8 (per-row scales) on 1.1-max failed
+        if quant and not (block or fp4 or int8):  # NVFP4: its vLLM ports failed (15 Oct); torchao FP8 (per-row scales) on 1.1-max failed
             # the port gate (2-10 options at margin >= 0.2: 0.9892, bar 0.9893; 20 Oct). The -FP8 checkpoints run in
             # --mode fast / fp8 as stored
             raise ValueError(f"--mode {quant} quantisation at load time is not available for basal-omni (Gemma 4) "

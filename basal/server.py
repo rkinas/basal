@@ -46,7 +46,8 @@ import torch
 
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, QUANT_LOAD_EXPERIMENTAL, SGLangBackend,
-                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused, resolve, set_fp8_fast_accum)
+                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
+                     resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
@@ -116,8 +117,8 @@ def nvfp4_calibration_refused(md, kind, quant, a):
     if not is_gemma4_dir(md) or (Path(md) / f"CALIBRATION.{quant}.json").exists():
         return None
     name = quant.upper() if quant == "nvfp4" else quant
-    return (f"--mode {quant} with basal-omni needs its own calibration: CALIBRATION.{quant}.json in the model folder or "
-            f"--calibration <file> (fitted on {name} readouts; the bf16 thresholds do not hold)")
+    return (f"--mode {quant} with basal-omni needs its own calibration: CALIBRATION.{quant}.json in the model folder "
+            f"or --calibration <file> (fitted on {name} readouts; the bf16 thresholds do not hold)")
 
 
 def default_mode(model=None, revision=None):
@@ -561,8 +562,8 @@ def check_calibration(cal, fmt, path):
 
 
 def calibration_name(kind, quant, preset=None):
-    """Engine name of the per-engine calibration file CALIBRATION.<engine>.json: the quantised CUDA modes (fp8, nvfp4, int8),
-    the engines other than the basal bf16 path and a --vllm-preset other than the default (vllm.<preset>); None =
+    """Engine name of the per-engine calibration file CALIBRATION.<engine>.json: the quantised CUDA modes (fp8, nvfp4,
+    int8), the engines other than the basal bf16 path and a --vllm-preset other than the default (vllm.<preset>); None =
     CALIBRATION.json."""
     if kind in ("graph", "exit") and quant in ("fp8", "nvfp4", "int8"):
         return quant

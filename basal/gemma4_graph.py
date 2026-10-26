@@ -356,8 +356,8 @@ class Gemma4Graph:
         """NVFP4 weights (basal/nvfp4.py) for q / k / v / o and gate / up / down (scope "all") or gate / up / down only
         ("mlp": attention stays bf16), merged or not, with the input global scales of `amax` (a JSON file or dict
         {"<layer>.<projection>": the calibrated largest |input|}). The first and the last `keep` layers stay bf16, as
-        do the embeddings and the head. Layer by layer, the bf16 weights freed as it goes; layers: their indices (default
-        every layer). -> the number of GEMMs."""
+        do the embeddings and the head. Layer by layer, the bf16 weights freed as it goes; layers: their indices
+        (default every layer). -> the number of GEMMs."""
         import json
         from .nvfp4 import NVFP4Linear, build, fits
         if scope not in ("all", "mlp"):
