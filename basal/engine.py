@@ -2577,7 +2577,7 @@ class GraphBackend(EagerBackend):
             cur, tot = [], 0
             for k in plain:
                 n = len(packs[k][0])
-                if n > self.PLAIN_LENS[-1]:
+                if n > self.PLAIN_LENS[-1] or n > self.COMPACT_LENS[-1]:  # _fit_grid can cut COMPACT_LENS below PLAIN_LENS
                     out.append(([k], "plain"))
                     continue
                 if cur and (len(cur) == self.COMPACT_SEQS or tot + n > self.COMPACT_LENS[-1]):

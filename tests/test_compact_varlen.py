@@ -92,3 +92,17 @@ def test_unsupported_compact_refused_before_loading(tmp_path, monkeypatch):
     monkeypatch.setattr("basal.engine.set_attention", lambda *_, **__: "fa2")
     with pytest.raises(ValueError, match="--batches compact needs .* torch's varlen attention"):
         GraphBackend(str(tmp_path), dtype="float32", batches="compact")
+
+
+def test_prompts_past_the_largest_compact_graph_run_plain():
+    """With little free memory _fit_grid cuts COMPACT_LENS to the token budget, below PLAIN_LENS (basal-omni ultra under
+    a 32 GB ballast: compact 1,536, plain 1,664). A single prompt between the two runs in a plain graph; it was packed
+    into a compact row and failed ("too long: 1584 > 1536", HTTP 500)."""
+    be = object.__new__(GraphBackend)
+    be.compact, be.prefix = True, False
+    be.PLAIN_LENS, be.COMPACT_LENS = [512, 1024, 1664], [256, 512, 1024, 1536]
+    units = [(([1] * n, None, None, None, [0]),) for n in (300, 1584, 700, 2000, 1500)]
+    out = be._forwards(units)
+    assert ([1], "plain") in out and ([3], "plain") in out
+    assert sorted(k for idx, kind in out if kind == "compact" for k in idx) == [0, 2, 4]
+    assert all(sum(len(units[k][0][0]) for k in idx) <= 1536 for idx, kind in out if kind == "compact")
