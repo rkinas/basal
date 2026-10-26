@@ -887,6 +887,9 @@ def option_isolation_refused(kind, a):
         return "a model with isolated options needs the engine's own Gemma 4 forward (--eager-forward basal)"
     if getattr(a, "media", "off") == "on":
         return "--media on: not with isolated options in this version (text prompts only)"
+    if getattr(a, "reread", None) is not None:
+        return ("--reread reads the state twice (the state_twice layout), which a model with isolated options was not "
+                "trained on")
     return None
 
 

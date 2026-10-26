@@ -127,7 +127,7 @@ benchmarking a GPU.
   option, suffix), as such a model is trained; the tokenizer must tokenize those pieces as the whole prompt (Gemma 4
   does; the engine checks it at start). In this version each prompt is read whole by the engine's own eager Gemma 4
   forward: `--mode eager`, SOAM off (its default for such a model; `--soam on` is refused), no `--state-cache-gb` /
-  `--prefix-cache`, text only. `/v1/models` reports `"option_isolation": true`.
+  `--prefix-cache`, no `--reread`, text only. `/v1/models` reports `"option_isolation": true`.
 - **Long states**: `--context-overflow truncate` (the default) cuts the middle of a state that does not fit the
   context (the first 1/3 and the last 2/3 of the kept tokens, `--truncate-head`; the question and options stay whole)
   and says what was cut in `usage.truncated`; `--context-overflow refuse` returns HTTP 422 instead. The context is

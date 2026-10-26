@@ -139,6 +139,7 @@ def test_eager_backend_and_server_refusals(tmp_path, monkeypatch):
     assert "--state-cache-gb" in option_isolation_refused("eager", ap.parse_args(["--state-cache-gb", "4"]))
     assert "--mode eager" in option_isolation_refused("graph", ap.parse_args([]))
     assert "forward" in option_isolation_refused("eager", ap.parse_args(["--eager-forward", "hf"]))
+    assert "--reread" in option_isolation_refused("eager", ap.parse_args(["--reread", "0.7"]))
     assert models_payload("m", "eager", {}, option_isolation=True)["models"][0]["option_isolation"] is True
     assert "option_isolation" not in models_payload("m", "eager", {})["models"][0]
 
