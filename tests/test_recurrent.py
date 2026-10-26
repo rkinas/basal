@@ -568,6 +568,8 @@ def test_compact_graphs_equal_eager_on_cuda(monkeypatch, tmp_path, dtype, attn, 
     prefixes, against eager; a replayed graph with other prompts answers as a fresh capture."""
     if attn == "auto" and dtype == "bfloat16" and engine_module.attention_available("fa3"):
         pytest.skip("FlashAttention 3 is not here")
+    if attn == "fa2" and engine_module.torch_varlen_available(torch.bfloat16):  # the engine refuses compact rows then
+        pytest.skip(f"torch's varlen attention: {engine_module.torch_varlen_available(torch.bfloat16)}")
     tiny_qwen35(tmp_path / "tiny", layers=LAST_ATTENTION, head_dim=64)
     ref = EagerBackend(str(tmp_path / "tiny"), dtype, device="cuda")
     for kw in ({}, {"readout_layer": "on"}):
