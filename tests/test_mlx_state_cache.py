@@ -1,18 +1,19 @@
 """MLX backend with a state cache (--state-cache-gb / --prefix-cache on --mode mlx): a group cut at its state takes the
 state's keys / values from the cache across requests. Cold and cached requests give the same probabilities, equal to
 the PyTorch readout; single prompts are cut too; a state that begins with a cached one computes only its new tokens;
-entries are copies within the byte budget."""
+entries are copies within the byte budget. Each test runs with mlx-lm's forward and with basal's (--mlx-forward
+basal), which continues the cached keys / values in its own loop."""
 import gc
 import random
 
 import pytest
 
 from basal.engine import StateCache
-from tests.test_mlx import LIDS, STATE, TOKS, mlx_stub, reference, tiny_llama
+from tests.test_mlx import FORWARDS, LIDS, STATE, TOKS, mlx_stub, reference, tiny_llama
 
 
-def cached_stub(path, gb=1.0, packed=False):
-    be = mlx_stub(path, packed=packed)
+def cached_stub(path, gb=1.0, packed=False, forward="mlx-lm"):
+    be = mlx_stub(path, packed=packed, forward=forward)
     be.state_cache = StateCache(gb * 2 ** 30)
     return be
 
@@ -22,7 +23,15 @@ def close(ref, got, tol=2e-4):
 
 
 def count_tokens(be):
-    """Records the token count of every forward of the decoder."""
+    """Records the token count of every forward of the decoder (basal's forward: of every call of its loop)."""
+    if be.fwd is not None:
+        seen, run = [], be.fwd._run
+
+        def counting(ids, *a, **kw):
+            seen.append(ids.shape[0] * ids.shape[1])
+            return run(ids, *a, **kw)
+        be.fwd._run = counting
+        return seen
     seen, inner = [], be.lm.model
 
     class Counting:
@@ -37,10 +46,11 @@ def count_tokens(be):
     return seen
 
 
-def test_cached_state_gives_the_same_answers(tmp_path):
+@FORWARDS
+def test_cached_state_gives_the_same_answers(tmp_path, forward):
     pytest.importorskip("mlx.core")
     m = tiny_llama(tmp_path)
-    be = cached_stub(tmp_path)
+    be = cached_stub(tmp_path, forward=forward)
     cold = be.run_shared([(TOKS, LIDS, len(STATE))])[0]
     warm = be.run_shared([(TOKS, LIDS, len(STATE))])[0]
     assert warm == cold  # the same forwards over the same keys / values
@@ -49,19 +59,21 @@ def test_cached_state_gives_the_same_answers(tmp_path):
     assert (st["entries"], st["misses"], st["hits"]) == (1, 1, 1)
 
 
-def test_a_cut_is_ignored_without_a_cache(tmp_path):
+@FORWARDS
+def test_a_cut_is_ignored_without_a_cache(tmp_path, forward):
     pytest.importorskip("mlx.core")
     tiny_llama(tmp_path)
-    be = mlx_stub(tmp_path)
+    be = mlx_stub(tmp_path, forward=forward)
     assert be.run_shared([(TOKS, LIDS, len(STATE))])[0] == be.run_shared([(TOKS, LIDS)])[0]
 
 
-def test_single_prompts_and_the_packed_path(tmp_path):
+@FORWARDS
+def test_single_prompts_and_the_packed_path(tmp_path, forward):
     """A single prompt with a cut reuses the cached state (it would otherwise go to the batches without a prefix); with
     --mlx-packed a cut group runs on the KV-cache path, an uncut one stays packed."""
     pytest.importorskip("mlx.core")
     m = tiny_llama(tmp_path)
-    be = cached_stub(tmp_path, packed=True)
+    be = cached_stub(tmp_path, packed=True, forward=forward)
     one = [TOKS[4]]
     first = be.run_shared([(one, [LIDS[4]], len(STATE))])[0]
     both = be.run_shared([(TOKS[:2], LIDS[:2], len(STATE)), (TOKS[2:4], LIDS[2:4])])
@@ -70,12 +82,13 @@ def test_single_prompts_and_the_packed_path(tmp_path):
     assert close(reference(m, TOKS[:4], LIDS[:4]), both[0] + both[1])
 
 
-def test_growing_state_computes_only_its_new_tokens(tmp_path):
+@FORWARDS
+def test_growing_state_computes_only_its_new_tokens(tmp_path, forward):
     """An agent trace: the second state is the first plus a new message. It continues the cached entry (one prefix hit,
     the entry replaced, not duplicated) and reads out as a fresh forward of its prompts."""
     pytest.importorskip("mlx.core")
     m = tiny_llama(tmp_path)
-    be = cached_stub(tmp_path)
+    be = cached_stub(tmp_path, forward=forward)
     rnd = random.Random(0)
     s1 = [rnd.randrange(1, 64) for _ in range(300)]  # longer than one 256-token block of the prefix index
     s2 = s1 + [rnd.randrange(1, 64) for _ in range(40)]
@@ -90,13 +103,14 @@ def test_growing_state_computes_only_its_new_tokens(tmp_path):
     assert close(reference(m, [s2 + x for x in q], lids), got)
 
 
-def test_entries_are_copies_within_the_budget(tmp_path):
+@FORWARDS
+def test_entries_are_copies_within_the_budget(tmp_path, forward):
     """An entry holds exactly its state's keys / values, not the 256-token buffers of mlx-lm's KVCache they were
     computed in (a slice would keep its whole buffer alive), and the least recently used state is evicted when the next
     one would exceed the budget."""
     mx = pytest.importorskip("mlx.core")
     tiny_llama(tmp_path)
-    be = cached_stub(tmp_path)
+    be = cached_stub(tmp_path, forward=forward)
     be.run_shared([(TOKS, LIDS)])  # warm-up without the cache
     gc.collect(); mx.clear_cache()
     before = mx.get_active_memory()
@@ -115,13 +129,14 @@ def test_entries_are_copies_within_the_budget(tmp_path):
     assert (st["entries"], st["evictions"]) == (1, 1)
 
 
-def test_same_answers_as_without_the_cache_in_fp32(tmp_path):
+@FORWARDS
+def test_same_answers_as_without_the_cache_in_fp32(tmp_path, forward):
     """The cached run splits the shared prefix at the cut (the state, then the rest of the prefix over it), so in bf16 /
     quantised weights it may differ from the uncached run in the last bits; in fp32 (the tiny model) only by rounding,
     for a repeated state and for a state that grows from a cached one."""
     pytest.importorskip("mlx.core")
     tiny_llama(tmp_path)
-    plain, cached = mlx_stub(tmp_path), cached_stub(tmp_path)
+    plain, cached = mlx_stub(tmp_path, forward=forward), cached_stub(tmp_path, forward=forward)
     rnd = random.Random(1)
     s1 = [rnd.randrange(1, 64) for _ in range(270)]
     s2 = s1 + [rnd.randrange(1, 64) for _ in range(30)]
@@ -135,13 +150,14 @@ def test_same_answers_as_without_the_cache_in_fp32(tmp_path):
     assert cached.state_cache.stats()["prefix_hits"] == 1
 
 
+@FORWARDS
 @pytest.mark.parametrize("new", [2, 5, 8])
-def test_a_continuation_never_runs_2_to_8_tokens(tmp_path, new):
+def test_a_continuation_never_runs_2_to_8_tokens(tmp_path, new, forward):
     """MLX's fused attention loses bf16 precision for a few queries over a cache (MLXBackend.MIN_CONTINUE): a state that
     grows by 2-8 tokens starts its forward earlier, over a shorter part of the cached entry."""
     pytest.importorskip("mlx.core")
     m = tiny_llama(tmp_path)
-    be = cached_stub(tmp_path)
+    be = cached_stub(tmp_path, forward=forward)
     rnd = random.Random(2)
     s1 = [rnd.randrange(1, 64) for _ in range(300)]
     s2 = s1 + [rnd.randrange(1, 64) for _ in range(new)]

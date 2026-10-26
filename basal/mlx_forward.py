@@ -180,11 +180,12 @@ class MLXForward:
 
     # ---- the forward ---------------------------------------------------------------------------------------------
 
-    def prefix(self, ids):
+    def prefix(self, ids, past=None):
         """ids [1, P] -> per own-key layer up to the last one, (keys, values) [1, H, P, D] of every position; nothing
-        after the last one's keys and values runs."""
+        after the last one's keys and values runs. past: those of the tokens before ids (M of them, a cached state),
+        which the forward continues (positions from M) -> keys / values of all M + P positions."""
         out = []
-        self._run(ids, None, None, None, None, out)
+        self._run(ids, None, past, None, None, out)
         return out
 
     def hidden(self, ids, ro, past=None, pos=None, mask=None, full=False):

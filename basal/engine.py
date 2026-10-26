@@ -3444,13 +3444,6 @@ class MLXBackend:
         forward continues over toks[m:] (positions m..)."""
         mx = self.mx
         from mlx_lm.models.cache import KVCache, make_prompt_cache
-        # plain caches: a sliding-window layer (Gemma 4) gets a rotating cache from mlx-lm, which keeps only the last
-        # window of the prefix; here every layer keeps the whole prefix and the window is applied by the mask
-        if self.fwd is not None:
-            kv = self.fwd.prefix(mx.array([toks]))
-            mx.eval(kv)
-            return kv
-        cache = [KVCache() for _ in make_prompt_cache(self.model)]
         m = 0
         if initial is not None:
             m = initial[0][0].shape[2]
@@ -3459,6 +3452,13 @@ class MLXBackend:
             if 1 < len(toks) - m < self.MIN_CONTINUE:  # start earlier: MIN_CONTINUE tokens over the shorter prefix
                 m = max(0, len(toks) - self.MIN_CONTINUE)
                 initial = [(k[..., :m, :], v[..., :m, :]) for k, v in initial] if m else None
+        if self.fwd is not None:  # basal/mlx_forward.py: the own-key layers' keys / values, continuing initial
+            kv = self.fwd.prefix(mx.array([list(toks[m:])]), past=initial)
+            mx.eval(kv)
+            return kv
+        # plain caches: a sliding-window layer (Gemma 4) gets a rotating cache from mlx-lm, which keeps only the last
+        # window of the prefix; here every layer keeps the whole prefix and the window is applied by the mask
+        cache = [KVCache() for _ in make_prompt_cache(self.model)]
         if initial is not None:
             for c, (k, v) in zip(cache, initial):  # the forward writes into new buffers, never into these
                 c.keys, c.values, c.offset = k, v, m
