@@ -485,12 +485,12 @@ def recurrent_refused(model, what, gdn=False):
     compact rows and caches hold attention keys and values only: a Gated DeltaNet layer would restart from zero state
     below a shared prefix and run across the prompts of a packed row, so the answers would be wrong without any error
     (v2.3.1 with the 0.8B pico, 21 Oct). Since 2.4 the CUDA graph engine carries the recurrent state of Qwen3.5 decoders
-    (gdn: basal/gdn_graph.py, --mode fast and fast-nocompile); fast-exit and mps still refuse them, and every other
-    recurrent model stays refused by all of them."""
+    (gdn: basal/gdn_graph.py, --mode fast and fast-nocompile; 2.5 also --mode mps); fast-exit still refuses them, and
+    every other recurrent model stays refused by all of them."""
     if gdn:
-        return (f"{model}: {what} (recurrent state: Gated DeltaNet, Qwen3.5). --mode fast-exit and --mode mps keep "
-                "attention keys and values only and would answer wrongly; serve it with --mode fast (CUDA), --mode "
-                "eager (exact) or --mode vllm")
+        return (f"{model}: {what} (recurrent state: Gated DeltaNet, Qwen3.5). --mode fast-exit keeps attention keys "
+                "and values only, between exit heads trained for Llama models, and would answer wrongly; serve it with "
+                "--mode fast (CUDA), --mode mps (Apple Silicon or the CPU), --mode eager (exact) or --mode vllm")
     return (f"{model}: {what} (recurrent state: Gated DeltaNet / linear attention, as in Qwen3.5). The CUDA graph "
             "engine (--mode fast, fast-nocompile, fast-exit, fp8, nvfp4) carries the recurrent state of Qwen3.5 "
             "decoders only, and --mode mps of none: they would answer wrongly; serve it with --mode eager (exact) or "
@@ -2856,6 +2856,15 @@ class MPSBackend(GraphBackend):
     to the longest packed row of the chunk."""
 
     streams, inflight = False, 1  # its own run_shared: no early readouts, one call at a time
+
+    def __new__(cls, model_dir=None, *args, **kwargs):
+        """MPSBackend(model_dir, ...) of a Qwen3.5 model with prefix sharing builds GDNMPSBackend (basal/gdn_graph.py,
+        basal 2.5), which carries the recurrent state through both passes."""
+        if cls is MPSBackend and model_dir is not None and kwargs.get("shared", args[1] if len(args) > 1 else True):
+            from .gdn_graph import GDNMPSBackend, is_gdn
+            if is_gdn(model_dir):
+                return super().__new__(GDNMPSBackend)
+        return super().__new__(cls)
 
     def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None):
         what = recurrent_layers(model_dir) if shared else None  # without sharing: EagerBackend's forwards (exact)
