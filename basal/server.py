@@ -45,8 +45,9 @@ from pathlib import Path
 import torch
 
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
-                     FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend, VLLM_PRESETS, VLLMBackend,
-                     fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused, resolve, set_fp8_fast_accum)
+                     FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, QUANT_LOAD_EXPERIMENTAL, SGLangBackend,
+                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
+                     resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
@@ -73,6 +74,7 @@ MODES = {
     "fast-exit": ("exit", None, True),      # "fast" + trained early exits, policy chosen per request
     "fp8": ("graph", "fp8", True),          # "fast" with torchao FP8 (Hopper / Blackwell)
     "nvfp4": ("graph", "nvfp4", True),      # "fast" with torchao NVFP4 (Blackwell, experimental)
+    "int8": ("graph", "int8", True),        # "fast" with block-scaled int8 (basal-omni ultra; Ampere and newer)
     "vllm": ("vllm", None, False),          # vLLM, for the ModelOpt FP8 / NVFP4 checkpoints
     "sglang": ("sglang", None, False),      # SGLang offline engine (1.5)
     "mlx": ("mlx", None, False),            # Apple Silicon, MLX (1.5): the MLX fp8 / fp4 exports or bf16 weights
@@ -104,16 +106,19 @@ def nvfp4_args(a, md=None, quant=None):
 
 
 def nvfp4_calibration_refused(md, kind, quant, a):
-    """None, or why basal-omni in NVFP4 is refused: it serves only with its own calibration (CALIBRATION.nvfp4.json in
-    the model folder, or --calibration). NVFP4 changes about 2% of the top answers and makes them more confident, so
-    the thresholds fitted on bf16 readouts do not hold."""
-    if quant != "nvfp4" or kind not in ("graph", "exit") or a.calibration or getattr(a, "no_calibration", False):
+    """None, or why basal-omni in NVFP4 or int8 is refused: it serves only with its own calibration
+    (CALIBRATION.nvfp4.json / CALIBRATION.int8.json in the model folder, or --calibration). NVFP4 changes about 2% of
+    the top answers and makes them more confident, so the thresholds fitted on bf16 readouts do not hold; int8 passed
+    its accuracy check with its own file."""
+    if quant not in ("nvfp4", "int8") or kind not in ("graph", "exit") or a.calibration \
+            or getattr(a, "no_calibration", False):
         return None
     from .gemma4_graph import is_gemma4_dir
-    if not is_gemma4_dir(md) or (Path(md) / "CALIBRATION.nvfp4.json").exists():
+    if not is_gemma4_dir(md) or (Path(md) / f"CALIBRATION.{quant}.json").exists():
         return None
-    return ("--mode nvfp4 with basal-omni needs its own calibration: CALIBRATION.nvfp4.json in the model folder or "
-            "--calibration <file> (fitted on NVFP4 readouts; the bf16 thresholds do not hold)")
+    name = quant.upper() if quant == "nvfp4" else quant
+    return (f"--mode {quant} with basal-omni needs its own calibration: CALIBRATION.{quant}.json in the model folder "
+            f"or --calibration <file> (fitted on {name} readouts; the bf16 thresholds do not hold)")
 
 
 def default_mode(model=None, revision=None):
@@ -557,10 +562,10 @@ def check_calibration(cal, fmt, path):
 
 
 def calibration_name(kind, quant, preset=None):
-    """Engine name of the per-engine calibration file CALIBRATION.<engine>.json: the quantised CUDA modes (fp8, nvfp4),
-    the engines other than the basal bf16 path and a --vllm-preset other than the default (vllm.<preset>); None =
+    """Engine name of the per-engine calibration file CALIBRATION.<engine>.json: the quantised CUDA modes (fp8, nvfp4,
+    int8), the engines other than the basal bf16 path and a --vllm-preset other than the default (vllm.<preset>); None =
     CALIBRATION.json."""
-    if kind in ("graph", "exit") and quant in ("fp8", "nvfp4"):
+    if kind in ("graph", "exit") and quant in ("fp8", "nvfp4", "int8"):
         return quant
     if kind == "vllm" and preset not in (None, "default"):
         return f"vllm.{preset}"
@@ -1004,6 +1009,10 @@ class Server:
             deterministic_setup(kind)
         elif getattr(a, "fp8_accum", "fast") == "full":  # FP8 checkpoints: the same GEMM arithmetic as --deterministic
             set_fp8_fast_accum(False)
+        if getattr(a, "state_cache_bits", 16) != 16 and (kind != "graph" or not (
+                getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on")):
+            raise SystemExit("--state-cache-bits 8 needs --state-cache-gb or --prefix-cache on in the CUDA graph "
+                             "engine (fast, fast-nocompile, fp8, int8, nvfp4)")
         if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit")):
             raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) and is "
                              "not combined with --deterministic (a cached state changes the shapes of the forwards)")
@@ -1020,6 +1029,11 @@ class Server:
             raise SystemExit("--fp8-scaling block needs --mode fp8")
         if getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS) < 0:
             raise SystemExit("--fp8-bf16-layers: give 0 or more layers")
+        if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4",
+                                                                                                        "int8")):
+            raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
+        if getattr(a, "quant_load", "gpu") == "cpu" and os.environ.get("BASAL_EXPERIMENTAL_QUANT_LOAD") != "1":
+            raise SystemExit(QUANT_LOAD_EXPERIMENTAL)
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
         attn = getattr(a, "attn", "auto")
@@ -1144,7 +1158,8 @@ class Server:
                                         gemma_attn=getattr(a, "gemma_attn", "auto"),
                                         fp8_scaling=getattr(a, "fp8_scaling", "auto"),
                                         fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
-                                        **nvfp4_args(a, md, quant))
+                                        quant_load=getattr(a, "quant_load", "gpu"),
+                                        state_cache_bits=getattr(a, "state_cache_bits", 16), **nvfp4_args(a, md, quant))
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
         if getattr(a, "lanes", 1) > 1:
             t = time.time()
@@ -1854,8 +1869,8 @@ def add_engine_args(ap):
     ap.add_argument("--mode", choices=list(MODES), default=None,
                     help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx / mlx-lm), tpu on a TPU VM "
                          "with basal[tpu], eager otherwise")
-    ap.add_argument("--quant", choices=["fp8", "nvfp4", "q8"], default=None,
-                    help="override the quantisation of the mode (fp8 / nvfp4: CUDA graph modes, q8: mlx)")
+    ap.add_argument("--quant", choices=["fp8", "nvfp4", "int8", "q8"], default=None,
+                    help="override the quantisation of the mode (fp8 / nvfp4 / int8: CUDA graph modes, q8: mlx)")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--media", choices=["off", "on"], default="off",
                     help="on: requests may carry images / audio (\"media\", basal/media.py); --mode eager or vllm "
@@ -1977,6 +1992,10 @@ def add_engine_args(ap):
                     help="CUDA graph engine: keep the keys and values of request states on the GPU up to this many GB "
                          "(least recently used evicted); a later request with the same state computes only its "
                          "questions and options (0: off)")
+    ap.add_argument("--state-cache-bits", dest="state_cache_bits", type=int, choices=[16, 8], default=16,
+                    help="--state-cache-gb / --prefix-cache: 16 keeps the cached keys and values as computed; 8 stores "
+                         "them as 8-bit integers with a scale per group (keys per channel, values per token): about "
+                         "1.7x more cached states per GB, answers close to (not equal to) the uncached ones")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
                     help="CUDA graph engine: compute the template prefix (chat template, system prompt, the header up "
                          "to the state) once and run short requests over its cached keys and values")
@@ -1999,8 +2018,14 @@ def add_engine_args(ap):
                          "128 weight block and per 128 features of each token (basal-omni ultra only; other "
                          "basal-omni models are refused); auto: block for basal-omni, row otherwise")
     ap.add_argument("--fp8-bf16-layers", dest="fp8_bf16_layers", type=int, default=FP8_BF16_LAYERS,
-                    help="--mode fp8 with block scaling: the first and the last this many decoder layers keep bf16 "
-                         f"weights (default {FP8_BF16_LAYERS}; 0 = every layer in FP8)")
+                    help="--mode fp8 with block scaling, int8, nvfp4: the first and the last this many decoder layers "
+                         f"keep bf16 weights (default {FP8_BF16_LAYERS}; 0 = every layer quantised)")
+    ap.add_argument("--quant-load", dest="quant_load", choices=["gpu", "cpu"], default="gpu",
+                    help="--mode fp8 (block scaling) / int8 / nvfp4 with basal-omni: where the bf16 weights are held "
+                         "while they are quantised. gpu: all on the GPU first (needs their full size); cpu: in host "
+                         "memory, one decoder layer at a time to the GPU, quantised there (GPU memory about the "
+                         "quantised size: ultra in FP8 or int8 on cards under 64 GB; the same weights). Experimental: "
+                         "needs BASAL_EXPERIMENTAL_QUANT_LOAD=1")
     ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
                     help="--mode nvfp4 with basal-omni ultra (other basal-omni models are refused): the calibrated "
                          "input amax of each decoder linear (JSON, {\"amax\": {\"<layer>.<proj>\": value}}; default: the "

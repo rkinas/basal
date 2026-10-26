@@ -70,7 +70,10 @@ def linear(x, p):
     block-scaled FP8 GEMM (fp8block.linear)."""
     if len(p) == 2:
         return F.linear(x, p[0], p[1])
-    if len(p) == 3:
+    if len(p) == 3:  # block-scaled: FP8, or int8 (int8block.Int8BlockLinear, a BlockFP8Linear with int8 weights)
+        if p[0].dtype == torch.int8:
+            from . import int8block
+            return int8block.linear(x, *p)
         return fp8block.linear(x, *p)
     if len(p) == 5:
         return nvfp4.linear(x, *p)

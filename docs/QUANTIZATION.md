@@ -259,7 +259,24 @@ with confidence bounds), NVFP4 by a narrow margin. Use block FP8 when ultra has 
 traffic; use NVFP4 when throughput on Blackwell matters more than the last half point of accuracy. `--nvfp4-scope mlp`
 quantises the MLP only (1.6x); it was not better than the full variant.
 
-## basal-1.5: the ModelOpt checkpoints
+### int8 for GPUs without FP8 (2.5)
+
+Ampere GPUs (A100, A6000, RTX 30xx) have no FP8 tensor cores. `--mode int8` gives ultra the block layout of block FP8
+with int8 values: weights in 128 x 128 blocks and activations in 128-feature tiles of each token, each with its own
+scale (largest value / 127). The GEMM multiplies int8 by int8 into int32 for each 128-deep slice, which is exact, and
+applies both scales in fp32. The first and the last 2 decoder layers stay bf16, as in FP8. It needs a GPU of compute
+capability 8.0 or newer and the model's own calibration (`CALIBRATION.int8.json`, or `--calibration`). The weights take
+about 31 GB.
+
+| ultra, calibration test (8,560 decisions) | bf16 | int8 |
+|---|---|---|
+| top answer as bf16 | - | 99.4% |
+| answers accepted at the 1% target | 56.8% | 56.7% (-0.16 points, 95% interval -0.40 to +0.08) |
+| error of those answers | 0.47% | 0.52% |
+
+It kept the same paired check as FP8 and NVFP4. On basal-omni-1.0-max (12B) the error of the accepted answers rose to
+1.13% (target 1%), so int8 serves ultra only. Speeds on Ampere cards will come from users' measurements.
+
 
 `Remek/basal-1.5-4.5B-FP8` / `-NVFP4`, `Remek/basal-1.5-max-FP8` / `-NVFP4` and `Remek/basal-1.5-mini-FP8` were produced with [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) post-training quantisation
 (`FP8_DEFAULT_CFG` / `NVFP4_DEFAULT_CFG`), calibrated on basal-1.5 calibration decisions, with the token embeddings and

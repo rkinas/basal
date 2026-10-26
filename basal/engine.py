@@ -515,6 +515,29 @@ def fp8_refused():
 FP8_BF16_LAYERS = 2
 
 
+def quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4, fp8_checkpoint):
+    """Why --quant-load cannot be used as given (None when it can): cpu keeps the bf16 weights in host memory and
+    quantises one decoder layer at a time on the GPU, so it needs a quantisation made at load time (--mode fp8 with
+    block scaling, --mode nvfp4 with --nvfp4-amax) of a basal-omni (Gemma 4) model."""
+    if quant_load not in ("gpu", "cpu"):
+        return f"--quant-load {quant_load!r}: gpu or cpu"
+    if quant_load == "cpu" and (fp8_checkpoint or not gemma4 or not (
+            quant == "fp8" and fp8_scaling == "block" or quant == "nvfp4" and nvfp4_amax is not None
+            or quant == "int8")):
+        return ("--quant-load cpu: basal-omni (Gemma 4) in --mode fp8 (block scaling), int8, or nvfp4 with "
+                "--nvfp4-amax, from its bf16 weights")
+    if quant_load == "cpu" and os.environ.get("BASAL_EXPERIMENTAL_QUANT_LOAD") != "1":
+        return QUANT_LOAD_EXPERIMENTAL
+    return None
+
+
+# --quant-load cpu loads the same weights as the gpu load (checked on ultra in FP8: every tensor, and every answer on an
+# 80 GB H100), but a GPU with less free memory runs smaller graph shapes, so its answers can differ slightly
+QUANT_LOAD_EXPERIMENTAL = ("--quant-load cpu is experimental in this version: the weights are the same, but answers on "
+                           "a GPU with less free memory can differ slightly from an 80 GB GPU's (its graph shapes "
+                           "follow the free memory); BASAL_EXPERIMENTAL_QUANT_LOAD=1 turns it on")
+
+
 def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
     """--fp8-scaling auto -> block for basal-omni's bf16 weights under --mode fp8 (torchao's per-row FP8 failed its
     port gate there), row otherwise; an FP8 checkpoint keeps its stored weights. row / block are kept as given."""
@@ -523,9 +546,10 @@ def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
     return "block" if quant == "fp8" and gemma4 and not fp8_checkpoint else "row"
 
 
-# basal-omni quantised at load time (--mode fp8 with block scaling, --mode nvfp4 --nvfp4-amax) serves only the text
-# shapes (hidden size, decoder layers) that kept the paired accuracy rule against bf16 with their own calibration:
-# ultra (31B) in both modes (NVFP4 by a narrow margin, 2.4% of top answers change); max (12B) failed both
+# basal-omni quantised at load time (--mode fp8 with block scaling, --mode nvfp4 --nvfp4-amax, --mode int8) serves only
+# the text shapes (hidden size, decoder layers) that kept the paired accuracy rule against bf16 with their own
+# calibration: ultra (31B) in all three (NVFP4 by a narrow margin, 2.4% of top answers change; int8 0.6%); max (12B)
+# failed NVFP4 and int8 (int8: 1.13% errors among the answers accepted at the 1% target)
 OMNI_QUANT_SHAPES = {(5376, 60): "basal-omni ultra (31B)"}
 
 
@@ -866,17 +890,68 @@ def graph_two_way_refused(model_dir, state_cache_gb=0, prefix=False, batches="de
     return None
 
 
+KV_GROUP = 128  # low-bit state cache: tokens per group of a key channel
+KV_GROUP_D = 64  # and channels per group of a value token
+
+
+@torch.no_grad()
+def kv_quant(x, bits, keys):
+    """One layer's keys or values [heads, tokens, head size] -> (codes, scales, lows, shape, dtype): asymmetric
+    integers of `bits` (8 or 4: two per byte), each group with its own fp16 low value and step. Keys per channel
+    (groups of KV_GROUP tokens of one channel: a key channel keeps its size across tokens), values per token (groups of
+    KV_GROUP_D channels of one token)."""
+    H, T, D = x.shape
+    levels = 2 ** bits - 1
+    xf = x.float()
+    if keys:
+        pad = -T % KV_GROUP
+        if pad:  # the last group padded with its last token (no new extremes)
+            xf = torch.cat([xf, xf[:, -1:].expand(H, pad, D)], 1)
+        g = xf.view(H, (T + pad) // KV_GROUP, KV_GROUP, D)
+        lo, hi = g.amin(2, keepdim=True), g.amax(2, keepdim=True)
+    else:
+        G = KV_GROUP_D if D % KV_GROUP_D == 0 else D
+        g = xf.view(H, T, D // G, G)
+        lo, hi = g.amin(-1, keepdim=True), g.amax(-1, keepdim=True)
+    lo = lo.half()
+    step = ((hi - lo.float()) / levels).half().clamp(min=2 ** -14)  # (fp16 normal range: never 0)
+    q = ((g - lo.float()) / step.float()).round().clamp(0, levels).to(torch.uint8).flatten()
+    if bits == 4:
+        q = q[0::2] | (q[1::2] << 4)
+    return q, step, lo, (H, T, D), x.dtype
+
+
+@torch.no_grad()
+def kv_dequant(e, bits, keys):
+    """kv_quant's tuple -> the keys or values [heads, tokens, head size] in their dtype."""
+    q, step, lo, (H, T, D), dtype = e
+    if bits == 4:
+        q = torch.stack([q & 15, q >> 4], -1).flatten()
+    if keys:
+        Tp = T + (-T % KV_GROUP)
+        x = q.view(H, Tp // KV_GROUP, KV_GROUP, D).float() * step.float() + lo.float()
+        return x.view(H, Tp, D)[:, :T].to(dtype).contiguous()
+    G = KV_GROUP_D if D % KV_GROUP_D == 0 else D
+    return (q.view(H, T, D // G, G).float() * step.float() + lo.float()).view(H, T, D).to(dtype)
+
+
 class StateCache:
     """Keys and values of request states (the root of a unit cut at the state boundary: template and state), keyed by a
     hash of their token ids, kept on the GPU within a byte budget with least-recently-used eviction. A request whose
     state is cached runs only its questions and options (pass 2 over the cached keys and values). An entry stored with
     its token ids is also found by a state that only begins with it (a growing agent trace or chat history, or an edited
-    one): longest() finds the cached state sharing the longest prefix, through chained hashes of 256-token blocks."""
+    one): longest() finds the cached state sharing the longest prefix, through chained hashes of 256-token blocks.
+
+    bits (--state-cache-bits): 16 keeps the keys and values as computed; 8 or 4 stores them as integers with a scale per
+    group (kv_quant: keys per channel, values per token), 2x / ~3.5x more states per GB, given back in their dtype."""
 
     BLOCK = 256  # tokens per block of the prefix index
 
-    def __init__(self, budget_bytes, salt=b""):
+    def __init__(self, budget_bytes, salt=b"", bits=16):
         from collections import OrderedDict
+        if bits not in (16, 8, 4):
+            raise ValueError(f"--state-cache-bits {bits}: 16, 8 or 4")
+        self.bits = bits
         self.budget, self.used, self.salt = int(budget_bytes), 0, salt
         self.entries, self.lock = OrderedDict(), threading.Lock()
         self.index = {}  # chained hash of a state's first i blocks -> the key of an entry beginning with them
@@ -905,6 +980,7 @@ class StateCache:
             else:
                 return None
             kv, _, own = self.entries[key]
+            kv = self._unpack(kv)
             t, n = np.asarray(tokens, dtype=np.int64), min(len(own), len(tokens))
             m = (i + 1) * self.BLOCK
             diff = np.nonzero(own[m:n] != t[m:n])[0]
@@ -934,7 +1010,7 @@ class StateCache:
                 return None
             self.entries.move_to_end(key)
             self.hits += 1
-            return e[0]
+            return self._unpack(e[0])
 
     def has(self, key):
         """Whether a state is cached (no recency update, not counted as a hit or a miss)."""
@@ -944,7 +1020,11 @@ class StateCache:
     def put(self, key, kv, tokens=None, replaces=None):
         """Stores a state's keys / values; with its token ids (tokens) it is also found by states that begin with it.
         replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step)."""
-        size = sum(k.numel() * k.element_size() + v.numel() * v.element_size() for k, v in kv)
+        if self.bits != 16:
+            kv = [(kv_quant(k, self.bits, True), kv_quant(v, self.bits, False)) for k, v in kv]
+            size = sum(t.numel() * t.element_size() for e in kv for x in e for t in x[:3])
+        else:
+            size = sum(k.numel() * k.element_size() + v.numel() * v.element_size() for k, v in kv)
         if size > self.budget:
             return
         with self.lock:
@@ -961,6 +1041,12 @@ class StateCache:
             while self.used > self.budget:
                 self._drop(next(iter(self.entries)))
                 self.evictions += 1
+
+    def _unpack(self, kv):
+        """A stored entry's keys / values in their dtype (dequantised for 8 / 4 bits)."""
+        if self.bits == 16:
+            return kv
+        return [(kv_dequant(k, self.bits, True), kv_dequant(v, self.bits, False)) for k, v in kv]
 
     def stats(self):
         with self.lock:
@@ -1051,7 +1137,7 @@ class GraphBackend(EagerBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
-                 nvfp4_amax=None, nvfp4_scope="all"):
+                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16):
         what = recurrent_layers(model_dir)  # before anything is loaded
         if what:
             from .gdn_graph import is_gdn
@@ -1067,6 +1153,10 @@ class GraphBackend(EagerBackend):
             batches = "default" if batches == "auto" else batches
         if quant == "fp8" and fp8_refused():
             raise ValueError(fp8_refused())
+        if quant == "int8":
+            from .int8block import int8_refused
+            if int8_refused():
+                raise ValueError(int8_refused())
         torch.backends.cuda.enable_cudnn_sdp(False)  # before capture: a captured graph keeps its attention kernel
         from . import gemma4_graph
         # every captured graph keeps its own cuBLAS workspace (32 MB on an H100): basal-omni-1.1-max's ~400 graphs held
@@ -1082,11 +1172,17 @@ class GraphBackend(EagerBackend):
             raise ValueError("--fp8-scaling block: --mode fp8 with basal-omni (Gemma 4) only")
         if fp8_bf16_layers < 0:
             raise ValueError(f"--fp8-bf16-layers {fp8_bf16_layers}: give 0 or more layers")
-        if gemma4_graph.is_gemma4_dir(model_dir) and (fp8_scaling == "block" or quant == "nvfp4"):
+        if gemma4_graph.is_gemma4_dir(model_dir) and (fp8_scaling == "block" or quant in ("nvfp4", "int8")):
             why = omni_quant_refused(model_dir, quant, nvfp4_amax)
             if why:
                 raise ValueError(why)
         self.fp8_scaling, self.fp8_bf16_layers = fp8_scaling, fp8_bf16_layers
+        if quant == "int8" and not gemma4_graph.is_gemma4_dir(model_dir):
+            raise ValueError("--mode int8 (block-scaled int8 weights and activations) is for basal-omni (Gemma 4)")
+        why = quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4_graph.is_gemma4_dir(model_dir),
+                                 self.fp8_checkpoint)
+        if why:
+            raise ValueError(why)
         # likewise: the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs; the Gemma 4
         # forward picks its own kernels, --gemma-attn)
         self.attn = set_attention(attn, fp8=self.fp8_checkpoint or quant == "fp8" and fp8_scaling != "block")
@@ -1103,9 +1199,13 @@ class GraphBackend(EagerBackend):
             if quant not in (None, "fp8"):
                 raise ValueError(f"{model_dir} is an FP8 checkpoint; serve it without --quant {quant}")
             self.model, quant = load_modelopt_fp8(model_dir, "cuda", getattr(torch, dtype)), None
+        elif quant_load == "cpu":  # the bf16 weights stay in host memory until _gemma_init moves them, layer by layer
+            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).eval()
         else:
             self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).cuda().eval()
-        self.dev = next(self.model.parameters()).device
+        self.quant_load = quant_load
+        self.dev = (torch.device("cuda", torch.cuda.current_device()) if quant_load == "cpu"
+                    else next(self.model.parameters()).device)
         self.prefill = PREFILL
         if gemma4_graph.is_gemma4(self.model):
             self._gemma_init(gemma_attn, quant, compile, merge, fp8_scaling, fp8_bf16_layers, nvfp4_amax, nvfp4_scope)
@@ -1136,7 +1236,7 @@ class GraphBackend(EagerBackend):
                 and type(last.self_attn).__name__ == "LlamaAttention" and type(last.mlp).__name__ == "LlamaMLP"
         self.prefix = bool(prefix) and shared
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
-        self.state_cache = StateCache(gb * 2 ** 30) if gb and shared else None
+        self.state_cache = StateCache(gb * 2 ** 30, bits=state_cache_bits) if gb and shared else None
         self._alloc_kv()
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix token ids)]
         if self.compact and template in ("on", "auto") and self.gemma is None:  # (Gemma 4's template: 7 tokens)
@@ -1166,10 +1266,16 @@ class GraphBackend(EagerBackend):
         for name in ("vision_tower", "audio_tower", "embed_vision", "embed_audio"):  # text only here (31B: ~1.7 GB)
             if getattr(self.model.model, name, None) is not None:
                 setattr(self.model.model, name, None)
+        stream = None
+        if self.quant_load == "cpu":  # all but the decoder layers to the GPU now; Gemma4Graph brings the layers one at
+            # a time and quantises each before the next (the GPU holds one bf16 layer at most, not all 59 GB of ultra's)
+            stream = self.dev
+            gemma4_graph.move_except(self.model, stream, gemma4_graph.text_model(self.model).layers)
         torch.cuda.empty_cache()
         block = quant == "fp8" and fp8_scaling == "block"  # --fp8-scaling block: basal/fp8block.py, after merging
         fp4 = quant == "nvfp4" and nvfp4_amax is not None  # basal/nvfp4.py with calibrated input scales (--nvfp4-amax)
-        if quant and not block and not fp4:  # NVFP4: its vLLM ports failed (15 Oct); torchao FP8 (per-row scales) on 1.1-max failed
+        int8 = quant == "int8"  # basal/int8block.py: fp8block's blocks with int8 values (GPUs without FP8)
+        if quant and not (block or fp4 or int8):  # NVFP4: its vLLM ports failed (15 Oct); torchao FP8 (per-row scales) on 1.1-max failed
             # the port gate (2-10 options at margin >= 0.2: 0.9892, bar 0.9893; 20 Oct). The -FP8 checkpoints run in
             # --mode fast / fp8 as stored
             raise ValueError(f"--mode {quant} quantisation at load time is not available for basal-omni (Gemma 4) "
@@ -1190,9 +1296,9 @@ class GraphBackend(EagerBackend):
         # merged projections: bf16 linears only (an FP8 checkpoint's FP8Linear layers keep theirs); block FP8 quantises
         # the merged weights
         self.gemma = gemma4_graph.Gemma4Graph(self.model, kernels, compile=compile, merge=merge is True,
-                                              fp8="block" if block else "nvfp4" if fp4 else None,
+                                              fp8="block" if block else "nvfp4" if fp4 else "int8" if int8 else None,
                                               fp8_bf16_layers=fp8_bf16_layers, nvfp4_amax=nvfp4_amax,
-                                              nvfp4_scope=nvfp4_scope)
+                                              nvfp4_scope=nvfp4_scope, stream=stream)
         self.softcap, self.merged, self.lean = self.gemma.softcap, self.gemma.merged, None
         self.fwd, self.fwd_sfx = self.gemma.forward, self.gemma.forward_suffix
         self.flex = all(k != "math" for k in self.gemma.kernels.values())
