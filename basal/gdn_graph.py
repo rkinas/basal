@@ -186,8 +186,11 @@ def _fla_autotuners():
             pass
     out = {}
     for o in gc.get_objects():
-        if isinstance(o, Autotuner) and str(getattr(o.base_fn, "__module__", "")).startswith("fla."):
-            out[f"{o.base_fn.__module__}.{o.base_fn.__qualname__}"] = o
+        try:
+            if isinstance(o, Autotuner) and str(getattr(o.base_fn, "__module__", "")).startswith("fla."):
+                out[f"{o.base_fn.__module__}.{o.base_fn.__qualname__}"] = o
+        except ReferenceError:  # a weakref.proxy whose object is gone: isinstance() reads its __class__
+            continue
     return out
 
 
