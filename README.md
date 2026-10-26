@@ -344,6 +344,19 @@ To send uncertain decisions to a person, use `act` or `tool` with `"max_error": 
 `"deferred": true` below the certified confidence threshold. Request and response fields, every question type,
 using the confidence, calibrating on your own data and how to ask: [docs/API.md](docs/API.md).
 
+### TypeScript client
+
+`clients/typescript/` is a `fetch`-based client with no runtime dependencies and types for every question and answer
+type, answer sets (`coverage`), abstain (`max_error`), `ask_if` / `depends_on`, images and errors. It sends the same
+requests as the Python client (`basal/client.py`). It is not on npm yet; build it with `npm install && npm run build`
+in that directory. See [clients/typescript/README.md](clients/typescript/README.md).
+
+```ts
+import { Basal } from "basal-client";
+const basal = new Basal({ url: "http://127.0.0.1:8000" });
+const a = await basal.choice(ticket, "Which department?", { billing: "Billing", tech: "Technical support" });
+```
+
 ## Images and audio: basal-omni (experimental)
 
 The basal-omni models answer the same questions, and with `--media on` a request may also carry images and audio

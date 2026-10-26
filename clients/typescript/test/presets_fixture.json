@@ -1,0 +1,156 @@
+{
+ "presets": {
+  "triage": {
+   "pl": {
+    "urgency": {
+     "type": "score",
+     "instructions": "Jak pilna jest sprawa?",
+     "criteria": [
+      "niska",
+      "średnia",
+      "wysoka"
+     ]
+    },
+    "category": {
+     "type": "choice",
+     "instructions": "Czego dotyczy zgłoszenie?",
+     "criteria": {
+      "complaint": "reklamacja lub skarga",
+      "billing": "płatności lub faktury",
+      "technical": "problem techniczny",
+      "account": "konto lub dane klienta",
+      "other": "coś innego"
+     }
+    },
+    "needs_human": {
+     "type": "noul",
+     "instructions": "Czy sprawa wymaga decyzji człowieka?"
+    }
+   },
+   "en": {
+    "urgency": {
+     "type": "score",
+     "instructions": "How urgent is this case?",
+     "criteria": [
+      "low",
+      "medium",
+      "high"
+     ]
+    },
+    "category": {
+     "type": "choice",
+     "instructions": "What is the request about?",
+     "criteria": {
+      "complaint": "a complaint",
+      "billing": "payments or invoices",
+      "technical": "a technical problem",
+      "account": "the account or customer data",
+      "other": "something else"
+     }
+    },
+    "needs_human": {
+     "type": "noul",
+     "instructions": "Does the case need a human decision?"
+    }
+   }
+  },
+  "moderation": {
+   "pl": {
+    "harmful": {
+     "type": "noul",
+     "instructions": "Czy tekst zawiera treści obraźliwe, groźby lub nękanie?"
+    },
+    "spam": {
+     "type": "noul",
+     "instructions": "Czy tekst jest spamem lub reklamą?"
+    },
+    "personal_data": {
+     "type": "noul",
+     "instructions": "Czy tekst ujawnia dane osobowe innej osoby?"
+    }
+   },
+   "en": {
+    "harmful": {
+     "type": "noul",
+     "instructions": "Does the text contain insults, threats or harassment?"
+    },
+    "spam": {
+     "type": "noul",
+     "instructions": "Is the text spam or advertising?"
+    },
+    "personal_data": {
+     "type": "noul",
+     "instructions": "Does the text reveal someone else's personal data?"
+    }
+   }
+  },
+  "compliance": {
+   "pl": {
+    "personal_data": {
+     "type": "noul",
+     "instructions": "Czy dokument zawiera dane osobowe?"
+    },
+    "deadline": {
+     "type": "noul",
+     "instructions": "Czy dokument wyznacza termin do dotrzymania?"
+    },
+    "legal_review": {
+     "type": "noul",
+     "instructions": "Czy dokument powinien przejrzeć prawnik?"
+    }
+   },
+   "en": {
+    "personal_data": {
+     "type": "noul",
+     "instructions": "Does the document contain personal data?"
+    },
+    "deadline": {
+     "type": "noul",
+     "instructions": "Does the document set a deadline to meet?"
+    },
+    "legal_review": {
+     "type": "noul",
+     "instructions": "Should a lawyer review the document?"
+    }
+   }
+  }
+ },
+ "langs": [
+  [
+   "Faktura nie została zapłacona w terminie, proszę o kontakt.",
+   "pl"
+  ],
+  [
+   "The invoice was not paid on time, please call.",
+   "en"
+  ],
+  [
+   "Zażółć gęślą jaźń",
+   "pl"
+  ],
+  [
+   "Hello",
+   "en"
+  ],
+  [
+   "Ala ma kota i psa w domu",
+   "pl"
+  ],
+  [
+   "Dostałem to w poniedziałek i nie wiem co z tym zrobić",
+   "pl"
+  ],
+  [
+   "Reply to w z",
+   "pl"
+  ],
+  [
+   "",
+   "en"
+  ],
+  [
+   "Sprawa jest pilna",
+   "en"
+  ]
+ ]
+}
