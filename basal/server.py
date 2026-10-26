@@ -1034,6 +1034,12 @@ class Server:
             raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
         if getattr(a, "quant_load", "gpu") == "cpu" and os.environ.get("BASAL_EXPERIMENTAL_QUANT_LOAD") != "1":
             raise SystemExit(QUANT_LOAD_EXPERIMENTAL)
+        if getattr(a, "graph_memory_gb", None) is not None:
+            if kind != "graph":
+                raise SystemExit("--graph-memory-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
+                                 "nvfp4)")
+            if not a.graph_memory_gb > 0:
+                raise SystemExit(f"--graph-memory-gb {a.graph_memory_gb:g}: give a size in GiB above 0")
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
         attn = getattr(a, "attn", "auto")
@@ -1159,7 +1165,8 @@ class Server:
                                         fp8_scaling=getattr(a, "fp8_scaling", "auto"),
                                         fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
                                         quant_load=getattr(a, "quant_load", "gpu"),
-                                        state_cache_bits=getattr(a, "state_cache_bits", 16), **nvfp4_args(a, md, quant))
+                                        state_cache_bits=getattr(a, "state_cache_bits", 16),
+                                        graph_memory_gb=getattr(a, "graph_memory_gb", None), **nvfp4_args(a, md, quant))
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
         if getattr(a, "lanes", 1) > 1:
             t = time.time()
@@ -2026,6 +2033,11 @@ def add_engine_args(ap):
                          "memory, one decoder layer at a time to the GPU, quantised there (GPU memory about the "
                          "quantised size: ultra in FP8 or int8 on cards under 64 GB; the same weights). Experimental: "
                          "needs BASAL_EXPERIMENTAL_QUANT_LOAD=1")
+    ap.add_argument("--graph-memory-gb", dest="graph_memory_gb", type=float, default=None,
+                    help="the CUDA graph engine: size the graph shapes (the grid, the pass-2 graphs, the longest state "
+                         "run as one forward) for this much free GPU memory after the weights, in GiB, instead of the "
+                         "free memory measured at start-up (default). Two GPUs given the same value run the same "
+                         "shapes and give bit-identical answers; more than is free after the weights is refused")
     ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
                     help="--mode nvfp4 with basal-omni ultra (other basal-omni models are refused): the calibrated "
                          "input amax of each decoder linear (JSON, {\"amax\": {\"<layer>.<proj>\": value}}; default: the "

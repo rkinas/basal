@@ -27,6 +27,7 @@ Backends:
 """
 import copy
 import functools
+import hashlib
 import json
 import os
 import re
@@ -536,6 +537,15 @@ def quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4, fp8_c
 QUANT_LOAD_EXPERIMENTAL = ("--quant-load cpu is experimental in this version: the weights are the same, but answers on "
                            "a GPU with less free memory can differ slightly from an 80 GB GPU's (its graph shapes "
                            "follow the free memory); BASAL_EXPERIMENTAL_QUANT_LOAD=1 turns it on")
+
+
+def graph_memory_bytes(gb):
+    """--graph-memory-gb N -> bytes (None: the measured free memory, the default)."""
+    if gb is None:
+        return None
+    if not gb > 0:
+        raise ValueError(f"--graph-memory-gb {gb}: give a size in GiB above 0")
+    return int(gb * 2 ** 30)
 
 
 def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
@@ -1137,7 +1147,7 @@ class GraphBackend(EagerBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
-                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16):
+                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None):
         what = recurrent_layers(model_dir)  # before anything is loaded
         if what:
             from .gdn_graph import is_gdn
@@ -1183,6 +1193,7 @@ class GraphBackend(EagerBackend):
                                  self.fp8_checkpoint)
         if why:
             raise ValueError(why)
+        self.graph_memory = graph_memory_bytes(graph_memory_gb)
         # likewise: the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs; the Gemma 4
         # forward picks its own kernels, --gemma-attn)
         self.attn = set_attention(attn, fp8=self.fp8_checkpoint or quant == "fp8" and fp8_scaling != "block")
@@ -1246,6 +1257,7 @@ class GraphBackend(EagerBackend):
         if warm:
             self.warm()
         self.one_forward = self._one_forward_tokens()
+        self._shape_line()
 
     def _gemma_init(self, kernels, quant, compile, merge, fp8_scaling="row", fp8_bf16_layers=0, nvfp4_amax=None,
                     nvfp4_scope="all"):
@@ -1340,6 +1352,7 @@ class GraphBackend(EagerBackend):
         """The keys / values buffer that pass 1 writes and pass 2 reads: per layer, room for the largest plain graph
         and for the largest pass-2 graph's rows over the longest root. kv_shapes: (kv heads, head size) per layer
         with its own keys and values (Gemma 4: per layer type; its KV-shared layers read those of an earlier layer)."""
+        self._pin_memory()
         if self.gemma is not None:
             self.kv_shapes = list(self.gemma.kv_shapes)
             self._fit_grid()
@@ -1375,7 +1388,8 @@ class GraphBackend(EagerBackend):
         if self.dev.type != "cuda" or not self.shared:
             return
         per = sum(2 * H * D for H, D in self.kv_shapes) * self._dtype.itemsize
-        cap = int(self.KV_SHARE * torch.cuda.mem_get_info(self.dev)[0] / per)
+        free = self.graph_memory if self.graph_memory is not None else torch.cuda.mem_get_info(self.dev)[0]
+        cap = int(self.KV_SHARE * free / per)
         if max(self.TOKEN_BUDGET, self.PLAIN_LENS[-1]) > cap:  # 31B on an 80 GB GPU (a quarter of free memory
             # left 76 GB allocated and ran out in warm-up: graph pools and activations need the rest, 20 Oct)
             self.TOKEN_BUDGET = min(self.TOKEN_BUDGET, max(cap // 512 * 512, 1024))
@@ -1720,7 +1734,7 @@ class GraphBackend(EagerBackend):
         kept = self.gemma.kv_lens(1 << 30) if self.gemma is not None else [1 << 30] * len(self.kv_shapes)
         kv = sum(2 * H * D * b for (H, D), t in zip(self.kv_shapes, kept) if t >= 1 << 30)
         per = (2 * cfg.intermediate_size + 4 * cfg.hidden_size) * b + kv
-        n = int(self.ONE_FORWARD_SHARE * torch.cuda.mem_get_info(self.dev)[0] / per)
+        n = int(self.ONE_FORWARD_SHARE * self._free_memory() / per)
         print(f"basal: states beyond {n} tokens are prefilled in chunks of {self.CHUNK}", flush=True)
         return n
 
@@ -1923,8 +1937,47 @@ class GraphBackend(EagerBackend):
             self._capture_cost = max(before - self._free_memory(), 0)
 
     def _free_memory(self):
-        """Free GPU memory in bytes (None off CUDA: no budget)."""
-        return torch.cuda.mem_get_info(self.dev)[0] if self.dev.type == "cuda" else None
+        """Free GPU memory in bytes as the shape decisions see it (None off CUDA: no budget): with --graph-memory-gb,
+        less what was free beyond it after the weights (_pin_memory)."""
+        return torch.cuda.mem_get_info(self.dev)[0] - self._memory_offset if self.dev.type == "cuda" else None
+
+    graph_memory = None  # --graph-memory-gb in bytes: the free GPU memory after the weights the graph shapes are sized
+    _memory_offset = 0   # for instead of the measured one; the offset: the measured free memory beyond it (_pin_memory)
+
+    def _pin_memory(self):
+        """--graph-memory-gb: the grid (_fit_grid), the pass-2 graphs captured (_room) and the long-state one-forward
+        limit (_one_forward_tokens) follow graph_memory instead of the free memory measured at start-up, so two GPUs
+        with different free memory run the same graph shapes, and give bit-identical answers, when both take the same
+        value. (By default a 48 GB card runs smaller shapes than an 80 GB one, whose answers differ in the last bits:
+        H100, basal-omni ultra in FP8 under a 32 GB ballast, 1,216 of 1,700 rows identical, 26 Oct.) Measured once,
+        after the weights and with the allocator's unused blocks released; less free memory than that is refused."""
+        if self.graph_memory is None or self.dev.type != "cuda":
+            return
+        torch.cuda.empty_cache()
+        free = torch.cuda.mem_get_info(self.dev)[0]
+        if free < self.graph_memory:
+            raise ValueError(f"--graph-memory-gb {self.graph_memory / 2 ** 30:g}: only {free / 2 ** 30:.1f} GiB of GPU "
+                             "memory are free after the weights; give at most that")
+        self._memory_offset = free - self.graph_memory
+        print(f"basal: graph shapes sized for {self.graph_memory / 2 ** 30:g} GiB of free GPU memory "
+              f"(--graph-memory-gb; {free / 2 ** 30:.1f} GiB free after the weights)", flush=True)
+
+    def shapes(self):
+        """The graph shapes this engine runs: the grid, the graphs per kind ("p" plain, "c" compact, "x" pass 2) and
+        a hash of their keys, the one-forward limit. Two engines with the same shapes run the same kernels."""
+        keys = sorted(repr(k) for k in self.graphs)
+        kinds = {}
+        for k in self.graphs:
+            kinds[k[0]] = kinds.get(k[0], 0) + 1
+        h = hashlib.sha256("\n".join(keys).encode()).hexdigest()[:12]
+        return dict(token_budget=self.TOKEN_BUDGET, plain=self.PLAIN_LENS[-1], lens=self.LENS[-1],
+                    compact=self.COMPACT_LENS[-1] if self.compact else None, graphs=kinds, hash=h,
+                    one_forward=self.one_forward)
+
+    def _shape_line(self):
+        """With --graph-memory-gb: one start-up line of the shapes (compare two servers' lines)."""
+        if self.graph_memory is not None:
+            print(f"basal: graph shapes {json.dumps(self.shapes(), sort_keys=True)}", flush=True)
 
     def _graph(self, b, L):
         """Plain graph (b rows, length L): (graph, ids, kv buffers or None, hidden states [b, L, D]); Gemma 4: (graph,
