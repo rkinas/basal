@@ -276,3 +276,38 @@ export interface Health {
   running: number;
   queued: number;
 }
+
+/** A guard policy (basal/presets.py POLICIES): hazard -> action at `act_at`, review from `review_at`, severity levels. */
+export interface GuardPolicy {
+  act_at: number;
+  review_at: number;
+  severity: { review: number; block: number };
+  hazards: Record<string, GuardAction>;
+}
+
+export type GuardAction = "support" | "block" | "review" | "pass";
+
+export interface GuardCheck {
+  action: GuardAction;
+  p: number | null;
+  why?: string;
+}
+
+/** The decision over a guard_input / guard_output battery. */
+export interface GuardDecision {
+  action: GuardAction;
+  /** The check that set the action (null for pass). */
+  reason: string | null;
+  checks: Record<string, GuardCheck>;
+  mode: "fixed" | "certified";
+}
+
+/** The decision over a route_intent answer pair. */
+export interface RouteDecision {
+  /** The intent key, or "human". */
+  route: string;
+  complexity?: string;
+  level?: number;
+  confidence?: number;
+  why?: string;
+}

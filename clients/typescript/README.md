@@ -37,7 +37,9 @@ const c = await basal.choice(ticket, "Which team?", ["billing", "tech"], { cover
 c.answer_set; c.abstain;
 
 // a ready question set, the whole response (usage, skipped questions), images
-await basal.preset(ticket, "triage");                         // "triage" | "moderation" | "compliance"; pl / en
+await basal.preset(ticket, "triage");                         // "triage" | "moderation" | "compliance" | "guard_input" | ...; pl / en
+await basal.guard(userText, { kind: "input", policy: "strict", maxError: 0.05 });  // pass | review | block | support
+await basal.route(ticket);                                    // the intent, or "human" on low confidence / abstain
 const full = await basal.request(ticket, { q: { type: "noul", instructions: "Is it a receipt?" } },
   { images: [imageFromBytes(bytes, "image/png")], detail: "high" });   // servers started with --media on
 full.usage.skipped;

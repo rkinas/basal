@@ -52,7 +52,21 @@ class Basal:
     def score(self, state, question, levels):
         return self.decide(state, {"q": {"type": "score", "instructions": question, "criteria": levels}})["q"]
 
-    def preset(self, state, name, lang=None):
-        """The answers to a ready question set (basal/presets.py: triage, moderation, compliance) about state."""
+    def preset(self, state, name, lang=None, max_error=None):
+        """The answers to a ready question set (basal/presets.py: triage, moderation, compliance, guard_input,
+        guard_output, route_intent) about state; max_error adds the abstain flag to every answer."""
         from .presets import questions
-        return self.decide(state, questions(name, lang, state))
+        return self.decide(state, questions(name, lang, state, max_error))
+
+    def guard(self, state, kind="input", policy="strict", lang=None, max_error=None):
+        """Run the guard_input / guard_output battery on state -> presets.guard(): {"action": pass | review | block |
+        support, "reason", "checks"} plus "answers". max_error takes the thresholds from the model's calibration."""
+        from .presets import guard
+        answers = self.preset(state, "guard_" + kind, lang, max_error)
+        return {**guard(answers, policy, max_error), "answers": answers}
+
+    def route(self, state, lang=None, min_confidence=0.6, max_error=None):
+        """Run route_intent on state -> presets.route(): the intent, or "human" on low confidence / abstain."""
+        from .presets import route
+        answers = self.preset(state, "route_intent", lang, max_error)
+        return {**route(answers, min_confidence, max_error), "answers": answers}

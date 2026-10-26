@@ -399,6 +399,7 @@ crewai_tool` gives a tool over a running server, with ready question sets (`pres
 | | |
 |---|---|
 | [INSTALL](docs/INSTALL.md) | engines, the model files and every install path: NVIDIA (bf16, FP8), vLLM, SGLang, Apple Silicon, Ollama / llama.cpp, CPU, basal-omni |
+| [BACKEND](docs/BACKEND.md) | use basal-serve as the local backend of code that asked a hosted LLM for decisions |
 | [API](docs/API.md) | request, response, question types, using the confidence, how to ask |
 | [FINETUNE](docs/FINETUNE.md) | adapt a model to your own labelled decisions with LoRA (`basal-finetune`), then calibrate it |
 | [OLD_GPUS](docs/OLD_GPUS.md) | GTX 10xx, RX 480 / 580, Iris Xe: GGUF with llama.cpp's Vulkan backend, and `basal-selfcheck` |

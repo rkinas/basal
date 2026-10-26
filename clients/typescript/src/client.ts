@@ -1,4 +1,5 @@
 import { BasalError, errorFromResponse } from "./errors.js";
+import { guard, route } from "./guard.js";
 import { PRESETS } from "./presets.js";
 import type {
   Answer,
@@ -8,10 +9,13 @@ import type {
   DecisionResponse,
   Health,
   ImageInput,
+  GuardDecision,
+  GuardPolicy,
   ModelInfo,
   NoulAnswer,
   Questions,
   RequestOptions,
+  RouteDecision,
   ScoreAnswer,
 } from "./types.js";
 
@@ -57,13 +61,16 @@ export function presetNames(): string[] {
 }
 
 /** The questions of preset `name` in `lang` (default: the language of `state`), as a fresh object. */
-export function presetQuestions(name: string, lang?: "pl" | "en", state = ""): Questions {
+export function presetQuestions(name: string, lang?: "pl" | "en", state = "", maxError?: number): Questions {
   const preset = PRESETS[name];
   if (!preset) throw new Error(`unknown preset ${JSON.stringify(name)} (presets: ${presetNames().join(", ")})`);
   const l = lang ?? langOf(state);
   const qs = preset[l];
   if (!qs) throw new Error(`preset ${JSON.stringify(name)} has no ${JSON.stringify(l)} wording (pl, en)`);
-  return structuredClone(qs);
+  const out = structuredClone(qs);
+  if (maxError !== undefined)
+    for (const q of Object.values(out)) if (q.type === "choice" || q.type === "noul" || q.type === "score") q.max_error = maxError;
+  return out;
 }
 
 /** An image from bytes (Uint8Array) as a "data:image/...;base64," URL, for `images`. */
@@ -180,8 +187,27 @@ export class Basal {
   }
 
   /** The answers to a ready question set ("triage", "moderation", "compliance") about `state`. */
-  async preset(state: string, name: string, lang?: "pl" | "en"): Promise<Record<string, Answer | null>> {
-    return this.decide(state, presetQuestions(name, lang, state));
+  async preset(state: string, name: string, lang?: "pl" | "en", maxError?: number): Promise<Record<string, Answer | null>> {
+    return this.decide(state, presetQuestions(name, lang, state, maxError));
+  }
+
+  /** Runs the "guard_input" / "guard_output" battery on `state` and decides pass / review / block / support
+   *  (see guard() in basal/presets.py). `maxError` takes the thresholds from the model's calibration. */
+  async guard(
+    state: string,
+    opts: { kind?: "input" | "output"; policy?: string | GuardPolicy; lang?: "pl" | "en"; maxError?: number } = {},
+  ): Promise<GuardDecision & { answers: Record<string, Answer | null> }> {
+    const answers = await this.preset(state, `guard_${opts.kind ?? "input"}`, opts.lang, opts.maxError);
+    return { ...guard(answers, opts.policy ?? "strict", opts.maxError), answers };
+  }
+
+  /** Runs "route_intent" on `state`: the intent, or "human" on low confidence or abstain. */
+  async route(
+    state: string,
+    opts: { lang?: "pl" | "en"; minConfidence?: number; maxError?: number } = {},
+  ): Promise<RouteDecision & { answers: Record<string, Answer | null> }> {
+    const answers = await this.preset(state, "route_intent", opts.lang, opts.maxError);
+    return { ...route(answers, opts.minConfidence, opts.maxError), answers };
   }
 
   /** GET /v1/models. */

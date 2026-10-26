@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { readFileSync } from "node:fs";
 
-import { Basal, BasalError, complete, imageFromBytes, langOf, presetNames, presetQuestions } from "../dist/index.js";
+import { Basal, BasalError, POLICIES, complete, guard, imageFromBytes, langOf, presetNames, presetQuestions, route } from "../dist/index.js";
 import { startServer } from "./helpers.mjs";
 
 let server, auth, openai, b;
@@ -212,6 +212,32 @@ describe("presets", () => {
       for (const lang of ["pl", "en"]) assert.deepEqual(presetQuestions(name, lang), fixture.presets[name][lang]);
     for (const [text, lang] of fixture.langs) assert.equal(langOf(text), lang, text);
     assert.throws(() => presetQuestions("nope"), /unknown preset/);
+  });
+
+  test("guard() and route() decide as the Python functions on the shared cases", () => {
+    for (const c of fixture.guard)
+      assert.deepEqual(guard(c.answers, c.policy, c.max_error ?? undefined), c.expect, JSON.stringify(c).slice(0, 80));
+    assert.deepEqual(POLICIES, fixture.policies);
+    for (const c of fixture.route) assert.deepEqual(route(c.answers, 0.6, c.max_error ?? undefined), c.expect);
+    assert.throws(() => guard({}, "lax"), /unknown policy/);
+  });
+
+  test("guard() asks the battery with max_error and returns the decision with the answers", async () => {
+    const seen = [];
+    const fetch = async (_u, init) => {
+      const body = JSON.parse(init.body);
+      seen.push(body);
+      const answers = {};
+      for (const [k, v] of Object.entries(body.questions))
+        answers[k] = v.type === "noul"
+          ? { type: "noul", noul: 0.01, probabilities: { true: 0.01, false: 0.99 }, confidence: 0.99, abstain: false }
+          : { type: "score", score: 0, probabilities: { 0: 0.97, 1: 0.01, 2: 0.01, 3: 0.01 }, confidence: 0.97, abstain: false };
+      return new Response(JSON.stringify({ model: "m", answers }), { status: 200 });
+    };
+    const r = await new Basal({ fetch }).guard("Hello", { kind: "output", lang: "en", maxError: 0.05 });
+    assert.equal(r.action, "pass");
+    assert.equal(seen[0].questions.policy_break.max_error, 0.05);
+    assert.deepEqual(Object.keys(r.answers), ["policy_break", "harmful", "medical", "self_harm", "severity"]);
   });
 
   test("preset() asks the questions in the language of the state", async () => {
