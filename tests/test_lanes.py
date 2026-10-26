@@ -138,3 +138,33 @@ def test_rows_a_lane_reads_are_written_on_its_own_stream():
         got = w.clone()
     torch.cuda.synchronize()
     assert torch.equal(got, head.weight[[11, 12, 13, 500]].float())  # (the rows of every code id asked, sorted)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs")
+def test_lanes_graphs_replayed_at_once_give_their_own_answers():
+    """Each lane captures on its own stream, so its graphs keep their own cuBLAS workspace: two lanes' GEMM graphs
+    (small M, long K: split-K, which sums partial results in the workspace) replayed at once on two streams, many
+    times, each give the output they give alone."""
+    torch.manual_seed(0)
+    w = torch.randn(4096, 16384, device="cuda", dtype=torch.bfloat16) / 64
+    xs = [torch.randn(16, 16384, device="cuda", dtype=torch.bfloat16) for _ in range(2)]
+    lanes = [Engine(dev="cuda"), None]
+    lanes[0].pool = torch.cuda.graph_pool_handle()
+    lanes[1] = lanes[0]._lane_copy()
+    lanes[1].pool, lanes[1]._capture_stream = torch.cuda.graph_pool_handle(), torch.cuda.Stream()
+    [x @ w.t() for x in xs]  # (sets up cuBLAS before the captures)
+    graphs = [e._record(("p", 16, 16384), lambda x: x @ w.t(), (x,)) for e, x in zip(lanes, xs)]
+    want = []
+    for g in graphs:  # each alone
+        g[0].replay()
+        torch.cuda.synchronize()
+        want.append(g[-1].clone())
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    torch.cuda.synchronize()
+    for _ in range(200):
+        for g, s in zip(graphs, streams):
+            with torch.cuda.stream(s):
+                g[0].replay()
+    torch.cuda.synchronize()
+    for g, x in zip(graphs, want):
+        assert torch.equal(g[-1], x)

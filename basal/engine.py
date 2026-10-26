@@ -1543,6 +1543,11 @@ class GraphBackend(EagerBackend):
             raise ValueError("--lanes needs a CUDA GPU")
         new = self._lane_copy()
         new.pool = torch.cuda.graph_pool_handle()
+        # its own capture stream: cuBLAS keeps one workspace per handle and stream, and a graph keeps the workspace of
+        # the stream it was captured on; on torch.cuda.graph's one default capture stream every lane's GEMMs shared
+        # one workspace, so lanes replayed at once overwrote each other's partial sums (wrong answers on an H100, and
+        # split-K kernels waiting forever on another lane's flags)
+        new._capture_stream = torch.cuda.Stream(self.dev)
         new._kv_buffers()
         new.warm()
         self.frozen = new.frozen = True
@@ -1880,7 +1885,7 @@ class GraphBackend(EagerBackend):
 
     def _record(self, key, fn, static):
         g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g, pool=self.pool):
+        with torch.cuda.graph(g, pool=self.pool, stream=getattr(self, "_capture_stream", None)):  # (None: torch's)
             out = fn(*static)
         self.graphs[key] = (g, *static, out)
         return self.graphs[key]
