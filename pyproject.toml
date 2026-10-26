@@ -32,6 +32,7 @@ media = ["pillow", "soundfile", "scipy", "torchvision"]  # --media on (basal-omn
 gguf = ["llama-cpp-python>=0.3.36"]  # --mode gguf: a GGUF file in process (Metal, CUDA or CPU); 0.3.36: Gemma 4 (basal-omni) checked
 gguf-export = ["gguf>=0.19"]  # basal-export-gguf: GGUF with the Hugging Face tokenization (docs/GGUF.md)
 mcp = ["mcp>=2.3,<3"]  # basal-serve --mcp on (MCP at /mcp) and the basal-mcp stdio bridge, for agents
+finetune = ["peft>=0.17"]  # basal-finetune: LoRA on your own labelled decisions (docs/FINETUNE.md)
 # --mode tpu (experimental, Google TPU VMs; docs/HARDWARE.md, "Google TPU"): JAX with libtpu (both from PyPI), pinned to
 # the version the backend was validated with
 tpu = ["jax[tpu]==0.11.1; python_version >= '3.12' and sys_platform == 'linux'"]
@@ -51,6 +52,8 @@ basal-run = "basal.run:main"
 basal-export-gguf = "basal.gguf_export:main"
 basal-mcp = "basal.mcp_server:main"
 basal-calibrate = "basal.calibrate:main"
+basal-finetune = "basal.finetune:main"
+basal-selfcheck = "basal.selfcheck:main"
 basal-prepare = "basal.prepared:main"
 basal-attach = "basal.attach:main"
 basal-viz = "basal.viz:main"
@@ -59,7 +62,7 @@ basal-viz = "basal.viz:main"
 packages = ["basal"]
 
 [tool.setuptools.package-data]
-basal = ["examples/*.jsonl", "examples/*.py", "viz.html", "fla_configs.json"]
+basal = ["examples/*.jsonl", "examples/*.json", "examples/*.py", "viz.html", "fla_configs.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]  # tests import shared stubs from tests.test_server
