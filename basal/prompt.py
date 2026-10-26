@@ -141,6 +141,58 @@ def model_two_way(model_dir):
     return {**TWO_WAY, **tw}
 
 
+def model_option_isolation(model_dir):
+    """True for a model trained with isolated options (basal.json `"option_isolation": true`): each option's block reads
+    the prompt before the options and itself, never another option, at shared positions; the answer reads them all.
+    See OptionPrompt / option_tokens."""
+    p = Path(model_dir) / "basal.json"
+    v = json.loads(p.read_text(encoding="utf-8")).get("option_isolation") if p.exists() else None
+    if v not in (None, True, False):
+        raise ValueError(f"{p}: \"option_isolation\" must be true or false, not {v!r}")
+    return bool(v)
+
+
+class OptionPrompt(str):
+    """A rendered format-2 prompt that keeps its options (presentation order), for a model trained with isolated
+    options: the engine tokenizes it piece by piece (option_tokens). Everywhere else it is the prompt string."""
+    options = ()
+
+
+class OptionIds(list):
+    """The token ids of an OptionPrompt, with `blocks`: the token counts of its prefix, of each option block and of
+    its suffix (they sum to the length)."""
+    blocks = ()
+
+
+def option_pieces(prompt, options, fmt=2):
+    """(prefix, [option blocks], suffix) of a rendered prompt: prefix + "".join(blocks) + suffix == prompt. Block k is
+    "\n<code k>. <option k>": the newline that separates the options opens each block, so all blocks have one form."""
+    lines = [f"{FORMATS[fmt]['codes'][k]}. {o}" for k, o in enumerate(options)]
+    body = "\n".join(lines)
+    i = prompt.rfind(body)
+    if i < 1 or prompt[i - 1] != "\n":
+        raise ValueError("the option block is not in the prompt")
+    return prompt[: i - 1], ["\n" + x for x in lines], prompt[i + len(body):]
+
+
+def option_tokens(tok, prompt, options, fmt=2):
+    """OptionIds of a prompt: its pieces (option_pieces) tokenized one by one and joined, as the model was trained."""
+    pre, blocks, suf = option_pieces(prompt, options, fmt)
+    parts = tok([pre] + blocks + [suf], add_special_tokens=False).input_ids
+    out = OptionIds(x for part in parts for x in part)
+    out.blocks = tuple(map(len, parts))
+    return out
+
+
+def check_option_tokenizer(tok):
+    """Raise unless a probe prompt's pieces tokenize as the whole prompt (true for Gemma 4; a SentencePiece tokenizer
+    that adds a prefix space to every piece would read other tokens than the trainer saw)."""
+    opts = ["zwrot pieniędzy w ciągu 14 dni.", "naprawa (gwarancja)", "inne"]
+    p = render(tok, "Stan: klient zgłasza wadę towaru.", "Jaka decyzja?", opts, fmt=2)
+    if list(option_tokens(tok, p, opts)) != tok(p, add_special_tokens=False).input_ids:
+        raise ValueError("isolated options: this tokenizer does not tokenize the prompt's pieces as the whole prompt")
+
+
 def lang_of(text):
     """Polish if the text contains Polish diacritics, otherwise English (selects the prompt template)."""
     return "pl" if any(c in PL_CHARS for c in text) else "en"
