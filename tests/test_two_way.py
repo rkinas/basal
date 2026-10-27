@@ -228,3 +228,67 @@ def test_graph_two_way_refusals(tmp_path):
     assert graph_two_way_refused(tmp_path) is None
     assert "--state-cache-gb, --batches compact" in graph_two_way_refused(tmp_path, state_cache_gb=1,
                                                                             batches="compact")
+
+
+def padded_masks(m, valid):
+    """The per-layer-type masks of a left-padded batch (valid [B, S]) as a fine-tuning run passes them to transformers:
+    causal over the real tokens with the window in the sliding layers, every real token in the global layers; a padding
+    query sees itself only."""
+    i = torch.arange(valid.shape[1])
+    d = i[:, None] - i[None, :]
+    causal = ((d >= 0)[None] & valid[:, None, :]) | (d == 0)[None]
+    return {"sliding_attention": (causal & (d < m.config.sliding_window)[None])[:, None],
+            "full_attention": (valid[:, None, :] | (d == 0)[None])[:, None]}
+
+
+def padded_hidden(m, prompts):
+    """Final hidden states at each prompt's last token of one left-padded batch read two-way."""
+    S = max(map(len, prompts))
+    ids = torch.tensor([[0] * (S - len(t)) + t for t in prompts])
+    valid = torch.tensor([[False] * (S - len(t)) + [True] * len(t) for t in prompts])
+    pos = (valid.long().cumsum(1) - 1).clamp_min(0)
+    with torch.no_grad():
+        out = m.model(input_ids=ids, attention_mask=padded_masks(m, valid), position_ids=pos)
+    return out.last_hidden_state[:, -1]
+
+
+def test_two_way_dense_31b_layout():
+    """The dense 31B layout (keys = values, 512-wide global heads with partial rotary, one global KV head, no per-layer
+    inputs): prompts shorter and longer than the window read two-way by the eager forward equal one left-padded batch
+    read with the per-layer-type masks."""
+    from test_gemma4 import text_config
+    from transformers import Gemma4ForCausalLM
+    torch.manual_seed(0)
+    m = Gemma4ForCausalLM(text_config(**{**CONFIGS["31b"], "global_head_dim": 512, "num_global_key_value_heads": 1})).eval()
+    with torch.no_grad():
+        m.model.embed_tokens.weight.mul_(30.0)
+    W = m.config.sliding_window
+    g = torch.Generator().manual_seed(4)
+    prompts = [torch.randint(1, 56, (n,), generator=g).tolist() for n in (5, W - 1, W, W + 1, 2 * W + 3, 40)]
+    ref = padded_hidden(m, prompts)
+    for answer_rows in (True, False):
+        hs = Gemma4Forward(m, answer_rows=answer_rows, two_way=CAPS).hidden([[t] for t in prompts])
+        for t, h, r in zip(prompts, hs, ref):
+            assert close(h[0], r), (len(t), answer_rows)
+    one = Gemma4Forward(m).hidden([[prompts[-1]]])[0][0]
+    assert not close(one, ref[-1])  # the global layers read both ways
+
+
+def test_graph_engine_reads_two_way_dense_31b_layout():
+    """The graph engine's two-way plain rows on the dense 31B layout (keys = values, one global KV head; window 5)
+    equal one left-padded batch read with the per-layer-type masks, prompts shorter and longer than the window."""
+    from test_gemma4_graph import tiny as gtiny
+    m = gtiny("31b", torch.float32)
+    be = graph_stub(m, {"max_prompt": 64, "max_record": 256})
+    g = torch.Generator().manual_seed(5)
+    prompts = [torch.randint(1, 60, (n,), generator=g).tolist() for n in (5, 6, 9, 17, 31)]
+    lids = [7, 8, 9]
+    got = be.run_shared([([t], [lids]) for t in prompts])
+    with torch.no_grad():
+        logits = m.lm_head(padded_hidden(m, prompts))
+        logits = torch.tanh(logits / m.config.final_logit_softcapping) * m.config.final_logit_softcapping
+    for t, res, lg in zip(prompts, got, logits):
+        assert torch.allclose(torch.tensor(res[0]), torch.softmax(lg[lids].float(), -1), atol=1e-5), len(t)
+    with torch.no_grad():  # the global layers read both ways: one way gives other answers
+        one = m(input_ids=torch.tensor([prompts[-1]])).logits[0, -1, lids].float()
+    assert not torch.allclose(torch.tensor(got[-1][0]), torch.softmax(one, -1), atol=1e-3)

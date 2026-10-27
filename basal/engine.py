@@ -529,16 +529,27 @@ def recurrent_refused(model, what, gdn=False):
     compact rows and caches hold attention keys and values only: a Gated DeltaNet layer would restart from zero state
     below a shared prefix and run across the prompts of a packed row, so the answers would be wrong without any error
     (v2.3.1 with the 0.8B pico, 21 Oct). Since 2.4 the CUDA graph engine carries the recurrent state of Qwen3.5 decoders
-    (gdn: basal/gdn_graph.py, --mode fast and fast-nocompile); fast-exit and mps still refuse them, and every other
-    recurrent model stays refused by all of them."""
+    (gdn: basal/gdn_graph.py, --mode fast and fast-nocompile); fast-exit still refuses them, --mode mps too
+    (gdn_mps_refused), and every other recurrent model stays refused by all of them."""
     if gdn:
-        return (f"{model}: {what} (recurrent state: Gated DeltaNet, Qwen3.5). --mode fast-exit and --mode mps keep "
-                "attention keys and values only and would answer wrongly; serve it with --mode fast (CUDA), --mode "
-                "eager (exact) or --mode vllm")
+        return (f"{model}: {what} (recurrent state: Gated DeltaNet, Qwen3.5). --mode fast-exit keeps attention keys "
+                "and values only, between exit heads trained for Llama models, and would answer wrongly; serve it with "
+                "--mode fast (CUDA), --mode eager (exact) or --mode vllm")
     return (f"{model}: {what} (recurrent state: Gated DeltaNet / linear attention, as in Qwen3.5). The CUDA graph "
             "engine (--mode fast, fast-nocompile, fast-exit, fp8, nvfp4) carries the recurrent state of Qwen3.5 "
             "decoders only, and --mode mps of none: they would answer wrongly; serve it with --mode eager (exact) or "
             "--mode vllm (faster), or --mode gguf with a GGUF file")
+
+
+def gdn_mps_refused(model):
+    """--mode mps of a Qwen3.5 model (basal 2.5). GDNMPSBackend (basal/gdn_graph.py) carries the recurrent state and
+    answers as --mode eager does, but without flash-linear-attention (CUDA only) its Gated DeltaNet layers run the
+    reference PyTorch kernels: about 3.75 s per prompt for the 0.8B pico on an M4 Pro (eager: 4.2 s). Refused
+    until a Metal kernel exists; BASAL_EXPERIMENTAL_GDN_MPS=1 turns it on for development only."""
+    return (f"{model}: --mode mps is not served for Qwen3.5 (Gated DeltaNet) models in this version: without "
+            "flash-linear-attention's kernels (CUDA only) its Gated DeltaNet layers take seconds per prompt on an Apple "
+            "GPU. On a Mac serve the -GGUF file with --mode gguf (llama.cpp on Metal); MLX (--mode mlx) is the other "
+            "Mac path, for models with an -MLX port. --mode eager (exact) runs it anywhere, --mode fast on CUDA")
 
 
 def fp8_refused():
@@ -2994,6 +3005,18 @@ class MPSBackend(GraphBackend):
     to the longest packed row of the chunk."""
 
     streams, inflight = False, 1  # its own run_shared: no early readouts, one call at a time
+
+    def __new__(cls, model_dir=None, *args, **kwargs):
+        """MPSBackend(model_dir, ...) of a Qwen3.5 model with prefix sharing is refused (gdn_mps_refused) before
+        anything is loaded; with BASAL_EXPERIMENTAL_GDN_MPS=1 it builds GDNMPSBackend (basal/gdn_graph.py), which
+        carries the recurrent state through both passes."""
+        if cls is MPSBackend and model_dir is not None and kwargs.get("shared", args[1] if len(args) > 1 else True):
+            from .gdn_graph import GDNMPSBackend, is_gdn
+            if is_gdn(model_dir):
+                if os.environ.get("BASAL_EXPERIMENTAL_GDN_MPS") != "1":
+                    raise ValueError(gdn_mps_refused(model_dir))
+                return super().__new__(GDNMPSBackend)
+        return super().__new__(cls)
 
     def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None):
         what = recurrent_layers(model_dir) if shared else None  # without sharing: EagerBackend's forwards (exact)
