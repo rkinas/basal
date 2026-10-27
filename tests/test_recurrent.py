@@ -644,3 +644,18 @@ def test_fla_autotuners_skip_dead_weak_proxies():
     del o
     holder = [dead]  # keeps the dead proxy in gc's lists
     assert isinstance(gdn_module._fla_autotuners(), dict) and holder
+
+
+def test_vllm_deterministic_preset_refused_for_qwen35_before_download(monkeypatch, qwen35):
+    """vLLM's batch-invariant mode has no Gated DeltaNet kernel (vLLM 0.31 raises in its engine core): basal-serve refuses
+    --vllm-preset deterministic for a recurrent model before the weights load, and keeps the default preset."""
+    def resolve(name, revision=None, metadata_only=False):
+        if not metadata_only:
+            raise RuntimeError("loading the weights")
+        return str(qwen35)
+    monkeypatch.setattr(server_module, "resolve", resolve)
+    with pytest.raises(SystemExit, match="batch-invariant kernels do not cover 18 linear_attention layers"):
+        Server(parser().parse_args(["--model", "Remek/basal-omni-pico", "--mode", "vllm", "--vllm-preset",
+                                    "deterministic"]))
+    with pytest.raises(RuntimeError, match="loading the weights"):  # the default preset goes on to load
+        Server(parser().parse_args(["--model", "Remek/basal-omni-pico", "--mode", "vllm"]))
