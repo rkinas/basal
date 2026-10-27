@@ -252,6 +252,30 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   not answer 200 (for example 503 while it loads) leaves the previous answers in place; the request does not fail.
   [docs/RESULTS.md](RESULTS.md#cascade-pico-mini-ultra) shows accuracy and the share each level answers at
   thresholds 0.6 to 0.9.
+- `--blend URL ... --blend-weights W0 W1 ...` (opt-in, not with `--escalate`): every question is also asked of each
+  `--blend` pool (one model per flag, repeat it), at the same time, and a plain choice, noul or score answer gets the
+  weighted mean of the models' probabilities, `W0` for `--replicas` and then one weight per `--blend` in order:
+  p = sum(w x p_model) / sum(w). The choice, noul, score and confidence follow from it, and the answer says
+  `"blend": {"models": [...], "weights": [...]}` (the names the replicas report) and `"calibrated": false`. A model
+  that is down or does not answer 200 is left out and the others' weights are used; the request does not fail.
+  Multi, act, tool and task answers, and questions with `coverage`, `max_error` or `evidence`, keep the first
+  replica's answer (its certificates hold for that one model). `/metrics` counts blended answers by the number of
+  models in them (`basal_router_blend_answers_total`).
+  - **A quality option, not a speed option:** every question is asked of every model, so a blend is slower than its
+    largest model alone.
+  - **Put your strongest model first** (`--replicas`): questions that are not blended get its answer, and its own
+    certificates still hold for them.
+  - **Not calibrated:** no model's certified thresholds hold for the blend, so a blended answer carries no `abstain`,
+    `max_error`, `answer_set` or `calibration` field. The blend's calibration error (ECE) was 0.041 against 0.016 for
+    ultra alone on our held-out confirm split, so refit thresholds with `basal-calibrate` on the blend's output before
+    you automate blended answers.
+  - The weights are yours to choose. In the example, 0.6 / 0.2 / 0.2 were chosen on one half of our held-out tests
+    and measured on the other ([docs/RESULTS.md](RESULTS.md#cascade-pico-mini-ultra)).
+
+  ```
+  basal-router --replicas http://127.0.0.1:8003 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8001 \
+      --blend-weights 0.6 0.2 0.2 --port 8000          # ultra first, then mini and pico
+  ```
 - `--route SCRIPT=URL[,URL]`: requests whose state is mostly in that script (latin, cyrillic, greek, arabic, hebrew,
   cjk, other) go to those replicas, for example a model trained for Ukrainian; the rest go to `--replicas`
   (`basal_router_script_total`).
@@ -306,8 +330,8 @@ state cache is read without waiting for its lock; while the engine holds it, the
 `basal_state_cache_snapshot_timestamp_seconds` gives their Unix time (0 before the first read; the cache values are
 left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP
 API. basal-router's own metrics are per replica: readiness, requests in flight, requests routed by state and by load,
-failures; with `--escalate`, answers by the first replica and escalated (with several levels also per level), and with
-`--route`, requests by script.
+failures; with `--escalate`, answers by the first replica and escalated (with several levels also per level); with
+`--blend`, blended answers by the number of models; with `--route`, requests by script.
 
 ## Inference on a JSONL file
 

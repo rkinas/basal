@@ -509,3 +509,125 @@ def test_levels_from_the_command_line(monkeypatch):
                 ["--escalate", MID, "--escalate"]):
         with pytest.raises(SystemExit, match="basal-router: "):
             R.main(base + bad)
+
+
+# Blend (2.5): --blend URL ... --blend-weights W0 W1 ...: the weighted mean of the models' probabilities
+def _choice(p):
+    return {"type": "choice", "choice": max(p, key=p.get), "probabilities": dict(p), "confidence": max(p.values())}
+
+
+def _noul(t):
+    return {"type": "noul", "noul": t, "probabilities": {"true": t, "false": 1 - t}, "confidence": max(t, 1 - t)}
+
+
+def _score(p):
+    return {"type": "score", "score": float(sum(i * v for i, v in enumerate(p.values()))), "legend": {"0": "low"},
+            "probabilities": dict(p), "confidence": max(p.values())}
+
+
+BLEND_CONF = {SMALL: {"c": _choice({"a": 0.5, "b": 0.3, "c": 0.2}), "n": _noul(0.3), "s": _score({"0": 0.6, "1": 0.4})},
+              MID: {"c": _choice({"a": 0.2, "b": 0.7, "c": 0.1}), "n": _noul(0.9), "s": _score({"0": 0.1, "1": 0.9})},
+              BIG: {"c": _choice({"a": 0.45, "b": 0.45, "c": 0.1}), "n": _noul(0.6), "s": _score({"0": 0.5, "1": 0.5})}}
+W = (0.2, 0.2, 0.6)
+
+
+def blend_router(conf, asked, **kw):
+    return R.Router([SMALL], transport=level_transport(conf, asked, **kw), blend=[([MID], W[1]), ([BIG], W[2])],
+                    blend_weight=W[0])
+
+
+def _mean(q, urls, ws, conf=BLEND_CONF):
+    keys = list(conf[SMALL][q]["probabilities"])
+    return {k: sum(w * conf[u][q]["probabilities"][k] for w, u in zip(ws, urls)) / sum(ws) for k in keys}
+
+
+def test_blend_mixes_the_models_probabilities():
+    asked = {}
+    rt = blend_router(BLEND_CONF, asked)
+    qs = {"c": {"type": "choice"}, "n": {"type": "noul"}, "s": {"type": "score"}}
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        r = c.post("/v1/systemone", json={"state": "Doc", "questions": qs}).json()
+        m = c.get("/metrics").text
+    a, urls = r["answers"], (SMALL, MID, BIG)
+    for q in qs:
+        p = _mean(q, urls, W)
+        assert a[q]["probabilities"] == p and a[q]["confidence"] == max(p.values())  # bit for bit: the same formula
+        assert a[q]["blend"] == {"models": ["model-small", "model-mid", "model-big"], "weights": list(W)}
+        assert a[q]["calibrated"] is False
+    assert a["c"]["choice"] == "b"                                # a 0.41, b 0.47, c 0.12 (the first replica said a)
+    assert a["n"]["noul"] == _mean("n", urls, W)["true"]
+    assert a["s"]["score"] == sum(i * v for i, v in enumerate(_mean("s", urls, W).values()))
+    assert a["s"]["legend"] == {"0": "low"} and r["model"] == "model-small"
+    assert asked == {SMALL: [sorted(qs)], MID: [sorted(qs)], BIG: [sorted(qs)]}
+    assert 'basal_router_blend_answers_total{models="3"} 3' in m
+
+
+def test_blended_answers_carry_no_single_model_calibration():
+    """Fields that rest on one model's calibration are dropped from a blended answer (a replica that adds them to
+    plain answers: an older or another server)."""
+    extra = {"abstain": False, "max_error": "x", "answer_set": ["a"], "coverage": 0.9, "coverage_note": "x",
+             "calibration": "validated", "reread": True}
+    conf = {u: dict(BLEND_CONF[u], c=dict(BLEND_CONF[u]["c"], **extra)) for u in (SMALL, MID, BIG)}
+    rt = blend_router(conf, {})
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        a = c.post("/v1/systemone", json={"state": "Doc", "questions": {"c": {"type": "choice"}}}).json()["answers"]["c"]
+    assert not set(a) & set(R.CERTIFIED) and a["calibrated"] is False and a["reread"] is True
+
+
+def test_blend_leaves_other_answers_to_the_first_replica():
+    asked = {}
+    conf = {u: dict(BLEND_CONF[u], m={"type": "multi", "selected": ["x"], "probabilities": {"x": 0.6, "y": 0.1}},
+                    t={"type": "classify", "label": "x", "scores": {"x": 0.6}, "confidence": 0.6},
+                    k=_choice({"a": 0.9, "b": 0.1}), e=_choice({"a": 0.9, "b": 0.1})) for u in (SMALL, MID, BIG)}
+    rt = blend_router(conf, asked)
+    qs = {"c": {"type": "choice"}, "m": {"type": "multi"}, "t": {"type": "classify"},
+          "k": {"type": "choice", "max_error": 0.05}, "e": {"type": "choice", "evidence": True}}
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        a = c.post("/v1/systemone", json={"state": "Doc", "questions": qs}).json()["answers"]
+    assert asked[MID] == [["c"]] and asked[BIG] == [["c"]]       # only the blendable question is asked again
+    for q in ("m", "t", "k", "e"):
+        assert a[q] == conf[SMALL][q]
+    assert "blend" in a["c"]
+
+
+@pytest.mark.parametrize("down", ["not ready", "503", "unreachable"])
+def test_blend_without_a_model_uses_the_others(down):
+    kw = {"not ready": {"health": {BIG: 503}}, "503": {"post": {BIG: 503}},
+          "unreachable": {"post": {BIG: httpx.ConnectError("refused")}}}[down]
+    rt = blend_router(BLEND_CONF, {}, **kw)
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        resp = c.post("/v1/systemone", json={"state": "Doc", "questions": {"c": {"type": "choice"}}})
+    assert resp.status_code == 200
+    a = resp.json()["answers"]["c"]
+    assert a["probabilities"] == _mean("c", (SMALL, MID), W[:2]) and a["blend"]["models"] == ["model-small", "model-mid"]
+
+
+def test_blend_with_only_the_first_model_keeps_its_answer():
+    rt = blend_router(BLEND_CONF, {}, post={MID: 503, BIG: 503})
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        a = c.post("/v1/systemone", json={"state": "Doc", "questions": {"c": {"type": "choice"}}}).json()["answers"]["c"]
+    assert a == dict(BLEND_CONF[SMALL]["c"], blend={"models": ["model-small"], "weights": [W[0]]})
+
+
+def test_blend_from_the_command_line(monkeypatch):
+    got = []
+    monkeypatch.setattr(R, "Router", lambda urls, **kw: got.append((kw["blend_weight"], kw["blend"]))
+                        or type("F", (), {"dead": False})())
+    monkeypatch.setattr(R, "app", lambda *a, **k: None)
+    monkeypatch.setattr(R.signal, "signal", lambda *a: None)
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    base = ["--replicas", SMALL]
+    R.main(base)
+    R.main(base + ["--blend", MID, "--blend", BIG, "http://big2", "--blend-weights", "0.2", "0.2", "0.6"])
+    assert got == [(1.0, []), (0.2, [([MID], 0.2), ([BIG, "http://big2"], 0.6)])]
+    for bad in (["--blend", MID, "--blend-weights", "0.5"], ["--blend-weights", "1", "1"],
+                ["--blend", MID, "--blend-weights", "0.5", "-0.1"], ["--blend", MID, "--blend-weights", "0", "0"],
+                ["--blend", MID, "--blend-weights", "1", "1", "--escalate", BIG]):
+        with pytest.raises(SystemExit, match="basal-router: "):
+            R.main(base + bad)
