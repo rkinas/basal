@@ -192,6 +192,25 @@ def test_starting_frees_the_port_of_a_process_forked_during_start_up():
         child.join()
 
 
+
+def test_starting_port_is_not_inherited_by_a_spawned_process():
+    """Processes started with exec while the 503 server holds the port (basal-router's replicas, Triton / Inductor
+    compile workers, any subprocess) never get its socket: Python creates it non-inheritable (close-on-exec)."""
+    import subprocess
+    import sys
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    st = S.Starting("127.0.0.1", port)
+    try:
+        fd = st.httpd.socket.fileno()
+        assert not st.httpd.socket.get_inheritable()
+        code = ("import os, stat, sys\ntry:\n"
+                f"    sys.exit(0 if stat.S_ISSOCK(os.fstat({fd}).st_mode) else 3)\nexcept OSError:\n    sys.exit(3)")
+        assert subprocess.run([sys.executable, "-c", code]).returncode == 3  # no socket at that fd in the child
+    finally:
+        st.stop()
+
 def cascade_transport(conf):
     """Fake replicas that answer every question with top probability conf[replica] (and say who answered)."""
     def handler(req):

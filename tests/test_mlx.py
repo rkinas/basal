@@ -519,3 +519,17 @@ def test_mlx_qwen35_computes_in_float32(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({**cfg, "quantization": {"group_size": 64, "bits": 8}}))
     with pytest.raises(ValueError, match="quantised MLX weights are not checked for Qwen3.5"):
         mlx_stub(tmp_path)
+
+
+def test_mlx_state_cache_refused_for_qwen35_before_loading(tmp_path, monkeypatch):
+    """The MLX state cache holds attention keys and values only: --state-cache-gb / --prefix-cache are refused for a
+    Qwen3.5 model before mlx is imported."""
+    import json
+    import sys
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5_text",
+                                                      "layer_types": ["linear_attention", "full_attention"]}))
+    monkeypatch.setitem(sys.modules, "mlx", None)
+    be = MLXBackend.__new__(MLXBackend)
+    be.state_cache = object()
+    with pytest.raises(ValueError, match="--state-cache-gb / --prefix-cache on --mode mlx"):
+        be._load(tmp_path)
