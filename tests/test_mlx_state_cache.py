@@ -120,7 +120,7 @@ def test_entries_are_copies_within_the_budget(tmp_path, forward):
     before = mx.get_active_memory()
     be.run_shared([(TOKS, LIDS, len(STATE))])
     gc.collect(); mx.clear_cache()
-    (kv, size, _), = be.state_cache.entries.values()
+    (kv, size, *_), = be.state_cache.entries.values()  # (kv, size, tokens[, blocks])
     assert mx.get_active_memory() - before < 1.5 * size  # the buffers hold 256 of the state's 120 tokens
     layers, kv_heads, head = 2, 2, 16  # tiny_llama
     assert size == 2 * layers * kv_heads * len(STATE) * head * kv[0][0].itemsize
