@@ -50,6 +50,17 @@
   questions 62.4 -> 48.6 ms (basal-2.0-4.5B: 117 -> 99 ms); every probability bit-identical to 2.3.5.
   `fast-nocompile` keeps the merge op by op. Contributed by Miłosz Kucharski (@Butterski),
   [#44](https://github.com/rkinas/basal/pull/44).
+- **State cache on Apple Silicon** (`--mode mlx`, opt-in): `--state-cache-gb N` and `--prefix-cache on` work on the
+  Mac as on the CUDA graph engine, with both `--mlx-forward` paths. A request whose state (or template prefix) is
+  cached computes only its questions. The probabilities equal the server without the cache bit for bit: MLX picks its
+  matmul and attention kernels by the shape of the call, so the cached path runs its forwards at the uncached
+  forward's row and key counts (zero rows and keys added). A state that begins with a cached one (a growing agent
+  trace or chat) computes only its new tokens where that keeps the bits (basal-2.0-mini: from about 1,024 tokens on;
+  basal-omni: never, it is computed afresh). Apple M4 Pro, basal-2.0-mini-MLX-8bit and basal-omni-1.0-mini-MLX, both
+  forwards, 1,032 readouts per run: every probability equal to the cache off. p50 on basal-2.0-mini: five questions
+  about a ~1.5k-token state 1.10 -> 0.33 s, one question 0.51 -> 0.09 s.
+  [HARDWARE.md](HARDWARE.md#apple-m4-state-cache-on---mode-mlx). Contributed by Grzegorz Stark (@gstark0),
+  [#50](https://github.com/rkinas/basal/pull/50).
 - **`GET /metrics` additions:** the engine version (`basal_build_info{version,model,mode,layout}`), the state cache's
   evictions and prefix hits, and a cache read that never waits for the engine's lock (the last values and their time
   instead). [SERVING.md](SERVING.md#prometheus-metrics). Contributed by Marcin Brzeżański (@marcinbrzezanski),

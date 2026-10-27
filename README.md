@@ -619,6 +619,9 @@ Thank you to the people whose work is in this repository, by pull request:
 - Marcin Brzeżański ([@marcinbrzezanski](https://github.com/marcinbrzezanski)): Prometheus metrics: the engine version,
   the state cache's evictions and prefix hits, and a cache read that never waits for the engine
   ([#48](https://github.com/rkinas/basal/pull/48)).
+- Grzegorz Stark ([@gstark0](https://github.com/gstark0)): `--state-cache-gb` and `--prefix-cache` on Apple Silicon
+  (`--mode mlx`), with the guard against MLX's fused attention losing precision for a few queries over a cache
+  ([#50](https://github.com/rkinas/basal/pull/50)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),
