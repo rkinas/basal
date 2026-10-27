@@ -220,6 +220,84 @@ def test_media_prompt_over_the_context(monkeypatch):
         be.run_media([[{"role": "user", "content": "a"}]], [[10, 11]], ["IMG"], [], 280, 16383)
 
 
+@pytest.fixture
+def fake_async_vllm(monkeypatch):
+    """vLLM's AsyncLLM stubbed: generate() answers a prompt only once `wait` prompts are in the engine at the same
+    time, so a backend that sends one call after another never gets an answer (the test then times out)."""
+    import asyncio
+    import types
+    seen = dict(prompts=0, peak=0, wait=1)
+
+    class AsyncEngineArgs:
+        def __init__(self, **kw):
+            seen["args"] = kw
+
+    class Engine:
+        cond = None
+
+        async def generate(self, prompt, sp, request_id):
+            if Engine.cond is None:
+                Engine.cond = asyncio.Condition()
+            async with Engine.cond:
+                seen["prompts"] += 1
+                seen["peak"] = max(seen["peak"], seen["prompts"])
+                Engine.cond.notify_all()
+                await Engine.cond.wait_for(lambda: seen["peak"] >= seen["wait"])
+            seen["prompts"] -= 1
+            seen.setdefault("ids", []).append(request_id)
+            yield Out(list(prompt), {sp["allowed_token_ids"][0]: -0.1, sp["allowed_token_ids"][1]: -2.4})
+
+        async def collective_rpc(self, method):
+            return [(0, 0)]
+
+    class AsyncLLM:
+        @staticmethod
+        def from_engine_args(args, usage_context):
+            seen["usage"] = usage_context
+            return Engine()
+    mods = {"vllm": types.ModuleType("vllm"), "vllm.engine": types.ModuleType("vllm.engine"),
+            "vllm.engine.arg_utils": types.ModuleType("vllm.engine.arg_utils"),
+            "vllm.usage": types.ModuleType("vllm.usage"), "vllm.usage.usage_lib": types.ModuleType("vllm.usage.usage_lib"),
+            "vllm.v1": types.ModuleType("vllm.v1"), "vllm.v1.engine": types.ModuleType("vllm.v1.engine"),
+            "vllm.v1.engine.async_llm": types.ModuleType("vllm.v1.engine.async_llm"),
+            "vllm.inputs": types.ModuleType("vllm.inputs")}
+    mods["vllm"].LLM = lambda **kw: pytest.fail("--vllm-overlap on must not start LLM")
+    mods["vllm"].SamplingParams = lambda **kw: kw
+    mods["vllm.engine.arg_utils"].AsyncEngineArgs = AsyncEngineArgs
+    mods["vllm.usage.usage_lib"].UsageContext = type("UsageContext", (), {"LLM_CLASS": "LLM_CLASS"})
+    mods["vllm.v1.engine.async_llm"].AsyncLLM = AsyncLLM
+    mods["vllm.inputs"].TokensPrompt = lambda prompt_token_ids: prompt_token_ids
+    for k, v in mods.items():
+        monkeypatch.setitem(sys.modules, k, v)
+    monkeypatch.setattr("basal.engine.AutoTokenizer.from_pretrained", lambda *_: None)
+    return seen
+
+
+def test_overlap_runs_calls_together(tmp_path, fake_async_vllm):
+    """--vllm-overlap on: the engine arguments of LLM (its defaults: seed 0, no stats log; the LLM_CLASS scheduler
+    limits), several engine calls in flight without the lock, and each call gets its own prompts' answers in order."""
+    import concurrent.futures as cf
+    (tmp_path / "config.json").write_text(json.dumps(E4B), encoding="utf-8")
+    be = VLLMBackend(tmp_path, max_len=8192, overlap=True)
+    args = fake_async_vllm["args"]
+    assert args["seed"] == 0 and args["disable_log_stats"] and args["enable_prefix_caching"]
+    assert args["kv_sharing_fast_prefill"] and args["max_model_len"] == 8192 and args["logprobs_mode"] == "processed_logprobs"
+    assert fake_async_vllm["usage"] == "LLM_CLASS" and be.inflight == VLLMBackend.OVERLAP_CALLS
+    fake_async_vllm["wait"] = 3  # three prompts of two calls must be in the engine at once
+    with cf.ThreadPoolExecutor(2) as ex:
+        a = ex.submit(be.run_shared, [([[1, 2], [1, 3]], [[10, 11], [12, 13]])])
+        b = ex.submit(be.run_shared, [([[4, 5]], [[20, 21]])])
+        ra, rb = a.result(timeout=30), b.result(timeout=30)
+    assert fake_async_vllm["peak"] >= 3 and len(set(fake_async_vllm["ids"])) == 3
+    assert len(ra[0]) == 2 and len(rb[0]) == 1 and all(p[0] > 0.9 for p in ra[0] + rb[0])
+    assert be.llm.collective_rpc("basal_unified_flags") == [(0, 0)]  # (the Gemma 4 Unified media check)
+
+
+def test_overlap_flag():
+    assert parser().parse_args([]).vllm_overlap == "off"
+    assert parser().parse_args(["--mode", "vllm", "--vllm-overlap", "on"]).vllm_overlap == "on"
+
+
 def test_unified_audio_counts_as_its_processor():
     from basal.vllm_unified import audio_tokens
     # one soft token per 640 samples (40 ms at 16 kHz), the last one partly padded; the encoder models' count differs
