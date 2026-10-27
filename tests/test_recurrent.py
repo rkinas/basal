@@ -431,3 +431,19 @@ def test_gdn_engine_takes_every_graph_engine_option():
     quantisation options to every graph engine), so its __init__ takes every parameter GraphBackend's takes."""
     graph = set(inspect.signature(GraphBackend.__init__).parameters)
     assert graph <= set(inspect.signature(GDNGraphBackend.__init__).parameters)
+
+
+def test_fla_autotuners_skip_dead_weak_proxies():
+    """gc.get_objects() can hold a weakref.proxy whose object is gone; isinstance() on it raises ReferenceError, which
+    stopped basal-prepare's fla table on an H100 (26 Oct). The scan skips it."""
+    pytest.importorskip("triton")
+    import weakref
+
+    class Gone:
+        pass
+
+    o = Gone()
+    dead = weakref.proxy(o)
+    del o
+    holder = [dead]  # keeps the dead proxy in gc's lists
+    assert isinstance(gdn_module._fla_autotuners(), dict) and holder

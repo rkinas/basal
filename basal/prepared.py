@@ -14,9 +14,15 @@ kernels by timing) and, for Qwen3.5 models, times fla's Triton kernels at their 
 `basal-serve --prepared auto` (the default) loads a directory whose key matches before the engine is built: from the
 model directory (prepared/<key>/, shipped with a model) or the user cache (~/.cache/basal/prepared/<key>/, where
 basal-prepare writes). The key covers what the compiled code depends on: the GPU (name and compute capability), the
-torch / triton / fla / CUDA versions, the basal version, the model's architecture (config.json, not its weights: they
-are inputs of the compiled functions), the mode, dtype and attention. Any difference: nothing is loaded and the engine
-compiles as before. CUDA graphs are still captured at every start (they hold device addresses).
+torch / triton / CUDA versions (fla's for Qwen3.5 models), the Python and basal versions, the model's architecture
+(config.json, not its weights: they are inputs of the compiled functions), the mode, dtype and attention. Any
+difference: nothing is loaded and the engine compiles as before. CUDA graphs are still captured at every start (they
+hold device addresses). Inductor checks every loaded entry against its own key as well, so a directory that matches
+but holds kernels for another graph only leaves the start cold: answers never depend on what was loaded.
+
+Shipped with a model: a Hugging Face model repository holds prepared/<key>/ per GPU class and environment it was
+built for (basal-prepare --into-model). Downloading the model leaves prepared/ out (resolve); a start with --prepared
+auto fetches the one directory of its own key, if the repository has it (fetch).
 """
 import argparse
 import hashlib
@@ -38,7 +44,8 @@ def cache_root():
 def environment():
     """What compiled code depends on besides the model: GPU, library versions, basal."""
     from . import __version__
-    env = dict(basal=__version__, torch=torch.__version__, cuda=torch.version.cuda, python=platform.python_version())
+    python = ".".join(platform.python_version_tuple()[:2])  # (a patch release does not change compiled code)
+    env = dict(basal=__version__, torch=torch.__version__, cuda=torch.version.cuda, python=python)
     try:
         import triton
         env["triton"] = triton.__version__
@@ -66,7 +73,11 @@ def architecture(model_dir):
 
 
 def key_fields(model_dir, mode, dtype="bfloat16", attn="auto", env=None):
-    return dict(env or environment(), architecture=architecture(model_dir), mode=mode, dtype=dtype, attn=attn)
+    from .gdn_graph import is_gdn
+    env = dict(env or environment())
+    if not is_gdn(model_dir):  # fla's kernels run in Qwen3.5 models only: whether it is installed does not matter
+        env.pop("fla", None)
+    return dict(env, architecture=architecture(model_dir), mode=mode, dtype=dtype, attn=attn)
 
 
 def key(fields):
@@ -89,16 +100,43 @@ def locate(model_dir, fields, spec="auto"):
     return None
 
 
+def fetch(repo, revision, fields):
+    """prepared/<key>/ of a Hugging Face model repository, downloaded next to the model's files (its snapshot) ->
+    that directory, or None when the repository has none for this key or the Hub cannot be reached (the engine then
+    compiles as before; with HF_HUB_OFFLINE a directory fetched before is used)."""
+    k = key(fields)
+    try:
+        from huggingface_hub import hf_hub_download
+        m = Path(hf_hub_download(repo, f"prepared/{k}/manifest.json", revision=revision))
+        man = json.loads(m.read_text(encoding="utf-8"))
+    except Exception:  # (no such file, offline, no network)
+        return None
+    if man.get("fields") != fields:
+        return None
+    for f in man.get("files", FILES):
+        if f != "manifest.json":
+            try:
+                hf_hub_download(repo, f"prepared/{k}/{f}", revision=revision)
+            except Exception:  # (a file this directory does not have; load reads what arrived)
+                pass
+    return m.parent
+
+
 def load(d):
     """Loads a prepared directory before the engine compiles -> what was loaded (for the start-up line). Inductor's
     cache directory is set first, as the compiling engine sets it (engine.persist_compile_cache): the artifacts are
-    written into that directory, so they must land where the engine then looks."""
+    written into that directory, so they must land where the engine then looks. A file that cannot be read (a broken
+    download) is left out: those kernels compile as without it."""
     from .engine import persist_compile_cache
     persist_compile_cache()
     out = {"dir": str(d)}
     f = Path(d) / "inductor.bin"
     if f.exists():
-        info = torch.compiler.load_cache_artifacts(f.read_bytes())
+        try:
+            info = torch.compiler.load_cache_artifacts(f.read_bytes())
+        except Exception as e:  # noqa: BLE001
+            out["inductor"] = f"not loaded ({type(e).__name__})"
+            return out
         out["inductor"] = _count(info)
     f = Path(d) / "fla_configs.json"
     if f.exists():
@@ -132,7 +170,9 @@ def save(d, fields, fla=False):
     if fla:
         from .gdn_graph import fla_record
         saved["fla_kernels"] = fla_record(d / "fla_configs.json")
-    man = dict(fields=fields, key=key(fields), saved=saved, created_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    files = sorted(p.name for p in d.iterdir() if p.name in FILES) + ["manifest.json"]
+    man = dict(fields=fields, key=key(fields), saved=saved, files=sorted(set(files)),
+               created_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     (d / "manifest.json").write_text(json.dumps(man, indent=1, sort_keys=True))
     return man
 
@@ -148,7 +188,12 @@ def main(argv=None):
     ap.add_argument("--attn", default="auto")
     ap.add_argument("--out", default=None, help="directory to write (default: the user cache, ~/.cache/basal/prepared/"
                                                  "<key>, where basal-serve --prepared auto looks)")
+    ap.add_argument("--into-model", dest="into_model", action="store_true",
+                    help="write into the local model directory, as prepared/<key> (to ship with the model: basal-serve "
+                         "--prepared auto finds it there, also in the model's Hugging Face repository)")
     a = ap.parse_args(argv)
+    if a.into_model and (a.out or not Path(a.model).is_dir()):
+        raise SystemExit("--into-model: give --model as a local model directory, without --out")
     if not torch.cuda.is_available():
         raise SystemExit("basal-prepare needs a CUDA GPU (the prepared kernels are for the GPU it runs on)")
     from .engine import GraphBackend, resolve
@@ -158,7 +203,7 @@ def main(argv=None):
     t0 = time.time()
     quant = {"fast": None, "fp8": "fp8", "nvfp4": "nvfp4"}[a.mode]
     GraphBackend(md, a.dtype, quant, compile=True, attn=a.attn)  # compiles, autotunes and captures every shape
-    out = Path(a.out) if a.out else cache_root() / key(fields)
+    out = Path(a.out) if a.out else (Path(md) / "prepared" if a.into_model else cache_root()) / key(fields)
     man = save(out, fields, fla=is_gdn(md))
     print(json.dumps(dict(out=str(out), start_s=round(time.time() - t0, 1), **man), indent=1))
 

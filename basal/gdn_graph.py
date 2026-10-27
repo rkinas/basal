@@ -39,7 +39,8 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .engine import GraphBackend, PREFILL, StateCache, _copy_same, persist_compile_cache, set_attention
+from .engine import (GraphBackend, PREFILL, StateCache, _copy_same, graph_memory_bytes, persist_compile_cache,
+                     set_attention)
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -186,8 +187,11 @@ def _fla_autotuners():
             pass
     out = {}
     for o in gc.get_objects():
-        if isinstance(o, Autotuner) and str(getattr(o.base_fn, "__module__", "")).startswith("fla."):
-            out[f"{o.base_fn.__module__}.{o.base_fn.__qualname__}"] = o
+        try:
+            if isinstance(o, Autotuner) and str(getattr(o.base_fn, "__module__", "")).startswith("fla."):
+                out[f"{o.base_fn.__module__}.{o.base_fn.__qualname__}"] = o
+        except ReferenceError:  # a weakref.proxy whose object is gone: isinstance() reads its __class__
+            continue
     return out
 
 
@@ -516,9 +520,9 @@ class GDNGraphBackend(GraphBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
-                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16):
+                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
-        # engine; quantisation is refused here)
+        # engine; quantisation is refused here. graph_memory_gb: the pass-2 graphs captured, _pin_memory)
         if compile:
             persist_compile_cache()  # before anything compiles (GraphBackend.__init__)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)  # before loading
@@ -531,6 +535,7 @@ class GDNGraphBackend(GraphBackend):
             torch.backends.cuda.enable_cudnn_sdp(False)  # before capture: a captured graph keeps its attention kernel
             os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:2")  # (GraphBackend.__init__)
         self.fp8_checkpoint = False
+        self.graph_memory = graph_memory_bytes(graph_memory_gb)
         self.attn = set_attention(attn)  # the causal plain rows; pass 2 runs SDPA with its mask
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
@@ -556,6 +561,7 @@ class GDNGraphBackend(GraphBackend):
         if warm and cuda:
             self.warm()
         self.one_forward = self.ONE_FORWARD
+        self._shape_line()
 
     # -- buffers -------------------------------------------------------------------------------------------------
     def _root_len(self, L):
@@ -567,7 +573,9 @@ class GDNGraphBackend(GraphBackend):
         layer one flat buffer for keys and one for values, viewed per root bucket L2 as [rows, kv heads, L2, d] (a
         graph of length L <= L2 writes [:b, :, :L]); per Gated DeltaNet layer the recurrent states [rows, heads, dk,
         dv] (fp32) and convolution tails [rows, kernel - 1, channels]. Zeros, not empty: pass 2 reads the masked tail
-        of a root's bucket too, and a masked NaN still poisons a readout (0 x NaN)."""
+        of a root's bucket too, and a masked NaN still poisons a readout (0 x NaN). With --graph-memory-gb the pass-2
+        graphs captured follow it (_pin_memory)."""
+        self._pin_memory()
         self.kv_shapes = self.net.kv_shapes
         self.kv_shape = self.kv_shapes[0]
         R = self.TREE_ROWS[-1]
