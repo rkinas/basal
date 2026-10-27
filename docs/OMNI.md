@@ -170,13 +170,20 @@ calibration test split:
   `CALIBRATION.vllm.deterministic.json` only if its own file fails there; none does.
 - **Images and audio** (`--media on`, as with `--mode eager`, below): the prompts of a media request go to vLLM in one
   call with the chat-template text of the eager media path, and vLLM's Gemma 4 processor expands the media
-  placeholders to the same tokens. Checked on basal-omni-1.0-mini only: on the omni media check set (310 images and
-  285 audio clips with their text twins) the same top answer as `--mode eager --media on` on 96.5% of images and 98.3%
-  of clips (all where eager's margin is at least 0.2), accuracy +0.3 / +0.7 points, every prompt of the same length;
-  6.0x / 7.9x the requests per second at 8 in flight (75.7 vs 12.7 images, 84.9 vs 10.8 clips) and 17.7 / 42.6 ms
-  per request one at a time (eager 102 / 104 ms). basal-omni-1.1-max (Gemma 4 Unified, no image or audio encoder) is
-  refused: through vLLM its images got the eager answer on 94.2% only (accuracy -1.3 points) and 19 of 285 clips other
-  token counts. Ultra (images) is not checked yet.
+  placeholders to the same tokens. On the omni media check set (310 images and 285 audio clips with their text twins),
+  against `--mode eager --media on`: basal-omni-1.0-mini the same top answer on 96.5% of images and 98.3% of clips
+  (all where eager's margin is at least 0.2), accuracy +0.3 / +0.7 points, every prompt of the same length; 6.0x /
+  7.9x the requests per second at 8 in flight (75.7 vs 12.7 images, 84.9 vs 10.8 clips) and 17.7 / 42.6 ms per request
+  one at a time (eager 102 / 104 ms).
+- **basal-omni-1.1-max** (Gemma 4 Unified: no image or audio encoder) since 2.5: vLLM 0.31 reads such a model with the
+  rules of the encoder models (an image's soft tokens see each other only in the sliding-window layers, within the
+  window; audio counted in mel frames), so the engine patches both in vLLM's worker to the model's own (every layer,
+  past the window; one token per 640 samples) and refuses to start if the patch did not take. Same check set: the same
+  top answer on 97.4% of images and 95.8% of clips (all where eager's margin is at least 0.2), accuracy +0.3 / +0.4
+  points, every prompt of the same length; 2.7x / 2.9x the requests per second at 8 in flight (47.5 vs 17.6 images,
+  46.7 vs 16.3 clips) and 25.9 / 23.4 ms per request one at a time (eager 70 / 62 ms). `"detail": "high"` is refused
+  for it on `--mode vllm` (the eager answer on 54.8% of images only); use `--mode eager --media on` for it. Ultra
+  (images) is not checked yet.
 - **Not in 2.3:** FP8 weights quantised at load time (automation at 1% -0.5 to -9.5 points on the three tiers) and an
   FP8 KV cache (on mini -0.36 points [-0.57, -0.15] at 1% with the shipped file; on 12B / 31B it needs Triton attention
   and is slower than 2.2's path). The `-FP8` checkpoints are served as they are.

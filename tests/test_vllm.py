@@ -9,6 +9,7 @@ import pytest
 import basal.server as server_module
 from basal.calibrate import engine_name
 from basal.engine import VLLM_PRESETS, VLLMBackend, vllm_args
+from basal.prompt import RequestError
 from basal.server import calibration_file, calibration_name, load_calibration, models_payload, parser
 
 BF16 = {"architectures": ["Gemma4ForConditionalGeneration"], "vision_config": {"hidden_size": 1152},
@@ -125,9 +126,13 @@ def test_media_engine_args():
     assert vllm_args(E4B, media=True, fast_prefill=False)[0] == {"limit_mm_per_prompt": {"image": 8, "audio": 8,
                                                                                          "video": 0}}
     assert vllm_args(BF16, media=True)[0] == {"limit_mm_per_prompt": {"image": 8, "audio": 0, "video": 0}}  # ultra
+    unified = {**E4B, "architectures": ["Gemma4UnifiedForConditionalGeneration"]}  # basal-omni-1.1-max
+    kw, env = vllm_args(unified, media=True, fast_prefill=False)
+    assert kw["worker_extension_cls"] == "basal.vllm_unified.UnifiedWorker" and env == {"BASAL_VLLM_UNIFIED": "1"}
+    assert vllm_args(unified, fast_prefill=False) == ({}, {})  # text only: vLLM's own path
 
 
-def test_media_needs_an_encoder(tmp_path, fake_vllm):
+def test_media_needs_an_encoder(tmp_path, fake_vllm, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps(TEXT), encoding="utf-8")
     with pytest.raises(SystemExit, match="no image or audio encoder"):
         VLLMBackend(tmp_path, media=True)
@@ -136,8 +141,15 @@ def test_media_needs_an_encoder(tmp_path, fake_vllm):
     be = VLLMBackend(tmp_path, media=True)
     assert be.media_kinds == ("image", "audio") and be.max_audio_s == 30 and fake_vllm["limit_mm_per_prompt"]
     (tmp_path / "config.json").write_text(json.dumps({**E4B, "architectures": ["Gemma4UnifiedForConditionalGeneration"]}), encoding="utf-8")
-    with pytest.raises(SystemExit, match="does not serve Gemma 4 Unified"):  # 1.1-max failed the media gate
-        VLLMBackend(tmp_path, media=True)
+    import basal.vllm_unified as vu
+    calls = []
+    monkeypatch.setattr(vu, "patch", lambda: calls.append("patch"))
+    monkeypatch.setattr(vu, "check", lambda llm: calls.append(("check", type(llm).__name__)))
+    monkeypatch.delenv("BASAL_VLLM_UNIFIED", raising=False)
+    fake_vllm.clear()
+    VLLMBackend(tmp_path, media=True)  # 1.1-max: patched here, in vLLM's worker, then checked
+    assert calls == ["patch", ("check", "LLM")] and os.environ["BASAL_VLLM_UNIFIED"] == "1"
+    assert fake_vllm["worker_extension_cls"] == "basal.vllm_unified.UnifiedWorker"
 
 
 class Out:
@@ -161,6 +173,22 @@ def media_backend(monkeypatch, generate):
     be.tok = type("Tok", (), {"image_token_id": 7, "audio_token_id": 9, "apply_chat_template": template})()
     be.llm = type("L", (), {"generate": generate})()
     return be
+
+
+def test_unified_media_refuses_detail_high(monkeypatch):
+    calls = []
+
+    def generate(self, reqs, sps, use_tqdm):
+        calls.append(reqs)
+        return [Out([1, 7, 7, 2], {10: -0.1, 11: -2.4})]
+    be = media_backend(monkeypatch, generate)
+    be.unified = True  # basal-omni-1.1-max: detail "default" passed the media gate, "high" did not
+    msgs = [[{"role": "user", "content": "a"}]]
+    with pytest.raises(RequestError, match='detail "high" is not served with --mode vllm'):
+        be.run_media(msgs, [[10, 11]], ["IMG"], [], 1120)
+    assert not calls
+    assert len(be.run_media(msgs, [[10, 11]], ["IMG"], [], 280)) == 1
+    assert len(be.run_media(msgs, [[10, 11]], [], [[0.0, 0.1]], 1120)) == 1  # audio only: no image detail
 
 
 def test_media_prompts_share_one_vllm_call(monkeypatch):
@@ -190,3 +218,62 @@ def test_media_prompt_over_the_context(monkeypatch):
     be = media_backend(monkeypatch, generate)
     with pytest.raises(ValueError, match="the prompt with its media is 20000 tokens, more than the 16383 tokens"):
         be.run_media([[{"role": "user", "content": "a"}]], [[10, 11]], ["IMG"], [], 280, 16383)
+
+
+def test_unified_audio_counts_as_its_processor():
+    from basal.vllm_unified import audio_tokens
+    # one soft token per 640 samples (40 ms at 16 kHz), the last one partly padded; the encoder models' count differs
+    assert [audio_tokens(n) for n in (1, 640, 641, 16000, 480000)] == [1, 1, 2, 25, 750]
+    assert audio_tokens(480001, cap=750) == 750
+
+
+def test_unified_patch_and_check(monkeypatch):
+    import inspect
+    import torch
+    from types import SimpleNamespace
+    import basal.vllm_unified as vu
+
+    class Attn(torch.nn.Module):
+        def __init__(self, clamp):
+            super().__init__()
+            self.mm_prefix_clamp_sliding_window = clamp
+
+    class Model(torch.nn.Module):  # vLLM 0.31: image ranges cleared in the global layer, clamped in the sliding ones
+        def __init__(self, *, vllm_config, prefix=""):
+            super().__init__()
+            self.language_model = torch.nn.Sequential(Attn(True), Attn(False), Attn(True))
+            self._full_attn_layer_idxs = frozenset({1})
+
+        def _clear_mm_prefix_for_full_attn_layers(self):
+            pass
+
+    class Info:
+        def get_audio_repl(self, *, audio_len, processor=None):
+            raise AssertionError("the encoder models' count")
+
+        def get_hf_config(self):
+            return SimpleNamespace(boa_token_id=1, eoa_token_id=3)
+
+    details = SimpleNamespace(select_token_id=lambda ids, t: (ids, t))
+    mods = {n: type(sys)(n) for n in ("vllm", "vllm.model_executor", "vllm.model_executor.models",
+                                      "vllm.model_executor.models.gemma4_unified", "vllm.model_executor.models.gemma4_mm")}
+    mods["vllm.model_executor.models.gemma4_unified"].__dict__.update(
+        Gemma4UnifiedForConditionalGeneration=Model, Gemma4UnifiedProcessingInfo=Info)
+    mods["vllm.model_executor.models.gemma4_mm"].PromptUpdateDetails = details
+    mods["vllm.model_executor.models"].__dict__.update(gemma4_unified=mods["vllm.model_executor.models.gemma4_unified"],
+                                                       gemma4_mm=mods["vllm.model_executor.models.gemma4_mm"])
+    for n, m in mods.items():
+        monkeypatch.setitem(sys.modules, n, m)
+    assert vu.flags(Model(vllm_config=None)) == (1, 2)
+    vu.patch()
+    vu.patch()  # once
+    assert {"vllm_config", "prefix"} <= set(inspect.signature(Model.__init__).parameters)  # how vLLM calls it
+    m = Model(vllm_config=None)
+    assert vu.flags(m) == (0, 0)  # image blocks in every layer, past the window
+    proc = SimpleNamespace(feature_extractor=SimpleNamespace(audio_samples_per_token=640), audio_seq_length=750,
+                           audio_token_id=2)
+    assert Info().get_audio_repl(audio_len=16001, processor=proc) == ([1] + [2] * 26 + [3], 2)
+    worker = type("W", (vu.UnifiedWorker,), {"get_model": lambda self: m})()
+    vu.check(SimpleNamespace(collective_rpc=lambda name: [getattr(worker, name)()]))
+    with pytest.raises(SystemExit, match="did not take"):
+        vu.check(SimpleNamespace(collective_rpc=lambda name: [(1, 2)]))
