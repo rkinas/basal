@@ -330,7 +330,9 @@ Each answer has a probability for every option, the chosen key and the confidenc
 
 `POST /v1/systemone` with a `state` (text or JSON) and named, typed `questions`; every answer has a calibrated
 probability for each option and a `confidence`. Up to 255 options per question (basal-1.x models: 10); several
-questions over one state are answered in one pass.
+questions over one state are answered in one pass. `POST /v1/decisions` takes OpenAI's Decisions API (the OpenAI
+SDK's `client.decisions.create`) for predicate, choice and score questions
+([docs/API.md](docs/API.md#openais-decisions-api-post-v1decisions)).
 
 | type | answer | example |
 |---|---|---|

@@ -116,6 +116,38 @@ well:
 A request without these fields is answered as before. The example's own answers differ from basal-serve's in one way
 a client sees: its `noul` answer has only `noul`; `basal.client` fills in `probabilities` and `confidence`.
 
+## OpenAI's Decisions API (`POST /v1/decisions`)
+
+`POST /v1/decisions` takes the request shape of OpenAI's Decisions API, so `client.decisions.create` of the OpenAI
+Python SDK (checked with 3.40) works against basal-serve with `base_url="http://127.0.0.1:8000/v1"` (any `api_key`).
+Each request is decided as the System One request it stands for, with the same probabilities as `/v1/systemone`:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="none")
+decision = client.decisions.create(model="basal", input="I was charged twice.", questions=[
+    {"type": "predicate", "name": "angry", "instructions": "Is the customer angry?"},
+    {"type": "choice", "name": "team", "instructions": "Which team?",
+     "choices": [{"value": "billing", "description": "payments and invoices"}, {"value": "shipping"}]},
+    {"type": "score", "name": "urgency", "instructions": "How urgent?",
+     "levels": [{"label": "low"}, {"label": "medium"}, {"label": "high", "description": "today"}]}])
+print(decision.answers[0].probability, decision.answers[1].choice)
+```
+
+| Decisions API | System One question | answer |
+|---|---|---|
+| `input` | `state`: the text, or the list of messages / items as JSON (images are refused) | |
+| `predicate` | `noul` | `probability`: P(true) |
+| `choice` with `choices` `[{"value", "description"}]` | `choice` with `{value: description}` (a boolean value is shown as `true` / `false`) | `choice` and `probabilities` with the typed values, in the order of the choices; `confidence` |
+| `score` with `levels` `[{"label", "description"}]` | `score` with the levels `label` or `label: description` | `score` (expected level index), `probabilities` per level (`label`, `value` = index); `confidence` |
+
+Answers come in question order with the question's `name` (null without one); `usage` counts the prompt tokens.
+`model` and the prompt-cache fields are accepted and ignored; the served model answers. The engine-level types
+(`multi`, `act`, `tool`), `coverage`, `max_error` and `facts` stay on `/v1/systemone`. Errors have OpenAI's shape,
+`{"error": {"message", "type", "param", "code"}}`: HTTP 400 `invalid_request_error` for a request to change (the SDK
+raises `BadRequestError`), 5xx `server_error` otherwise.
+
 ## Question types
 
 | type | answer | example |
