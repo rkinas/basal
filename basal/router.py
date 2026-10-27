@@ -38,8 +38,8 @@ Off by default (the replicas' answers then pass through untouched):
                                                                                           GPU on ports 8001..)
   basal-router --replicas http://127.0.0.1:8001 --escalate http://127.0.0.1:8002 --escalate-below 0.8 \
                --escalate http://127.0.0.1:8003 --escalate-below 0.9   (pico on 8001, mini on 8002, ultra on 8003)
-  basal-router --replicas http://127.0.0.1:8001 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8003 \
-               --blend-weights 0.2 0.2 0.6
+  basal-router --replicas http://127.0.0.1:8003 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8001 \
+               --blend-weights 0.6 0.2 0.2   (ultra first: answers that are not blended are its own)
 GET /health: 200 when at least one replica is ready, else 503; /metrics: per replica in flight, requests routed by
 state / by load, failures, readiness, answers per cascade level, blended answers (Prometheus); /v1/models: the first
 ready replica's.

@@ -263,16 +263,18 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   models in them (`basal_router_blend_answers_total`).
   - **A quality option, not a speed option:** every question is asked of every model, so a blend is slower than its
     largest model alone.
+  - **Put your strongest model first** (`--replicas`): questions that are not blended get its answer, and its own
+    certificates still hold for them.
   - **Not calibrated:** no model's certified thresholds hold for the blend, so a blended answer carries no `abstain`,
-    `max_error`, `answer_set` or `calibration` field. Refit thresholds with `basal-calibrate` on the blend's output
-    before you automate decisions with it; on our held-out confirm split the blend's calibration error (ECE) was
-    0.041 against 0.016 for ultra alone.
-  - The weights are yours to choose. In the example, 0.2 / 0.2 / 0.6 were chosen on one half of our held-out tests
+    `max_error`, `answer_set` or `calibration` field. The blend's calibration error (ECE) was 0.041 against 0.016 for
+    ultra alone on our held-out confirm split, so refit thresholds with `basal-calibrate` on the blend's output before
+    you automate blended answers.
+  - The weights are yours to choose. In the example, 0.6 / 0.2 / 0.2 were chosen on one half of our held-out tests
     and measured on the other ([docs/RESULTS.md](RESULTS.md#cascade-pico-mini-ultra)).
 
   ```
-  basal-router --replicas http://127.0.0.1:8001 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8003 \
-      --blend-weights 0.2 0.2 0.6 --port 8000          # pico, mini, ultra
+  basal-router --replicas http://127.0.0.1:8003 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8001 \
+      --blend-weights 0.6 0.2 0.2 --port 8000          # ultra first, then mini and pico
   ```
 - `--route SCRIPT=URL[,URL]`: requests whose state is mostly in that script (latin, cyrillic, greek, arabic, hebrew,
   cjk, other) go to those replicas, for example a model trained for Ukrainian; the rest go to `--replicas`
