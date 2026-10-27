@@ -306,7 +306,8 @@ state cache is read without waiting for its lock; while the engine holds it, the
 `basal_state_cache_snapshot_timestamp_seconds` gives their Unix time (0 before the first read; the cache values are
 left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP
 API. basal-router's own metrics are per replica: readiness, requests in flight, requests routed by state and by load,
-failures.
+failures; with `--escalate`, answers by the first replica and escalated (with several levels also per level), and with
+`--route`, requests by script.
 
 ## Inference on a JSONL file
 
