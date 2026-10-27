@@ -137,3 +137,181 @@ def test_growing_and_edited_states_reuse_the_cached_prefix():
     s3 = s2[:22] + [rnd.randrange(3, 50) for _ in range(15)]            # edited after token 22
     check(be, requests(rnd, s3, 1))
     assert be.state_cache.stats()["prefix_hits"] >= 2 and be.state_cache.stats()["entries"] == 2
+
+
+def test_longest_chooses_best_cached_prefix():
+    cache = StateCache(budget_bytes=1024)
+    prefix = list(range(cache.BLOCK))
+    a = prefix + [10]
+    b = prefix + [20]
+    query = a + [99]
+    kv = [(torch.zeros(1), torch.zeros(1))]
+    cache.put(cache.key(a), kv, tokens=a)
+    cache.put(cache.key(b), kv, tokens=b)
+    match = cache.longest(query)
+    assert match is not None
+    assert match[0] == cache.key(a)
+    assert match[2] == len(a)
+
+
+def test_eviction_preserves_shared_prefix():
+    # Two cache entries fit, but three do not.
+    cache = StateCache(budget_bytes=16)
+    prefix = list(range(cache.BLOCK))
+    a = prefix + [10]
+    b = prefix + [20]
+    c = list(range(1000, 1000 + cache.BLOCK)) + [30]
+    kv = [(torch.zeros(1), torch.zeros(1))]
+    key_a = cache.key(a)
+    key_b = cache.key(b)
+    cache.put(key_a, kv, tokens=a)
+    cache.put(key_b, kv, tokens=b)
+    # Refresh A so B becomes the LRU entry.
+    assert cache.get(key_a) is not None
+    # Adding C must evict B, not A.
+    cache.put(cache.key(c), kv, tokens=c)
+    assert cache.has(key_a)
+    assert not cache.has(key_b)
+    # A is still cached and should be discoverable.
+    match = cache.longest(a + [99])
+    assert match is not None
+    assert match[0] == key_a
+    assert match[2] == len(a)
+
+
+def test_shared_prefix_ties_and_replacement():
+    cache = StateCache(1024)
+    cache.BLOCK = 4
+    prefix = [1, 2, 3, 4]
+    a, b = prefix + [10, 1], prefix + [20, 1]
+    kv = [(torch.zeros(1), torch.zeros(1))]
+    for tokens in (a, b):
+        cache.put(cache.key(tokens), kv, tokens=tokens)
+    cache.get(cache.key(a))
+    assert cache.longest(prefix + [99])[0] == cache.key(a)  # insertion order, independent of LRU
+    extended = a + [30]
+    cache.put(cache.key(extended), kv, tokens=extended, replaces=cache.key(a))
+    assert not cache.has(cache.key(a))
+    assert cache.longest(prefix + [99])[0] == cache.key(b)
+    assert cache.longest(extended + [31])[2] == len(extended)
+
+
+def test_best_shared_prefix_continues_the_model_from_the_right_token():
+    rnd = random.Random(3)
+    be = Stub(tiny())
+    be.state_cache = StateCache(1 << 20)
+    be.state_cache.BLOCK = 4
+    prefix = [1] + [rnd.randrange(3, 50) for _ in range(11)]
+    a, b = prefix + [10], prefix + [20]
+    for state in (a, b, a + [30]):
+        check(be, requests(rnd, state, 1))
+    assert not be.state_cache.has(be.state_cache.key(a))  # the whole A was reused, so its extension replaces it
+    assert be.state_cache.has(be.state_cache.key(b))
+    assert be.state_cache.stats()["entries"] == 2
+
+
+def test_prefix_index_matches_full_scan_after_updates():
+    """Independent oracle: compare every live state's tokens, including edits, short queries and LRU churn."""
+    from collections import OrderedDict
+
+    for block in (1, 4, 256):
+        rnd = random.Random(42)
+        cache = StateCache(5 * 8)
+        cache.BLOCK = block
+        live = OrderedDict()
+        kv = [(torch.zeros(1), torch.zeros(1))]
+        base = [rnd.randrange(8) for _ in range(3 * block + 3)]
+        for _ in range(300):
+            replaces = None
+            if live and rnd.random() < 0.5:
+                key = rnd.choice(list(live))
+                own = live[key]
+                if own is not None and rnd.random() < 0.5:
+                    tokens, replaces = own + [rnd.randrange(8)], key
+                else:
+                    tokens = base[:rnd.randrange(len(base) + 1)] + [rnd.randrange(8)]
+            else:
+                tokens = base[:rnd.randrange(len(base) + 1)] + [rnd.randrange(8)]
+            key = cache.key(tokens)
+            stored = tokens if rnd.random() < 0.9 else None
+            cache.put(key, kv, tokens=stored, replaces=replaces)
+            live.pop(replaces, None)
+            if key not in live:
+                live[key] = stored
+            while len(live) > 5:
+                live.popitem(last=False)
+            touch = rnd.choice(list(live))
+            assert cache.get(touch) is kv
+            live.move_to_end(touch)
+
+            query = list(rnd.choice(list(live.values())) or base)
+            if rnd.random() < 0.5:
+                query = query[:rnd.randrange(len(query) + 1)]
+            query += [rnd.randrange(8) for _ in range(rnd.randrange(block + 2))]
+            lengths = {}
+            for k, own in live.items():
+                if own is not None:
+                    lengths[k] = next((i for i, (a, b) in enumerate(zip(own, query)) if a != b),
+                                      min(len(own), len(query)))
+            longest = max(lengths.values(), default=0)
+            match = cache.longest(query)
+            if longest < block:
+                assert match is None
+            else:
+                assert match is not None and match[2] == lengths[match[0]] == longest
+                assert match[1] is kv and match[3] == len(live[match[0]])
+                live.move_to_end(match[0])
+            assert list(cache.entries) == list(live)
+            assert cache.stats()["used_bytes"] == 8 * len(live)
+        for i in range(5):
+            cache.put(cache.key([-i - 1]), kv)  # evict all indexed states with entries without token ids
+        assert not cache.index
+
+
+def test_gemma_cache_chooses_a_usable_prefix(monkeypatch):
+    from tests.test_gemma4_graph import Stub as GemmaStub, tiny as gemma_tiny, separate as gemma_separate
+
+    be = GemmaStub(gemma_tiny("e4b", torch.float32))
+    query = [1] + [3 + i % 40 for i in range(599)]
+    short = query[:299]
+    short_kv, _ = be._continue(short)
+    groups = [([query + [10, 11]], [[7, 8]], len(query))]
+    reference = gemma_separate(be.model, groups[0][0], groups[0][1])[0]
+    forward, calls = be._continue, []
+
+    def observed(tokens, prefix=None, m=0):
+        calls.append(m)
+        return forward(tokens, prefix, m)
+
+    monkeypatch.setattr(be, "_continue", observed)
+    for raw_match in (300, 550):  # same bucket, then an unusable match in a deeper bucket
+        long = query[:raw_match] + [61] + [62] * 299
+        long_kv, _ = forward(long)
+        cache = be.state_cache = StateCache(1 << 24)
+        cache.put(cache.key(long), long_kv, tokens=long)
+        cache.put(cache.key(short), short_kv, tokens=short)
+        assert cache.longest(query)[2] == raw_match
+        assert be._usable(long_kv, raw_match, len(long)) == 0
+        before = cache.stats()["prefix_hits"]
+        lru = list(cache.entries)
+        assert cache.longest(query, lambda *_: False) is None
+        assert cache.stats()["prefix_hits"] == before and list(cache.entries) == lru
+        calls.clear()
+        got = torch.tensor(be.run_shared(groups)[0][0])
+        assert calls == [len(short)]
+        assert torch.allclose(got, reference, atol=1e-6)
+
+
+def test_longest_gives_an_8bit_entry_in_its_dtype_to_usable_and_the_caller():
+    """--state-cache-bits 8 with the usable() check: the check reads the keys' shape, and the caller continues from the
+    keys / values, so both get the entry dequantised (a packed entry is a tuple of its parts)."""
+    torch.manual_seed(0)
+    c = StateCache(1 << 30, bits=8)
+    toks = list(range(600))
+    kv = [(torch.randn(2, 600, 16), torch.randn(2, 600, 16))]
+    c.put(c.key(toks), kv, tokens=toks)
+    seen = []
+    found = c.longest(toks + [7] * 10, usable=lambda kv, m, n: seen.append(tuple(kv[0][0].shape)) or m)
+    assert found is not None and found[2] == 600 and found[3] == 600 and seen == [(2, 600, 16)]
+    k = found[1][0][0]
+    assert k.dtype == kv[0][0].dtype and (k - kv[0][0]).abs().max() < 0.1
