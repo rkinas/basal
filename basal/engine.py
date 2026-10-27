@@ -3388,6 +3388,10 @@ class MLXBackend:
             self.fwd = MLXForward.build(self.lm)
         self.forward = f"basal ({self.fwd.describe()})" if self.fwd else "mlx-lm"
         self.packed = bool(packed) and self._position_rope()
+        # Qwen3.5: unrelated prompts run one per forward. Its forward is compute-bound from a few hundred tokens, so a
+        # right-padded batch costs its longest prompt for every row (0.8B pico, M4 Pro, 200 held-out prompts of 722
+        # tokens on average: 175 ms per prompt in batches of 16, 146 ms one at a time)
+        self.alone = bool(what)
 
     def _exact_norms(self, md):
         """Qwen3.5: the (1 + w) RMSNorms as transformers computes them, (1 + w) in float32 and the product rounded to
@@ -3591,7 +3595,14 @@ class MLXBackend:
         return chunks + [cur]
 
     def _singles(self, toks, lids):
-        """Unrelated prompts: right-padded batches of similar length, no cache."""
+        """Unrelated prompts: right-padded batches of similar length, no cache; with `alone` (Qwen3.5) one prompt per
+        forward, each queued (mx.async_eval) while the GPU runs the one before."""
+        if self.alone:
+            hs = []
+            for t in toks:
+                hs.append(self._forward([t]))
+                self.mx.async_eval(hs[-1])
+            return self._letters(self.mx.concatenate(hs), lids)
         res = [None] * len(toks)
         for c in self._chunks([len(t) for t in toks]):
             for j, p in zip(c, self._letters(self._forward([toks[j] for j in c]), [lids[j] for j in c])):
