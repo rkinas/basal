@@ -372,7 +372,7 @@ def test_mlx_forward_merges_checked_projections(tmp_path, arch, monkeypatch):
     """Merged projections: the separate layers keep views of the merged arrays (the loaded weights, bit for bit), the
     merged forward equals the separate one bit for bit, and a self-check that finds other bits keeps the separate
     layers (and says so in the start-up line)."""
-    mx = pytest.importorskip("mlx.core")
+    pytest.importorskip("mlx.core")
     from mlx.utils import tree_flatten
     import basal.mlx_forward as mf
     m = MODELS[arch](tmp_path)

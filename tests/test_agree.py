@@ -4,7 +4,6 @@ import json
 import re
 import zlib
 
-import pytest
 import torch
 
 from basal import agree
