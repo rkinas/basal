@@ -211,6 +211,7 @@ def test_unified_audio_counts_as_its_processor():
 
 
 def test_unified_patch_and_check(monkeypatch):
+    import inspect
     import torch
     from types import SimpleNamespace
     import basal.vllm_unified as vu
@@ -249,6 +250,7 @@ def test_unified_patch_and_check(monkeypatch):
     assert vu.flags(Model(vllm_config=None)) == (1, 2)
     vu.patch()
     vu.patch()  # once
+    assert {"vllm_config", "prefix"} <= set(inspect.signature(Model.__init__).parameters)  # how vLLM calls it
     m = Model(vllm_config=None)
     assert vu.flags(m) == (0, 0)  # image blocks in every layer, past the window
     proc = SimpleNamespace(feature_extractor=SimpleNamespace(audio_samples_per_token=640), audio_seq_length=750,

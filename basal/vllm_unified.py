@@ -58,8 +58,8 @@ def patch():
                          "one checked (vLLM 0.31); use --mode eager --media on")
     init = model.__init__
 
-    def __init__(self, *args, **kwargs):
-        init(self, *args, **kwargs)
+    def __init__(self, *, vllm_config, prefix=""):  # vLLM builds a model by these parameter names (inspect.signature)
+        init(self, vllm_config=vllm_config, prefix=prefix)
         _unify(self)
 
     def get_audio_repl(self, *, audio_len, processor=None):
