@@ -322,7 +322,7 @@ class Gemma4Forward:
             from torch.nn.attention import SDPBackend, sdpa_kernel
             name = SDPA_KERNELS[kind]
             B, H, Sq, d = q.shape
-            G, Lk = k.shape[1], k.shape[2]
+            Lk = k.shape[2]
             if split or B * Sq * Lk > self.ATTN_PAIRS or B * Lk * H * d * k.element_size() * 2 > self.KV_BYTES:
                 with sdpa_kernel([getattr(SDPBackend, name)]) if name else nullcontext():
                     return self._split(a, q, k, v, mask)

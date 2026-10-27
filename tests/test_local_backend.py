@@ -1,6 +1,5 @@
 """basal/examples/local_backend.py: the request it sends and how it reads answers and abstain, against a stub server."""
 import importlib.util
-import json
 from pathlib import Path
 
 import httpx

@@ -7,7 +7,7 @@ import random
 import torch
 
 from basal.engine import GraphBackend, StateCache
-from tests.test_engine import separate, tiny
+from tests.test_engine import tiny
 from tests.test_engine16 import Replay, Stub, check
 from tests.test_server import FakeServer
 

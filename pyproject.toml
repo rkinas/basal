@@ -66,3 +66,15 @@ basal = ["examples/*.jsonl", "examples/*.json", "examples/*.py", "viz.html", "fl
 
 [tool.pytest.ini_options]
 pythonpath = ["."]  # tests import shared stubs from tests.test_server
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+# the code's own style: several statements per line, lambdas bound to names, short names (l, I, O) in tensor math
+ignore = ["E501", "E701", "E702", "E731", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E402"]  # tests skip on a missing extra before importing it

@@ -9,8 +9,7 @@ import json
 import pytest
 import torch
 from transformers import (Gemma4AudioConfig, Gemma4Config, Gemma4ForCausalLM, Gemma4ForConditionalGeneration,
-                          Gemma4TextConfig, Gemma4UnifiedConfig, Gemma4UnifiedForConditionalGeneration,
-                          Gemma4UnifiedTextConfig, Gemma4UnifiedVisionConfig, Gemma4VisionConfig)
+                          Gemma4TextConfig, Gemma4VisionConfig)
 
 from basal import engine
 from basal.engine import EagerBackend

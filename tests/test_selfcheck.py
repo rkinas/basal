@@ -1,6 +1,5 @@
 """basal-selfcheck: the shipped reference files hold the requests basal.synth builds, and the comparison counts
 agreement outside near ties, |dp| and truncated requests."""
-import copy
 import json
 from pathlib import Path
 

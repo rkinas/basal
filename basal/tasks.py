@@ -15,7 +15,6 @@ spans is the value (second_round), so a value is always exact source text, with 
 calibration file ("task_thresholds"); basal-calibrate fits them on labelled task questions.
 """
 import json
-import math
 import re
 
 from .prompt import lang_of, reads_request

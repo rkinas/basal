@@ -7,7 +7,6 @@ import json
 import numpy as np
 import pytest
 
-import basal.server as server_module
 from basal.calibrate import conformal_needed, conformal_p_min, fit, main
 from basal.server import NO_CERTIFICATE, NO_CONFORMAL, Server, answer_set, load_calibration, parser
 from tests.test_calibrate import SHIPPED, engine, synthetic  # noqa: F401  (engine: a pytest fixture)
