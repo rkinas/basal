@@ -50,6 +50,15 @@
   questions 62.4 -> 48.6 ms (basal-2.0-4.5B: 117 -> 99 ms); every probability bit-identical to 2.3.5.
   `fast-nocompile` keeps the merge op by op. Contributed by Miłosz Kucharski (@Butterski),
   [#44](https://github.com/rkinas/basal/pull/44).
+- **State cache on Apple Silicon** (`--mode mlx`, opt-in): `--state-cache-gb N` and `--prefix-cache on` work on the
+  Mac as on the CUDA graph engine, with both `--mlx-forward` paths. A request whose state (or template prefix) is
+  cached computes only its questions; a state that begins with a cached one (a growing agent trace or chat) only its
+  new tokens. A repeated state gives bit-identical probabilities. Against the cache off, the state and the rest of the
+  prompt run in two forwards instead of one, so 8-bit / bf16 probabilities move by rounding (in the contributor's
+  2,303 decisions the top answer stayed wherever its margin was at least 0.2). MacBook Air M4, basal-2.0-4.5B-MLX-8bit,
+  p50 per request: a 2.1k-token moderation policy and a comment 13.7 -> 0.9 s, questions about one paragraph 2.6x,
+  growing dialogues 1.5x (2.7x from 512 tokens). [HARDWARE.md](HARDWARE.md#apple-m4-state-cache-on---mode-mlx).
+  Contributed by Grzegorz Stark (@gstark0), [#50](https://github.com/rkinas/basal/pull/50).
 - **`GET /metrics` additions:** the engine version (`basal_build_info{version,model,mode,layout}`), the state cache's
   evictions and prefix hits, and a cache read that never waits for the engine's lock (the last values and their time
   instead). [SERVING.md](SERVING.md#prometheus-metrics). Contributed by Marcin Brzeżański (@marcinbrzezanski),
