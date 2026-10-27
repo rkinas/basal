@@ -30,6 +30,27 @@ target basal-2.0 (4.5B) and max automate fewer decisions than basal-1.5.
 **Where basal-2.0 stands.** On the public board hosted API models and larger open decision systems score above
 basal-2.0; the [board](https://basal.si5.pl/benchmark/) lists every tested system with its accuracy, latency and cost.
 
+## Accuracy by document length
+
+Werdykt's 5,000 decisions by the length of the state (the document the question is about), in characters (about two
+characters per token; 1,000 characters is about half a page). Plain accuracy per bucket, not the 20-cell macro; the
+same items for every model:
+
+| state length (characters) | items | 2.0-mini | 2.0 (4.5B) | omni-pico | omni-1.0-mini | omni-1.0-max | omni-1.1-max | omni-1.0-ultra |
+|---|---|---|---|---|---|---|---|---|
+| 0-1k | 709 | 49.6% | 61.6% | 54.3% | 66.4% | 72.2% | 73.3% | 77.9% |
+| 1k-2k | 2,598 | 60.6% | 71.4% | 64.2% | 74.4% | 80.6% | 80.2% | 86.5% |
+| 2k-4k | 796 | 73.4% | 85.3% | 76.8% | 91.1% | 94.0% | 93.2% | 97.6% |
+| 4k-8k | 394 | 81.7% | 90.9% | 86.3% | 93.7% | 98.0% | 98.0% | 98.7% |
+| 8k-16k | 128 | 64.1% | 72.7% | 68.8% | 79.7% | 85.2% | 84.4% | 91.4% |
+| 16k+ | 375 | 47.5% | 59.2% | 54.9% | 65.1% | 70.7% | 70.1% | 83.5% |
+| all | 5,000 | 61.8% | 72.9% | 66.0% | 76.9% | 82.3% | 82.1% | 87.9% |
+
+The buckets hold different kinds of items (short states are mostly rules and abstention items), so a row is the
+accuracy on that bucket's items, not the effect of length alone. basal-serve, bf16, one H100 (ultra: one H200);
+basal-2.0 in `--mode fast`, basal-omni in `--mode eager`. Each model card adds 95% intervals, Werdykt's long-document
+family (one task at 8k to 30k+ characters) and the held-out tests of its Results table by prompt length in tokens.
+
 ## Other benchmarks
 
 Both models served by engine v2.0.0 on the same items; differences in points, paired, with 95% bootstrap intervals on
