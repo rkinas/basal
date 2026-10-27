@@ -657,7 +657,7 @@ class GDNGraphBackend(GraphBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 device=None):
+                 device=None, global_attn="flex"):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
         # engine; quantisation is refused here. graph_memory_gb: the pass-2 graphs captured, _pin_memory). device:
         # "mps" / "cpu" (GDNMPSBackend: no CUDA graphs, uncompiled)
@@ -667,6 +667,8 @@ class GDNGraphBackend(GraphBackend):
                       device is None)  # before loading
         if state_cache_bits != 16 and not why:
             why = "--state-cache-bits 8 is for attention keys and values; recurrent states are cached as computed"
+        if global_attn != "flex" and not why:
+            why = f"--global-attn {global_attn}: basal-omni (Gemma 4) only"
         if why:
             raise ValueError(f"{model_dir}: {why}")
         cuda = torch.cuda.is_available() if device is None else device == "cuda"
