@@ -58,6 +58,7 @@ prefix, option orders, every question type, calibration file 2, errors), with te
 | `sglang` | 255 | `token_ids_logprob` (measured with 255 options) |
 | `llamacpp` | 255 | `n_probs` = k + 10 top log-probabilities |
 | `ollama` | **20** | Ollama returns at most 20 top log-probabilities per position (`top_logprobs` ≤ 20); a question with more options is refused with HTTP 422. Use `gguf` or `llamacpp` for more |
+| LM Studio / `llama-server` `/v1/systemone` (a file written with `basal-export-gguf --systemone`) | **26** | llama.cpp reads the logits of the codes `A`-`Z` at the last prompt token and labels options 27+ `a`-`z`, not basal's `AA`, `AB`, ...; the file's template refuses more than 26 options with an HTTP error ([GGUF.md](GGUF.md#decision-metadata-for-lm-studio-and-llama-server---systemone)) |
 
 Prompt length grows with the options: 255 short options add about 2,000 tokens. With one option order the cost of a
 question is one pass over its prompt, whatever the number of options.

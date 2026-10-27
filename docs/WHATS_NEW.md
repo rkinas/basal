@@ -1,5 +1,13 @@
 # What is new in basal 2.5
 
+- **LM Studio serves basal as a decision model** (GGUF, prompt-format-2 models): `basal-export-gguf --systemone`
+  writes llama.cpp's decision metadata into a copy of a `-GGUF` file: basal's prompt as a template and the calibrated
+  temperatures; the weights are not touched. LM Studio 0.4.26 or newer then answers choice, yes/no and score questions
+  on its own `/v1/systemone` and `/v1/decisions`, up to 26 options, without `basal-serve` in front (`llama-server`
+  too). Against `basal-serve --mode gguf` on the same files (Apple M4 Pro, 620 questions per model): the same prompts
+  token for token and the same top answer on every question answered, probabilities within 0.0041; LM Studio stops a
+  request after 30 s, which 5 long requests of the 4.5B hit. `act`, `multi`, `tool`, the certified thresholds and more
+  than 26 options stay with `basal-serve`. [INSTALL.md](INSTALL.md#lm-studio-gguf-as-a-decision-model).
 - **`--mlx-forward basal` on Apple Silicon** (opt-in; the default `mlx-lm` is unchanged): basal's own forward over
   mlx-lm's layers for Llama and Gemma 4. The layers from the last one with its own keys and values on run at the
   readout rows only, the GPU starts early, and the projections that read one input become one matrix where a check at
