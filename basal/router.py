@@ -24,8 +24,10 @@ Off by default (the replicas' answers then pass through untouched):
                                           each; repeat the flag), and a plain choice / noul / score answer gets the
                                           weighted mean of the models' probabilities (W0 for --replicas, then one per
                                           --blend, in order): choice, noul, score and confidence follow from it, and
-                                          the answer says "blend": {"models": [...], "weights": [...]}. A model that is
-                                          down or does not answer 200 is left out (the weights of the rest are used).
+                                          the answer says "blend": {"models": [...], "weights": [...]} and
+                                          "calibrated": false (no model's thresholds hold for it: refit them on the
+                                          blend's output). A model that is down or does not answer 200 is left out
+                                          (the weights of the rest are used). Every question costs a call per model.
                                           Multi, act, tool, task answers, questions with coverage / max_error /
                                           evidence keep the first replica's answer. Not with --escalate.
   --route SCRIPT=URL[,URL]                requests whose state is mostly in that script (latin, cyrillic, greek,
@@ -101,6 +103,7 @@ def top_probability(answer):
 
 BLENDS = ("choice", "noul", "score")
 PLAIN = ("coverage", "max_error", "evidence", "multi")  # question fields whose answers are not blended
+CERTIFIED = ("abstain", "max_error", "answer_set", "coverage", "coverage_note", "calibration")  # one model's calibration
 
 
 def blendable(question, answer):
@@ -111,10 +114,12 @@ def blendable(question, answer):
 
 def blend_answer(answer, members):
     """answer (the first replica's) with the weighted mean of members' probabilities, [(weight, model, answer)] in
-    order: p[k] = sum(w * p_m[k]) / sum(w); choice / noul / score / confidence recomputed from p as basal-serve does."""
+    order: p[k] = sum(w * p_m[k]) / sum(w); choice / noul / score / confidence recomputed from p as basal-serve does.
+    The blend is not calibrated: "calibrated": false, and no field that rests on one model's calibration (CERTIFIED)."""
     total = sum(w for w, _, _ in members)
     p = {k: sum(w * a["probabilities"][k] for w, _, a in members) / total for k in answer["probabilities"]}
-    out = dict(answer, probabilities=p, confidence=max(p.values()))
+    out = {k: v for k, v in answer.items() if k not in CERTIFIED}
+    out.update(probabilities=p, confidence=max(p.values()))
     if answer["type"] == "choice":
         out["choice"] = max(p, key=p.get)
     elif answer["type"] == "noul":
@@ -122,6 +127,7 @@ def blend_answer(answer, members):
     else:
         out["score"] = float(sum(i * v for i, v in enumerate(p.values())))
     out["blend"] = {"models": [m for _, m, _ in members], "weights": [w for w, _, _ in members]}
+    out["calibrated"] = False
     return out
 
 

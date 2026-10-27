@@ -554,12 +554,26 @@ def test_blend_mixes_the_models_probabilities():
         p = _mean(q, urls, W)
         assert a[q]["probabilities"] == p and a[q]["confidence"] == max(p.values())  # bit for bit: the same formula
         assert a[q]["blend"] == {"models": ["model-small", "model-mid", "model-big"], "weights": list(W)}
+        assert a[q]["calibrated"] is False
     assert a["c"]["choice"] == "b"                                # a 0.41, b 0.47, c 0.12 (the first replica said a)
     assert a["n"]["noul"] == _mean("n", urls, W)["true"]
     assert a["s"]["score"] == sum(i * v for i, v in enumerate(_mean("s", urls, W).values()))
     assert a["s"]["legend"] == {"0": "low"} and r["model"] == "model-small"
     assert asked == {SMALL: [sorted(qs)], MID: [sorted(qs)], BIG: [sorted(qs)]}
     assert 'basal_router_blend_answers_total{models="3"} 3' in m
+
+
+def test_blended_answers_carry_no_single_model_calibration():
+    """Fields that rest on one model's calibration are dropped from a blended answer (a replica that adds them to
+    plain answers: an older or another server)."""
+    extra = {"abstain": False, "max_error": "x", "answer_set": ["a"], "coverage": 0.9, "coverage_note": "x",
+             "calibration": "validated", "reread": True}
+    conf = {u: dict(BLEND_CONF[u], c=dict(BLEND_CONF[u]["c"], **extra)) for u in (SMALL, MID, BIG)}
+    rt = blend_router(conf, {})
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        a = c.post("/v1/systemone", json={"state": "Doc", "questions": {"c": {"type": "choice"}}}).json()["answers"]["c"]
+    assert not set(a) & set(R.CERTIFIED) and a["calibrated"] is False and a["reread"] is True
 
 
 def test_blend_leaves_other_answers_to_the_first_replica():

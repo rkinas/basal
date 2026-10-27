@@ -256,11 +256,19 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   `--blend` pool (one model per flag, repeat it), at the same time, and a plain choice, noul or score answer gets the
   weighted mean of the models' probabilities, `W0` for `--replicas` and then one weight per `--blend` in order:
   p = sum(w x p_model) / sum(w). The choice, noul, score and confidence follow from it, and the answer says
-  `"blend": {"models": [...], "weights": [...]}` (the names the replicas report). A model that is down or does not
-  answer 200 is left out and the others' weights are used; the request does not fail. Multi, act, tool and task
-  answers, and questions with `coverage`, `max_error` or `evidence`, keep the first replica's answer. `/metrics`
-  counts blended answers by the number of models in them (`basal_router_blend_answers_total`). Every request costs
-  one call per model, so a blend is slower than its largest model alone.
+  `"blend": {"models": [...], "weights": [...]}` (the names the replicas report) and `"calibrated": false`. A model
+  that is down or does not answer 200 is left out and the others' weights are used; the request does not fail.
+  Multi, act, tool and task answers, and questions with `coverage`, `max_error` or `evidence`, keep the first
+  replica's answer (its certificates hold for that one model). `/metrics` counts blended answers by the number of
+  models in them (`basal_router_blend_answers_total`).
+  - **A quality option, not a speed option:** every question is asked of every model, so a blend is slower than its
+    largest model alone.
+  - **Not calibrated:** no model's certified thresholds hold for the blend, so a blended answer carries no `abstain`,
+    `max_error`, `answer_set` or `calibration` field. Refit thresholds with `basal-calibrate` on the blend's output
+    before you automate decisions with it; on our held-out confirm split the blend's calibration error (ECE) was
+    0.041 against 0.016 for ultra alone.
+  - The weights are yours to choose. In the example, 0.2 / 0.2 / 0.6 were chosen on one half of our held-out tests
+    and measured on the other ([docs/RESULTS.md](RESULTS.md#cascade-pico-mini-ultra)).
 
   ```
   basal-router --replicas http://127.0.0.1:8001 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8003 \
