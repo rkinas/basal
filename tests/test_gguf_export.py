@@ -203,3 +203,50 @@ def test_cli_conversion_from_a_repo_downloads_the_whole_model(tmp_path, monkeypa
     main(["Remek/basal-tiny", str(tmp_path / "out.gguf"), "--llama-cpp", str(llama)])
     # the converter needs the weights: no allow_patterns
     assert calls == [("Remek/basal-tiny", {"revision": None, "allow_patterns": None})]
+
+
+SYSTEMONE = {"decision.type": ("string", "openjev"), "tokenizer.chat_template.systemone": ("string", "{{- state -}}"),
+             "decision.temperature.choice.2": ("float32", 1.5), "decision.temperature.noul.2": ("float32", 2.25)}
+
+
+def test_fix_gguf_writes_the_systemone_keys_and_drops_them_again(tmp_path):
+    raw = write_model(tmp_path, decision=True)
+    one, two, plain, ref = (tmp_path / f"{n}.gguf" for n in ("one", "two", "plain", "ref"))
+    fix_gguf(raw, one, tmp_path, dict(SYSTEMONE))
+    f, T = gguf.GGUFReader(one).fields, gguf.GGUFValueType
+    assert f["llama.decision.type"].contents() == "openjev" and f["llama.decision.type"].types == [T.STRING]
+    assert f["tokenizer.chat_template.systemone"].contents() == "{{- state -}}"
+    assert f["llama.decision.temperature.noul.2"].contents() == 2.25
+    assert f["llama.decision.temperature.choice.2"].types == [T.FLOAT32]
+    assert sorted(k for k in f if ".decision." in k) == sorted(f"llama.{k}" for k in SYSTEMONE if k.startswith("dec"))
+    fix_gguf(one, two, tmp_path, dict(SYSTEMONE))
+    assert two.read_bytes() == one.read_bytes()
+    fix_gguf(one, plain, tmp_path)  # without --systemone: no decision keys, no systemone template
+    fix_gguf(raw, ref, tmp_path)
+    assert plain.read_bytes() == ref.read_bytes()
+    assert not [k for k in gguf.GGUFReader(plain).fields if ".decision." in k or k.endswith(".systemone")]
+
+
+def test_cli_systemone_reads_the_model_files_and_writes_the_keys(tmp_path, monkeypatch, capsys):
+    raw = write_model(tmp_path)
+    calls = []
+    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda r, **kw: calls.append(kw) or str(tmp_path))
+    monkeypatch.setattr("basal.gguf_export.systemone_metadata",
+                        lambda d, cal=None: (dict(SYSTEMONE), Path(d) / "CALIBRATION.llamacpp.json"))
+    main(["Remek/basal-tiny-GGUF", str(tmp_path / "s1.gguf"), "--gguf", str(raw), "--systemone"])
+    assert calls[0]["allow_patterns"] == ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+                                          "chat_template.jinja", "basal.json", "CALIBRATION*.json"]
+    assert gguf.GGUFReader(tmp_path / "s1.gguf").fields["llama.decision.type"].contents() == "openjev"
+    assert "temperatures from CALIBRATION.llamacpp.json" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as e:
+        main([str(tmp_path), str(tmp_path / "x.gguf"), "--gguf", str(raw), "--calibration", "c.json"])
+    assert e.value.code == 2 and "--calibration needs --systemone" in capsys.readouterr().err
+
+
+def test_cli_systemone_refusal_names_the_reason(tmp_path, monkeypatch, capsys):
+    raw = write_model(tmp_path)
+    (tmp_path / "basal.json").write_text('{"prompt": 1}', encoding="utf-8")
+    monkeypatch.setattr("transformers.AutoTokenizer.from_pretrained", lambda *_: pytest.fail("tokenizer loaded"))
+    with pytest.raises(SystemExit) as e:
+        main([str(tmp_path), str(tmp_path / "x.gguf"), "--gguf", str(raw), "--systemone"])
+    assert "prompt-format-2 model" in str(e.value.code) and not (tmp_path / "x.gguf").exists()

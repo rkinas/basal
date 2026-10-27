@@ -319,6 +319,7 @@ Each answer has a probability for every option, the chosen key and the confidenc
 | FP8 checkpoints (Hopper, Blackwell) | [docs/INSTALL.md](docs/INSTALL.md#fp8-checkpoints-basal-engine) |
 | vLLM or SGLang with bf16 weights | [docs/INSTALL.md](docs/INSTALL.md#vllm-or-sglang-with-bf16-weights) |
 | Ollama and llama.cpp (GGUF) | [docs/INSTALL.md](docs/INSTALL.md#ollama-and-llamacpp-gguf) |
+| LM Studio (GGUF as a decision model) | [docs/INSTALL.md](docs/INSTALL.md#lm-studio-gguf-as-a-decision-model) |
 | Apple Silicon in detail, CPU | [docs/INSTALL.md](docs/INSTALL.md#apple-silicon-mlx) |
 | images and audio (basal-omni) | [below](#images-and-audio-basal-omni-experimental) |
 | all seven engines compared | [docs/INSTALL.md](docs/INSTALL.md#engines) |
