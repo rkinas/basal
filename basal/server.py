@@ -1068,6 +1068,12 @@ class Server:
                 raise SystemExit(f"--graph-memory-gb {a.graph_memory_gb:g}: give a size in GiB above 0")
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
+        if kind == "vllm" and VLLM_PRESETS.get(getattr(a, "vllm_preset", "default")):
+            what = _recurrent(a.model, a.revision)  # before vLLM starts: its batch-invariant mode raises in the engine core
+            if what:
+                raise SystemExit(f"{a.model}: --vllm-preset {a.vllm_preset}: vLLM's batch-invariant kernels do not cover "
+                                 f"{what} (a recurrent state, such as Qwen3.5's Gated DeltaNet); serve it with the default "
+                                 "preset (answers can vary run to run on near-ties) or --mode eager (exact)")
         attn = getattr(a, "attn", "auto")
         if attn not in ("auto", "fa2") and kind not in ("graph", "exit"):
             raise SystemExit(f"--attn {attn} needs the CUDA graph engine (--mode fast, fast-nocompile, fast-exit, fp8, "
