@@ -275,7 +275,8 @@ curl http://127.0.0.1:1234/v1/systemone -H "Content-Type: application/json" -d '
 - **A 30-second limit per request:** LM Studio stops a `/v1/systemone` request after 30 s with HTTP 504. On an Apple
   M4 Pro the 4.5B reads about 400 prompt tokens per second, so a long state with several questions can hit it. Split
   long states, or send fewer questions per request; for long documents use `basal-serve --mode gguf` on the same file,
-  which has no such limit.
+  which has no such limit. In our check none of the 306 requests hit it on an otherwise idle M4 Pro; the 5 that
+  did ran while macOS's background media analysis was busy.
 - **The same answers as `basal-serve`:** LM Studio 0.4.26 (llama.cpp engine 2.65.1) against `basal-serve --mode gguf`
   on the same files, Apple M4 Pro, 620 questions per model (synthetic, Polish and English, states up to ~2,000
   tokens): the prompts are identical token for token; basal-omni-pico 620 of 620 answered, the same top answer on all,
