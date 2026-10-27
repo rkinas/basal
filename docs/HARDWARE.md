@@ -623,19 +623,49 @@ while without the cache it grows with it:
 
 - Each configuration is deterministic: its two runs give bit-identical probabilities. A cached state gives the same
   probabilities as its first, uncached request with the cache on, in any order of the requests.
-- Against the server without the cache, the probabilities are not bit-identical. The shared prefix is computed in two
-  forwards (the state, then the rest over it) instead of one, and bf16 / 8-bit kernels round differently for other row
-  counts. In fp32 the two paths agree:
-  - the tiny model of `tests/test_mlx_state_cache.py`: max |dp| 6e-8;
-  - the worst decision above (4.5B MultiRC, 0.288 -> 0.403, with the same top answer), recomputed on the server's own
-    prompts with the decoder cast to fp32: |dp| 0.0000, against 0.178 in bf16.
-- The top answers that changed were near ties (margin below 0.08 without the cache).
-- **Short continuations.** A state that continues a cached entry by a few tokens never runs 2-8 tokens:
-  `MIN_CONTINUE`, the forward starts earlier. MLX's fused attention (`mx.fast.scaled_dot_product_attention`, MLX
-  0.32.4) loses bf16 precision when 2-8 queries times the query heads per KV head exceed 32. Against an fp32
-  reference the max error is 4-6e-2 instead of 5-8e-3, for 6-8 queries on basal-2.0-mini (6 query heads per KV head)
-  and 5-8 on 4.5B (8 per KV head). Before this guard, one BAN-PL decision on mini went from 0.46 to 0.16 when a comment
-  continued the cached policy by 8 tokens, and BAN-PL's max |dp| was 0.30 (mini) and 0.14 (4.5B).
+- **Against the server without the cache (2.5): bit-identical.** The tables above were measured on the contributed
+  version, where the probabilities differed from the uncached server by rounding (the top answers that changed were
+  near ties, margin below 0.08 without the cache). MLX picks its matmul and attention kernels by the shape of the
+  call, and each sums in its own order, so a row's bits depend on how many rows and keys its forward runs:
+  - a quantised matmul runs a vector kernel for a few rows, split-K while the output tiles are few, plain tiles above.
+    On basal-2.0-mini's k / v projections the rows of a call of up to 1,024 rows differ from those of a longer call;
+  - attention gives a row the same bits from 16 queries on; on basal-omni (head size 256 / 512) a row's attention also
+    depends on the number of keys.
+
+  The cached path splits the prompt into forwards of other shapes: the state, then the rest over it, and for a single
+  question its last token alone. It now runs each of them at the uncached forward's shapes: every linear layer padded
+  with zero rows to the uncached row count (or only up to the row count from which its kernel no longer depends on
+  it, probed once per weight shape), attention over the uncached number of keys, at least 16 tokens per continuation,
+  and a single question's whole rest in one forward. A state computed for a request then gives the uncached
+  probabilities bit for bit, cold and from the cache. Checked on an Apple M4 Pro (48 GB, macOS 15.5, MLX 0.32.3,
+  mlx-lm 0.32.0) with basal-2.0-mini-MLX-8bit and basal-omni-1.0-mini-MLX, both `--mlx-forward` paths, 1,032
+  readouts per run (640 in five-question requests over ~1.5k-token states, 200 single questions, 192 in growing
+  states), cache off, then on (cold), then on again: every readout bit-identical to the cache off in all four runs,
+  cold and cached (the contributed version: the same top answer on 98.84-99.42%). p50 per request, cache off / state
+  from the cache:
+
+  | model | `--mlx-forward` | five questions | one question |
+  |---|---|---|---|
+  | basal-2.0-mini-MLX-8bit | mlx-lm | 1,103 / 330 ms | 509 / 89 ms |
+  | | basal | 1,114 / 327 ms | 493 / 87 ms |
+  | basal-omni-1.0-mini-MLX | mlx-lm | 1,917 / 698 ms | 1,284 / 162 ms |
+  | | basal | 1,544 / 425 ms | 682 / 104 ms |
+
+  Running at the uncached shapes costs a little: on basal-2.0-mini (mlx-lm) a cached five-question request took
+  261 ms and a single question 64 ms before. Growing states: basal-2.0-mini 674 -> 570 ms (mlx-lm), basal-omni
+  computes them afresh, 897 -> 929 ms (mlx-lm) and 794 -> 859 ms (basal).
+- A state reused by a request of another length (other questions about the same state) gives the same bits where both
+  lengths pick the same kernels (basal-2.0-mini: states over about 1,024 tokens), else it can differ in the last bits.
+  A state that grows from a cached one continues it only where that gives the uncached bits, and is computed afresh
+  otherwise: on basal-2.0-mini from about 1,024 tokens on, on basal-omni never (its attention depends on the number
+  of keys). So the MultiWOZ speed-ups above (dialogues of up to about 1k tokens) do not carry over to 2.5; BAN-PL's
+  states (a 2.1k-token policy) are past that length.
+- **Short continuations.** A state that continues a cached entry by fewer than 16 tokens starts its forward earlier
+  (`MIN_CONTINUE`). For 2-8 queries MLX's fused attention (`mx.fast.scaled_dot_product_attention`, MLX 0.32.4) also
+  loses bf16 precision when the queries times the query heads per KV head exceed 32. Against an fp32 reference the max
+  error is 4-6e-2 instead of 5-8e-3, for 6-8 queries on basal-2.0-mini (6 query heads per KV head) and 5-8 on 4.5B (8
+  per KV head). Before this guard, one BAN-PL decision on mini went from 0.46 to 0.16 when a comment continued the
+  cached policy by 8 tokens, and BAN-PL's max |dp| was 0.30 (mini) and 0.14 (4.5B).
 - `--prefix-cache` helps little on MLX, because the template prefix of prompt format 2 is 34-45 tokens. On the CUDA
   graph engine it also keeps short requests on pass-2 graphs. The state cache is the one worth turning on.
 - Memory: an entry is a copy of the state's keys and values (`mx.contiguous`, not a slice of mlx-lm's 256-token cache
