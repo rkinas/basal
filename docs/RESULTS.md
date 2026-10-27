@@ -51,6 +51,50 @@ accuracy on that bucket's items, not the effect of length alone. basal-serve, bf
 basal-2.0 in `--mode fast`, basal-omni in `--mode eager`. Each model card adds 95% intervals, Werdykt's long-document
 family (one task at 8k to 30k+ characters) and the held-out tests of its Results table by prompt length in tokens.
 
+## Cascade: pico, mini, ultra
+
+`basal-router` can ask basal-omni-pico first, basal-omni-1.0-mini where pico is unsure, and basal-omni-1.0-ultra where
+mini is still unsure ([SERVING.md](SERVING.md), "Several levels"). From each model's answers on the held-out tests of
+its card's Results table (the same items for all three), with one threshold T at both steps: pico answers when its top
+probability is at least T, else mini does when its own is at least T, else ultra does. Accuracy of the answers given,
+then the share of items each model answered (its accuracy on those in brackets):
+
+| PL decisions | items | accuracy | pico answers | mini answers | ultra answers |
+|---|---|---|---|---|---|
+| pico alone | 7,081 | 87.6% | 100% | – | – |
+| mini alone | 7,081 | 93.2% | – | 100% | – |
+| ultra alone | 7,081 | 97.9% | – | – | 100% |
+| cascade, T = 0.6 | 7,081 | 90.0% | 92.5% (90.4%) | 6.2% (83.6%) | 1.3% (90.2%) |
+| cascade, T = 0.7 | 7,081 | 92.2% | 85.8% (92.5%) | 9.7% (89.8%) | 4.5% (90.9%) |
+| cascade, T = 0.8 | 7,081 | 94.0% | 77.9% (94.5%) | 12.5% (93.3%) | 9.6% (91.2%) |
+| cascade, T = 0.9 | 7,081 | 96.1% | 64.6% (97.0%) | 16.7% (95.5%) | 18.8% (93.5%) |
+
+| EN corpus test | items | accuracy | pico answers | mini answers | ultra answers |
+|---|---|---|---|---|---|
+| pico alone | 1,479 | 60.7% | 100% | – | – |
+| mini alone | 1,479 | 67.5% | – | 100% | – |
+| ultra alone | 1,479 | 75.1% | – | – | 100% |
+| cascade, T = 0.6 | 1,479 | 67.3% | 67.8% (73.4%) | 12.1% (62.6%) | 20.1% (49.8%) |
+| cascade, T = 0.7 | 1,479 | 68.8% | 59.2% (77.0%) | 12.8% (64.2%) | 28.0% (53.4%) |
+| cascade, T = 0.8 | 1,479 | 70.9% | 49.0% (81.2%) | 13.0% (74.5%) | 38.0% (56.4%) |
+| cascade, T = 0.9 | 1,479 | 73.1% | 37.3% (86.1%) | 13.0% (79.8%) | 49.6% (61.6%) |
+
+| PL-Real | items | accuracy | pico answers | mini answers | ultra answers |
+|---|---|---|---|---|---|
+| pico alone | 300 | 94.0% | 100% | – | – |
+| mini alone | 300 | 95.0% | – | 100% | – |
+| ultra alone | 300 | 97.3% | – | – | 100% |
+| cascade, T = 0.6 | 300 | 95.0% | 98.0% (95.2%) | 1.7% (5 items: 80%) | 0.3% (1 item: 100%) |
+| cascade, T = 0.7 | 300 | 94.7% | 97.3% (95.5%) | 1.7% (5 items: 60%) | 1.0% (3 items: 67%) |
+| cascade, T = 0.8 | 300 | 95.3% | 94.0% (96.8%) | 4.7% (14 items: 71%) | 1.3% (4 items: 75%) |
+| cascade, T = 0.9 | 300 | 97.0% | 88.0% (98.9%) | 7.3% (22 items: 86%) | 4.7% (14 items: 79%) |
+
+Computed from the answers each model gave alone (the readouts behind its card: basal-serve, bf16, both option orders
+averaged, as the Results tables), not from a run through the router; the router uses the top probability of the answer
+as the replica returns it, so with one option order the shares move somewhat. The items ultra answers are the ones the
+smaller models were unsure of, so its accuracy on them is below its accuracy alone. No speed or cost is claimed here:
+measure the share each level answers on your own traffic.
+
 ## Other benchmarks
 
 Both models served by engine v2.0.0 on the same items; differences in points, paired, with 95% bootstrap intervals on
