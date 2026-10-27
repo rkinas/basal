@@ -18,7 +18,7 @@ Backends:
   MLXBackend        Apple Silicon, MLX / mlx-lm (1.5): MLX fp8 / fp4 exports or bf16 weights (optional 8-bit at load
                     time); shared-prefix KV cache; opt-in (2.5, --mlx-forward basal) for Llama and Gemma 4:
                     basal/mlx_forward.py, the last layers at the readout rows only, merged projections checked bit for
-                    bit at load
+                    bit at load; Qwen3.5 (2.5, Gated DeltaNet: basal-omni-pico) with the prefix's recurrent states
   GGUFBackend       a GGUF file in process through llama.cpp (llama-cpp-python; Metal, CUDA or CPU); shared prefix as
                     llama.cpp sequences
   OllamaBackend     Ollama with the GGUF exports (1.5): raw prompt, one token, top log-probabilities of the letters
@@ -3235,12 +3235,14 @@ def mlx_config_overrides(cfg):
     """transformers 5 writes the rotary settings as `rope_parameters`; mlx-lm reads `rope_theta` / `rope_scaling` only
     (without this override it silently uses rope_theta = 10000). Gemma 4 (basal-omni): transformers 5 writes the global
     layers' head size (and KV heads) in `per_layer_config`; mlx-lm reads `global_head_dim` /
-    `num_global_key_value_heads` only (without, it assumes 512). A multimodal config gets its `text_config` back whole."""
+    `num_global_key_value_heads` only (without, it assumes 512). Qwen3.5 (basal-omni-pico): transformers writes the
+    text-only decoder as model_type `qwen3_5_text`, which mlx-lm does not know; its `qwen3_5` reads a config without
+    `text_config` as that decoder. A multimodal config gets its `text_config` back whole."""
     if isinstance(cfg.get("text_config"), dict):
         t = mlx_config_overrides(cfg["text_config"])
         return {"text_config": {**cfg["text_config"], **t}} if t else {}
     rp = cfg.get("rope_parameters") or {}
-    out = {}
+    out = {"model_type": "qwen3_5"} if cfg.get("model_type") == "qwen3_5_text" else {}
     if "rope_theta" not in cfg and "rope_theta" in rp:
         out["rope_theta"] = rp["rope_theta"]
     if not cfg.get("rope_scaling") and rp.get("rope_type", "default") != "default":
@@ -3253,6 +3255,28 @@ def mlx_config_overrides(cfg):
         if cfg.get(key) is None and len(vals) == 1:
             out[key] = vals.pop()
     return out
+
+
+# transformers' Qwen3_5RMSNorm scales by (1 + w): the decoder layers' two norms, the attention layers' q / k norms and the
+# final norm (not the Gated DeltaNet output norm, which scales by w)
+QWEN35_NORMS = (".input_layernorm.weight", ".post_attention_layernorm.weight", ".q_norm.weight", ".k_norm.weight",
+                "model.norm.weight", "language_model.norm.weight")
+
+
+def qwen35_norms(model_dir):
+    """{checkpoint key: 1 + w in float32} of the (1 + w) RMSNorms of a Qwen3.5 checkpoint (QWEN35_NORMS), read from its
+    safetensors files; {} for a checkpoint that already holds 1 + w (mlx-lm's export, recognised as mlx-lm does: its
+    conv1d weights are moved, last dimension 1)."""
+    from safetensors import safe_open
+    out, raw = {}, False
+    for f in sorted(Path(model_dir).glob("model*.safetensors")):
+        with safe_open(str(f), framework="pt") as t:
+            for k in t.keys():
+                if "conv1d.weight" in k and t.get_slice(k).get_shape()[-1] != 1:
+                    raw = True
+                elif k.endswith(QWEN35_NORMS) and "mtp." not in k:
+                    out[k] = 1.0 + t.get_tensor(k).float()
+    return out if raw else {}
 
 
 class _PackedRow:
@@ -3288,7 +3312,14 @@ class MLXBackend:
     but runs the layers from the last one with its own keys and values on at the readout rows only (a prefix stops
     after that layer's keys and values), starts the GPU early (mx.async_eval) and merges the projections that read one
     input where a self-check at load finds the same bits; the probabilities equal mlx-lm's forward up to float rounding
-    (not bit for bit). Other architectures keep mlx-lm's forward."""
+    (not bit for bit). Other architectures keep mlx-lm's forward.
+
+    Qwen3.5 (2.5; Gated DeltaNet and attention layers, basal-omni-pico) runs mlx-lm's forward with its Metal kernel of
+    the gated delta rule: the prefix of a group keeps each Gated DeltaNet layer's convolution and recurrent states
+    beside the attention layers' keys and values, and every suffix row continues them (as the CUDA graph engine
+    carries the state into each branch); a right-padded row reads its last real token, which the padding after it
+    cannot reach. No packed rows and no --mlx-forward basal for it (mlx-lm's forward). Other recurrent models (Mamba,
+    Qwen3-Next and hybrids) are refused: their states are not carried here."""
 
     MAX_ROWS = 16      # suffix rows per forward
     TOKEN_BUDGET = 8192  # rows x padded length per forward without a shared prefix
@@ -3313,6 +3344,11 @@ class MLXBackend:
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
         load time from bf16 weights (the embeddings and the LM head stay bf16); the -MLX-8bit exports need no quant.
         forward: "mlx-lm" or "basal" (basal/mlx_forward.py where the architecture allows)."""
+        from .gdn_graph import is_gdn
+        what = recurrent_layers(md)
+        if what and not is_gdn(md):  # before mlx is imported or any weights are read
+            raise ValueError(f"{md}: {what}: --mode mlx carries the recurrent states of Qwen3.5 (Gated DeltaNet) "
+                             "only; serve this model with --mode eager")
         import mlx.core as mx
         from mlx_lm.utils import load_model
         self.mx = mx
@@ -3326,6 +3362,8 @@ class MLXBackend:
         # the final logit softcap of the decoder (Gemma) is applied to the fp32 code logits
         self.softcap = getattr(self.lm.args, "final_logit_softcapping", None)
         self.quantization = self.config.get("quantization")
+        if what:
+            self._exact_norms(md)
         if quant:
             if self.quantization:
                 raise ValueError(f"{md} is already quantised ({self.quantization}); use it without --quant")
@@ -3350,6 +3388,31 @@ class MLXBackend:
             self.fwd = MLXForward.build(self.lm)
         self.forward = f"basal ({self.fwd.describe()})" if self.fwd else "mlx-lm"
         self.packed = bool(packed) and self._position_rope()
+
+    def _exact_norms(self, md):
+        """Qwen3.5: the (1 + w) RMSNorms as transformers computes them, (1 + w) in float32 and the product rounded to
+        the input's dtype. mlx-lm folds the 1 into the bf16 weights at load (1 + w rounded to bf16, up to 2^-9 off per
+        channel): with it every readout of the 0.8B pico moved by ~0.001 even in float32. A checkpoint that holds 1 + w
+        already (an MLX export) keeps its weights."""
+        mx = self.mx
+        import mlx.nn as nn
+
+        class Norm(nn.Module):
+            def __init__(self, weight, eps):
+                super().__init__()
+                self.weight, self.eps = weight, eps
+
+            def __call__(self, x):
+                return mx.fast.rms_norm(x, self.weight, self.eps).astype(x.dtype)
+
+        raw = qwen35_norms(md)
+        # mlx-lm's own key mapping; without conv1d weights in the dict its sanitize does not add the 1 again
+        for path, w in self.model.sanitize({k: mx.array(v.numpy()) for k, v in raw.items()}).items():
+            *parents, name, _ = path.split(".")
+            mod = self.model
+            for part in parents:
+                mod = mod[int(part)] if part.isdigit() else getattr(mod, part)
+            setattr(mod, name, Norm(w, getattr(mod, name).eps))
 
     @staticmethod
     def _static_rope(rope):
@@ -3433,9 +3496,10 @@ class MLXBackend:
 
     def _forward(self, rows, prefix=None):
         """Token rows (right-padded into one batch) -> hidden state at each row's last token. `prefix`: per-layer
-        (keys, values) of a shared prefix that every row continues (positions start after it)."""
+        (keys, values) of a shared prefix that every row continues (positions start after it), or the ArraysCache of a
+        recurrent layer (Qwen3.5's Gated DeltaNet: convolution and recurrent states), copied for each row."""
         mx = self.mx
-        from mlx_lm.models.cache import KVCache
+        from mlx_lm.models.cache import ArraysCache, KVCache
         B, S = len(rows), max(map(len, rows))
         pad = self.tok.pad_token_id
         ids = mx.array([list(r) + [pad] * (S - len(r)) for r in rows])
@@ -3444,26 +3508,33 @@ class MLXBackend:
         cache = None
         if prefix is not None:
             cache = []
-            for k, v in prefix:
-                c = KVCache()
-                c.keys, c.values, c.offset = mx.repeat(k, B, axis=0), mx.repeat(v, B, axis=0), k.shape[2]
+            for p in prefix:
+                if isinstance(p, ArraysCache):
+                    c = ArraysCache(len(p.cache))
+                    c.cache = [mx.repeat(x, B, axis=0) for x in p.cache]
+                else:
+                    k, v = p
+                    c = KVCache()
+                    c.keys, c.values, c.offset = mx.repeat(k, B, axis=0), mx.repeat(v, B, axis=0), k.shape[2]
                 cache.append(c)
         h = self.lm.model(ids, cache=cache)
         return h[mx.arange(B), mx.array([len(r) - 1 for r in rows])]
 
     def _prefix(self, toks):
         mx = self.mx
-        from mlx_lm.models.cache import KVCache, make_prompt_cache
+        from mlx_lm.models.cache import ArraysCache, KVCache, make_prompt_cache
         # plain caches: a sliding-window layer (Gemma 4) gets a rotating cache from mlx-lm, which keeps only the last
-        # window of the prefix; here every layer keeps the whole prefix and the window is applied by the mask
+        # window of the prefix; here every layer keeps the whole prefix and the window is applied by the mask. A
+        # recurrent layer (Qwen3.5's Gated DeltaNet) keeps mlx-lm's ArraysCache: its states after the prefix.
         if self.fwd is not None:
             kv = self.fwd.prefix(mx.array([toks]))
             mx.eval(kv)
             return kv
-        cache = [KVCache() for _ in make_prompt_cache(self.model)]
+        cache = [c if isinstance(c, ArraysCache) else KVCache() for c in make_prompt_cache(self.model)]
         self.lm.model(mx.array([toks]), cache=cache)
-        kv = [(c.keys[..., : c.offset, :], c.values[..., : c.offset, :]) for c in cache]
-        mx.eval(kv)
+        kv = [c if isinstance(c, ArraysCache) else (c.keys[..., : c.offset, :], c.values[..., : c.offset, :])
+              for c in cache]
+        mx.eval([c.cache if isinstance(c, ArraysCache) else c for c in kv])
         return kv
 
     @staticmethod
