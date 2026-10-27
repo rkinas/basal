@@ -2,6 +2,7 @@
 answers during start-up."""
 import asyncio
 import json
+import multiprocessing
 import os
 import signal
 import socket
@@ -164,6 +165,31 @@ def test_starting_answers_503_then_frees_the_port():
     with socket.socket() as s:                                                          # the port is free again
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", port))
+
+
+def _sleep(seconds):
+    time.sleep(seconds)
+
+
+@pytest.mark.skipif("fork" not in multiprocessing.get_all_start_methods(), reason="no fork on this platform")
+def test_starting_frees_the_port_of_a_process_forked_during_start_up():
+    """vLLM forks its engine core while the 503 server holds the port: the child must not keep the port taken after
+    stop(), or the real server cannot bind it (basal-serve --mode vllm exited at the end of its start-up)."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    st = S.Starting("127.0.0.1", port)
+    child = multiprocessing.get_context("fork").Process(target=_sleep, args=(5,))
+    child.start()
+    try:
+        st.stop()
+        with socket.socket() as s:                                                      # free while the child lives
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+            s.listen()
+    finally:
+        child.terminate()
+        child.join()
 
 
 def cascade_transport(conf):
