@@ -285,7 +285,7 @@ def test_chunked_long_states_and_incremental_states_equal_separate(kind):
         for r, e in zip(res[0] + res[1], separate(m, toks, lids) + separate(m, [st + [40, 41]], [[7, 9]])):
             assert torch.allclose(torch.tensor(r), e, atol=1e-6)
     s = be.state_cache.stats()
-    assert s["prefix_hits"] == 2 and s["entries"] == 2  # the grown state replaced the first
+    assert s["prefix_hits"] == 1 and s["entries"] == 2  # only the extension reused KV; the edit is outside the window
 
 
 def test_warm_captures_largest_first_then_long_pass2():
