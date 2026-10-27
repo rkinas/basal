@@ -277,6 +277,24 @@ about 31 GB.
 It kept the same paired check as FP8 and NVFP4. On basal-omni-1.0-max (12B) the error of the accepted answers rose to
 1.13% (target 1%), so int8 serves ultra only. Speeds on Ampere cards will come from users' measurements.
 
+### Ultra on a 48 GB card: `--quant-load cpu` and `--graph-memory-gb` (2.5)
+
+`--quant-load gpu` (the default) puts ultra's bf16 weights on the GPU before they are quantised, which needs an 80 GB
+card. `--quant-load cpu` keeps them in host memory and moves one decoder layer at a time to the GPU, where it is
+quantised, so the GPU holds about the quantised size: ultra in `--mode fp8` or `--mode int8` fits a 48 GB card. The
+weights are the same as with the GPU load.
+
+A GPU with less free memory runs smaller CUDA graph shapes, and its answers then differ from an 80 GB card's in the last
+bits. `--graph-memory-gb N` sizes the shapes for N GiB of free memory after the weights instead of what is measured, so
+every GPU given the same N runs the same shapes and gives the same answers. Measured on an H100 with 32 GB taken by
+another process (about a 48 GB card): with `--mode fp8 --quant-load cpu --graph-memory-gb 10`, 1,700 of 1,700 answers
+bit-identical to the same flags on the unloaded card, start-up 276 s, 5.9 decisions/s at 16 clients (single questions)
+and 1.1 requests/s with five questions over long states, no errors.
+
+```bash
+basal-serve --model Remek/basal-omni-1.0-ultra --mode fp8 --quant-load cpu --graph-memory-gb 10 --port 8000
+```
+
 
 `Remek/basal-1.5-4.5B-FP8` / `-NVFP4`, `Remek/basal-1.5-max-FP8` / `-NVFP4` and `Remek/basal-1.5-mini-FP8` were produced with [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) post-training quantisation
 (`FP8_DEFAULT_CFG` / `NVFP4_DEFAULT_CFG`), calibrated on basal-1.5 calibration decisions, with the token embeddings and

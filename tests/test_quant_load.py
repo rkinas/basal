@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from basal import fp8block
-from basal.engine import QUANT_LOAD_EXPERIMENTAL, quant_load_refused
+from basal.engine import quant_load_refused
 from basal.gemma4_graph import Gemma4Graph, move_except
 from basal.server import Server, parser
 
@@ -41,7 +41,6 @@ def test_move_except_keeps_tied_weights_and_skips_the_layers():
 
 
 def test_refused_without_a_load_time_quantisation(monkeypatch):
-    monkeypatch.setenv("BASAL_EXPERIMENTAL_QUANT_LOAD", "1")
     assert quant_load_refused("gpu", None, "row", None, False, False) is None
     assert quant_load_refused("cpu", "fp8", "block", None, True, False) is None
     assert quant_load_refused("cpu", "nvfp4", "row", {"0.q_proj": 1.0}, True, False) is None
@@ -55,16 +54,13 @@ def test_refused_without_a_load_time_quantisation(monkeypatch):
         Server(parser().parse_args(["--mode", "fast", "--quant-load", "cpu"]))
 
 
-def test_experimental_in_this_version(monkeypatch):
-    """--quant-load cpu is refused unless BASAL_EXPERIMENTAL_QUANT_LOAD=1: the weights are the same, but a smaller GPU
-    runs smaller graph shapes (its answers can differ slightly), so it stays experimental in 2.5."""
+def test_supported_without_an_environment_switch(monkeypatch):
+    """--quant-load cpu needs no switch since 2.5 (with --graph-memory-gb N a smaller GPU runs the shapes of any GPU given
+    the same N: H100 under a 32 GB ballast, 1,700 / 1,700 answers bit-identical to the unloaded card)."""
     monkeypatch.delenv("BASAL_EXPERIMENTAL_QUANT_LOAD", raising=False)
-    assert quant_load_refused("cpu", "fp8", "block", None, True, False) == QUANT_LOAD_EXPERIMENTAL
-    assert quant_load_refused("gpu", "fp8", "block", None, True, False) is None
-    with pytest.raises(SystemExit, match="BASAL_EXPERIMENTAL_QUANT_LOAD=1"):
-        Server(parser().parse_args(["--mode", "fp8", "--quant-load", "cpu"]))
-    monkeypatch.setenv("BASAL_EXPERIMENTAL_QUANT_LOAD", "1")
     assert quant_load_refused("cpu", "fp8", "block", None, True, False) is None
+    assert quant_load_refused("cpu", "int8", "row", None, True, False) is None
+    assert quant_load_refused("gpu", "fp8", "block", None, True, False) is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA")

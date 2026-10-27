@@ -45,7 +45,7 @@ from pathlib import Path
 import torch
 
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
-                     FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, QUANT_LOAD_EXPERIMENTAL, SGLangBackend,
+                     FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
                      VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
                      resolve, set_fp8_fast_accum)
 from .evidence import Evidence
@@ -1058,8 +1058,6 @@ class Server:
         if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4",
                                                                                                         "int8")):
             raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
-        if getattr(a, "quant_load", "gpu") == "cpu" and os.environ.get("BASAL_EXPERIMENTAL_QUANT_LOAD") != "1":
-            raise SystemExit(QUANT_LOAD_EXPERIMENTAL)
         if getattr(a, "graph_memory_gb", None) is not None:
             if kind != "graph":
                 raise SystemExit("--graph-memory-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
@@ -2072,8 +2070,8 @@ def add_engine_args(ap):
                     help="--mode fp8 (block scaling) / int8 / nvfp4 with basal-omni: where the bf16 weights are held "
                          "while they are quantised. gpu: all on the GPU first (needs their full size); cpu: in host "
                          "memory, one decoder layer at a time to the GPU, quantised there (GPU memory about the "
-                         "quantised size: ultra in FP8 or int8 on cards under 64 GB; the same weights). Experimental: "
-                         "needs BASAL_EXPERIMENTAL_QUANT_LOAD=1")
+                         "quantised size: ultra in FP8 or int8 on cards under 64 GB; the same weights). With "
+                         "--graph-memory-gb N it answers as any GPU given the same N")
     ap.add_argument("--graph-memory-gb", dest="graph_memory_gb", type=float, default=None,
                     help="the CUDA graph engine: size the graph shapes (the grid, the pass-2 graphs, the longest state "
                          "run as one forward) for this much free GPU memory after the weights, in GiB, instead of the "
