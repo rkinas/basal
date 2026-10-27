@@ -8,6 +8,7 @@
                        skipped question is answered null) and "images" for image media
   POST /v1/basal       same as /v1/systemone; also the experimental task types classify, verify, compress, extract
                        (basal/tasks.py)
+  POST /v1/decisions   OpenAI's Decisions API (predicate / choice / score), decided as /v1/systemone (basal/decisions.py)
   GET  /v1/models
   GET  /health
 
@@ -2234,7 +2235,8 @@ def error_body(e, error_format="basal"):
 
 
 def http_app(srv, mode, mcp=None, error_format="basal"):
-    """The app of basal-serve: POST /v1/systemone and /v1/basal, GET /v1/models, /health and /metrics; mcp: (routes,
+    """The app of basal-serve: POST /v1/systemone and /v1/basal, POST /v1/decisions (OpenAI's Decisions API), GET
+    /v1/models, /health and /metrics; mcp: (routes,
     lifespan) of --mcp on. A failed request answers error_body with http_status: 422 invalid request, 503 out of GPU memory, 500
     any other server error."""
     from contextlib import asynccontextmanager, nullcontext
@@ -2243,6 +2245,7 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
     from starlette.responses import JSONResponse, PlainTextResponse
     from starlette.routing import Route
     from . import __version__
+    from . import decisions as dec
     counts = {"requests": 0, "failed": 0, "seconds": 0.0}  # GET /metrics
     cache_seen = {"stats": None, "at": 0}  # the last state-cache snapshot /metrics read, and its Unix time
 
@@ -2268,6 +2271,28 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
         finally:
             counts["seconds"] += time.perf_counter() - t
 
+    async def decisions(request):
+        """POST /v1/decisions (OpenAI's Decisions API, basal/decisions.py): the System One request it stands for,
+        decided as POST /v1/systemone; errors in OpenAI's shape (400 for an invalid request)."""
+        t = time.perf_counter()
+        counts["requests"] += 1
+        try:
+            try:
+                body = await request.json()
+            except ValueError as e:  # not JSON (or not UTF-8)
+                raise RequestError(f"the request body is not valid JSON: {e}") from None
+            s1, specs = dec.to_systemone(body)
+            return JSONResponse(dec.to_decision(await srv.serve(s1), specs))
+        except Exception as e:  # noqa: BLE001
+            counts["failed"] += 1
+            print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
+            if isinstance(e, torch.OutOfMemoryError):
+                torch.cuda.empty_cache()
+            status = 400 if isinstance(e, RequestError) else http_status(e)
+            return JSONResponse(dec.error_body(e, status), status_code=status)
+        finally:
+            counts["seconds"] += time.perf_counter() - t
+
     async def models(_):
         return JSONResponse(models_payload(srv.name, mode, getattr(srv.backend, "policies", {}), srv.temps,
                                            srv.fmt, srv.orders, getattr(srv.backend, "media_kinds", ()),
@@ -2290,7 +2315,7 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
              ("basal_requests_running", "requests in flight, not waiting", "gauge", [({}, load["running"])]),
              ("vllm:num_requests_waiting", "as basal_requests_waiting (vLLM's name)", "gauge", [({}, load["queued"])]),
              ("vllm:num_requests_running", "as basal_requests_running (vLLM's name)", "gauge", [({}, load["running"])]),
-             ("basal_requests_total", "requests served (POST /v1/systemone, /v1/basal)", "counter",
+             ("basal_requests_total", "requests served (POST /v1/systemone, /v1/basal, /v1/decisions)", "counter",
               [({}, counts["requests"])]),
              ("basal_requests_failed_total", "requests answered with an error", "counter", [({}, counts["failed"])]),
              ("basal_request_seconds_total", "time spent on those requests", "counter",
@@ -2330,7 +2355,8 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
             task.cancel()
 
     return Starlette(routes=[Route("/v1/systemone", systemone, methods=["POST"]),
-                             Route("/v1/basal", systemone, methods=["POST"]), Route("/v1/models", models),
+                             Route("/v1/basal", systemone, methods=["POST"]),
+                             Route("/v1/decisions", decisions, methods=["POST"]), Route("/v1/models", models),
                              Route("/health", health), Route("/metrics", metrics), *mcp_routes], lifespan=lifespan)
 
 

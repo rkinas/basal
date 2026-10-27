@@ -1,5 +1,9 @@
 # What is new in basal 2.5
 
+- **`POST /v1/decisions`: OpenAI's Decisions API on basal-serve.** `client.decisions.create` of the OpenAI Python SDK
+  works against basal-serve: predicate, choice and score questions are decided as the System One request they stand
+  for (predicate as noul), with the same probabilities as `/v1/systemone`, and answered in OpenAI's shape; errors in
+  OpenAI's error shape. [API.md](API.md#openais-decisions-api-post-v1decisions).
 - **LM Studio serves basal as a decision model** (GGUF, prompt-format-2 models): `basal-export-gguf --systemone`
   writes llama.cpp's decision metadata into a copy of a `-GGUF` file: basal's prompt as a template and the calibrated
   temperatures; the weights are not touched. LM Studio 0.4.26 or newer then answers choice, yes/no and score questions
