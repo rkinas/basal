@@ -19,6 +19,15 @@ Off by default (the replicas' answers then pass through untouched):
                                           --escalate-below; every answer then also gives its "level" and "model" (as
                                           that replica reports it). A level that is down or does not answer 200 leaves
                                           the previous answers. Multi and task answers never escalate.
+  --blend URL ... --blend-weights W0 W1 ...
+                                          a blend: every question is also asked of each --blend pool (one model
+                                          each; repeat the flag), and a plain choice / noul / score answer gets the
+                                          weighted mean of the models' probabilities (W0 for --replicas, then one per
+                                          --blend, in order): choice, noul, score and confidence follow from it, and
+                                          the answer says "blend": {"models": [...], "weights": [...]}. A model that is
+                                          down or does not answer 200 is left out (the weights of the rest are used).
+                                          Multi, act, tool, task answers, questions with coverage / max_error /
+                                          evidence keep the first replica's answer. Not with --escalate.
   --route SCRIPT=URL[,URL]                requests whose state is mostly in that script (latin, cyrillic, greek,
                                           arabic, hebrew, cjk) go to those replicas instead
 
@@ -27,8 +36,11 @@ Off by default (the replicas' answers then pass through untouched):
                                                                                           GPU on ports 8001..)
   basal-router --replicas http://127.0.0.1:8001 --escalate http://127.0.0.1:8002 --escalate-below 0.8 \
                --escalate http://127.0.0.1:8003 --escalate-below 0.9   (pico on 8001, mini on 8002, ultra on 8003)
+  basal-router --replicas http://127.0.0.1:8001 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8003 \
+               --blend-weights 0.2 0.2 0.6
 GET /health: 200 when at least one replica is ready, else 503; /metrics: per replica in flight, requests routed by
-state / by load, failures, readiness, answers per cascade level (Prometheus); /v1/models: the first ready replica's.
+state / by load, failures, readiness, answers per cascade level, blended answers (Prometheus); /v1/models: the first
+ready replica's.
 """
 import argparse
 import asyncio
@@ -87,6 +99,32 @@ def top_probability(answer):
     return max(p.values())
 
 
+BLENDS = ("choice", "noul", "score")
+PLAIN = ("coverage", "max_error", "evidence", "multi")  # question fields whose answers are not blended
+
+
+def blendable(question, answer):
+    """A plain choice / noul / score answer (its option probabilities only) to a question without limits or evidence."""
+    return (isinstance(answer, dict) and answer.get("type") in BLENDS and isinstance(answer.get("probabilities"), dict)
+            and bool(answer["probabilities"]) and isinstance(question, dict) and not any(k in question for k in PLAIN))
+
+
+def blend_answer(answer, members):
+    """answer (the first replica's) with the weighted mean of members' probabilities, [(weight, model, answer)] in
+    order: p[k] = sum(w * p_m[k]) / sum(w); choice / noul / score / confidence recomputed from p as basal-serve does."""
+    total = sum(w for w, _, _ in members)
+    p = {k: sum(w * a["probabilities"][k] for w, _, a in members) / total for k in answer["probabilities"]}
+    out = dict(answer, probabilities=p, confidence=max(p.values()))
+    if answer["type"] == "choice":
+        out["choice"] = max(p, key=p.get)
+    elif answer["type"] == "noul":
+        out["noul"] = p["true"]
+    else:
+        out["score"] = float(sum(i * v for i, v in enumerate(p.values())))
+    out["blend"] = {"models": [m for _, m, _ in members], "weights": [w for w, _, _ in members]}
+    return out
+
+
 def _h(text):
     return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
 
@@ -118,12 +156,18 @@ class Ring:
 
 class Router:
     def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None,
-                 levels=None):
-        """escalate, below: one cascade level; levels: [(URLs, threshold), ...] for levels 2, 3, ... instead."""
+                 levels=None, blend=None, blend_weight=1.0):
+        """escalate, below: one cascade level; levels: [(URLs, threshold), ...] for levels 2, 3, ... instead;
+        blend: [(URLs, weight), ...] asked beside the replicas (weight blend_weight)."""
         import httpx
         levels = [(list(u), b) for u, b in (levels if levels is not None else [(escalate, below)]) if u]
         self.levels = [(f"level:{k}", b) for k, (_, b) in enumerate(levels, start=2)]  # (level k's pool, k - 1's threshold)
+        blend = [(list(u), w) for u, w in (blend or []) if u]
+        self.blends = [(f"blend:{k}", w) for k, (_, w) in enumerate(blend, start=2)]
+        self.blend_weight = blend_weight
+        self.blended = {}
         self.pools = {"main": list(replicas), **{f"level:{k}": u for k, (u, _) in enumerate(levels, start=2)},
+                      **{f"blend:{k}": u for k, (u, _) in enumerate(blend, start=2)},
                       **{f"script:{k}": list(v) for k, v in (routes or {}).items()}}
         self.replicas = list(dict.fromkeys(u for urls in self.pools.values() for u in urls))
         self.rings = {name: Ring(urls) for name, urls in self.pools.items() if urls}
@@ -177,7 +221,44 @@ class Router:
         status, content, ctype = await self._send(pool, path, body, headers)
         if self.levels and status == 200:
             content = await self._cascade(path, body, content, headers)
+        if self.blends and status == 200:
+            content = await self._blend(path, body, content, headers)
         return status, content, ctype
+
+    async def _blend(self, path, body, content, headers):
+        """The first replica's answers, the blendable ones mixed with the --blend pools' (asked at once, concurrently)."""
+        try:
+            req, resp = json.loads(body), json.loads(content)
+            answers = resp["answers"]
+            qs = req.get("questions") or {}
+            want = [q for q, a in answers.items() if q in qs and blendable(qs[q], a)]
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return content
+        if not want:
+            return content
+        sub = json.dumps(dict(req, questions={q: qs[q] for q in want})).encode()
+        outs = await asyncio.gather(*(self._send(pool, path, sub, headers) for pool, _ in self.blends))
+        others = []
+        for (_, w), (st, c, _) in zip(self.blends, outs):
+            try:
+                r = json.loads(c) if st == 200 else None
+                if isinstance(r, dict) and isinstance(r.get("answers"), dict):
+                    others.append((w, r.get("model"), r["answers"]))
+            except ValueError:
+                continue
+        for q in want:
+            a = answers[q]
+            keys = list(a["probabilities"])
+            members = [(self.blend_weight, resp.get("model"), a)] + [
+                (w, m, x[q]) for w, m, x in others if isinstance(x.get(q), dict) and x[q].get("type") == a["type"]
+                and isinstance(x[q].get("probabilities"), dict) and list(x[q]["probabilities"]) == keys]
+            members = [m for m in members if m[0] > 0]
+            if len(members) > 1:
+                answers[q] = blend_answer(a, members)
+            elif members:  # only one model answered: its answer as it is
+                a["blend"] = {"models": [members[0][1]], "weights": [members[0][0]]}
+            self.blended[len(members)] = self.blended.get(len(members), 0) + 1
+        return json.dumps(resp, ensure_ascii=False).encode()
 
     async def _cascade(self, path, body, content, headers):
         """The answers of the first replica (level 1), with those under level k's threshold asked again of level k + 1,
@@ -257,6 +338,8 @@ class Router:
                  [({"answered_by": k}, n) for k, n in self.answered.items()])] if self.levels else [])
             + ([("basal_router_level_answers_total", "answers by cascade level (1: the first replica)", "counter",
                  [({"level": str(k)}, n) for k, n in self.by_level.items()])] if len(self.levels) > 1 else [])
+            + ([("basal_router_blend_answers_total", "answers blended (--blend), by the number of models in the blend",
+                 "counter", [({"models": str(k)}, n) for k, n in sorted(self.blended.items())])] if self.blends else [])
             + ([("basal_router_script_total", "requests by the script of their state (--route)", "counter",
                  [({"script": k}, n) for k, n in sorted(self.scripts.items())])] if self.scripts else []))
 
@@ -398,6 +481,25 @@ def levels(escalate, below):
     return [(list(u), b) for u, b in zip(escalate, below or [0.8] * len(escalate))]
 
 
+def blends(blend, weights, cascade):
+    """The blend of --blend URL ... (repeated: one model each) and --blend-weights W0 W1 ... (W0 for --replicas, then
+    one per --blend) -> (first replica's weight, [(URLs, weight), ...]); (1.0, []) without --blend."""
+    if not blend:
+        if weights is not None:
+            raise SystemExit("basal-router: --blend-weights without --blend")
+        return 1.0, []
+    if cascade:
+        raise SystemExit("basal-router: --blend and --escalate do not go together")
+    if not all(blend):
+        raise SystemExit("basal-router: --blend without URLs")
+    if weights is None or len(weights) != 1 + len(blend):
+        raise SystemExit(f"basal-router: --blend-weights needs {1 + len(blend)} weights (--replicas first, then one "
+                         "per --blend, in order)")
+    if any(not math.isfinite(w) or w < 0 for w in weights) or sum(weights) <= 0:
+        raise SystemExit("basal-router: --blend-weights must be finite, >= 0 and not all 0")
+    return weights[0], [(list(u), w) for u, w in zip(blend, weights[1:])]
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     serve_args = argv[argv.index("--") + 1:] if "--" in argv else []
@@ -415,8 +517,13 @@ def main(argv=None):
                     help="--escalate: questions whose top probability is under this are asked again there (default "
                          "0.8); one per --escalate, in the same order")
     ap.add_argument("--route", action="append", default=[], help="SCRIPT=URL[,URL]: states in that script go there")
+    ap.add_argument("--blend", nargs="+", action="append", default=[],
+                    help="replicas of one more model whose probabilities are blended in; repeat for each model")
+    ap.add_argument("--blend-weights", dest="blend_weights", nargs="+", type=float, default=None,
+                    help="--blend: the weight of --replicas, then of each --blend, in order")
     a = ap.parse_args(argv)
     cascade = levels(a.escalate, a.escalate_below)
+    first, blend = blends(a.blend, a.blend_weights, cascade)
     procs, urls = ([], list(a.replicas))
     if a.gpus:
         procs, more = spawn(a.gpus.split(","), a.replica_port, serve_args)
@@ -433,7 +540,7 @@ def main(argv=None):
         if k not in SCRIPTS + ("other",) or not v:
             raise SystemExit(f"basal-router: --route {x!r}: SCRIPT=URL[,URL], SCRIPT one of {', '.join(SCRIPTS)}, other")
         routes[k] = v.split(",")
-    router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes)
+    router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes, blend=blend, blend_weight=first)
 
     def ended(sig, _frame):
         """SIGTERM / SIGINT / SIGHUP outside uvicorn, or re-raised by it after its shutdown: the replicas end first."""
