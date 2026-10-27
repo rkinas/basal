@@ -3062,7 +3062,8 @@ def vllm_args(cfg, preset="default", media=False, fast_prefill=True):
     models whose last layers reuse earlier layers' keys and values (Gemma 4 E2B / E4B: num_kv_shared_layers) run those
     layers at the answer position only during prefill (vLLM's kv_sharing_fast_prefill, YOCO); the generated token, the
     only one basal reads, is the same, prompt log-probabilities would not be. media (--media on): at most
-    media.MAX_ITEMS items per prompt of the media the model takes, no video. A text-only server still loads the
+    media.MAX_ITEMS items per prompt of the media the model takes, no video; Gemma 4 Unified models (basal-omni-1.1-max)
+    with vllm_unified's patch, in vLLM's worker as its worker extension. A text-only server still loads the
     encoders: without them (language_model_only) vLLM 0.31 picks another attention backend for Gemma 4 on an H100
     (FlashAttention instead of Triton + FlashAttention) and keeps fewer KV tokens (mini: 911k instead of 978k)."""
     if preset not in VLLM_PRESETS:
@@ -3083,7 +3084,10 @@ def vllm_args(cfg, preset="default", media=False, fast_prefill=True):
         kw["kv_sharing_fast_prefill"] = True
     if media:
         from .media import MAX_ITEMS, kinds_of
+        from .vllm_unified import ENV, WORKER_EXTENSION, is_unified
         kw["limit_mm_per_prompt"] = {k: MAX_ITEMS if k in kinds_of(cfg) else 0 for k in ("image", "audio", "video")}
+        if is_unified(cfg):  # basal-omni-1.1-max: the image attention and audio counts of the model (vllm_unified.py)
+            kw["worker_extension_cls"], env[ENV] = WORKER_EXTENSION, "1"
     return kw, env
 
 
@@ -3114,15 +3118,13 @@ class VLLMBackend:
             if not self.media_kinds:
                 raise SystemExit("--media on: the model has no image or audio encoder (config.json: vision_config, "
                                  "audio_config)")
-            if "Gemma4UnifiedForConditionalGeneration" in (cfg.get("architectures") or ()):
-                # basal-omni-1.1-max against --mode eager --media on (2.3 media check set): images 0.942 the same
-                # answer, accuracy -1.3 points; 19 of 285 audio clips expanded to other token counts
-                raise SystemExit("--media on with --mode vllm does not serve Gemma 4 Unified models (basal-omni-1.1-max): "
-                                 "vLLM 0.31 reads their images and audio differently from the model's processor; use "
-                                 "--mode eager --media on")
             pc = Path(model_dir) / "processor_config.json"
             self.max_audio_s = audio_window(json.loads(pc.read_text(encoding="utf-8"))) if pc.exists() else None
         os.environ.update(env)  # before vLLM starts its engine process, which reads it
+        unified = media and kw.get("worker_extension_cls")
+        if unified:  # Gemma 4 Unified: patch the prompt processor here, the model in vLLM's worker (vllm_unified.py)
+            from . import vllm_unified
+            vllm_unified.patch()
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
         self.preset, self.engine_args, self.lock = preset, kw, threading.Lock()
@@ -3130,6 +3132,8 @@ class VLLMBackend:
         self.llm = LLM(**{**dict(model=str(model_dir), dtype=dtype, gpu_memory_utilization=mem, max_model_len=max_len,
                                  enable_prefix_caching=True, logprobs_mode="processed_logprobs",
                                  max_logprobs=max(16, max_options)), **kw})
+        if unified:
+            vllm_unified.check(self.llm)
         self.context = max_len - 1  # longest prompt: max_model_len holds the one generated token too
         self.context_reason = f"vLLM's --max-len {max_len}"
 
