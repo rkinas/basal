@@ -3422,7 +3422,9 @@ class MLXBackend:
         self.packed = bool(packed) and self._position_rope()
         # Qwen3.5: unrelated prompts run one per forward. Its forward is compute-bound from a few hundred tokens, so a
         # right-padded batch costs its longest prompt for every row (0.8B pico, M4 Pro, 200 held-out prompts of 722
-        # tokens on average: 175 ms per prompt in batches of 16, 146 ms one at a time)
+        # tokens on average: 175 ms per prompt in batches of 16, 146 ms one at a time). The suffixes of a group go by
+        # length in batches of at most TOKEN_BUDGET padded tokens: ten suffixes of ~7k tokens in one float32 forward
+        # asked Metal for an 18.7 GB buffer (the attention scores)
         self.alone = bool(what)
 
     def _exact_norms(self, md):
@@ -3607,9 +3609,16 @@ class MLXBackend:
         return h[mx.array([b for b, r in enumerate(rows) for _ in r[3]]), mx.array([j for r in rows for j in r[3]])]
 
     def _group(self, toks, lids):
-        """One group: shared prefix once, then the suffixes in batches of max_rows."""
+        """One group: shared prefix once, then the suffixes in batches of max_rows (with `alone`, Qwen3.5: sorted by
+        length, at most TOKEN_BUDGET padded tokens per batch)."""
         P = self._shared_len(toks)
         prefix = self._prefix(toks[0][:P]) if P > 0 else None
+        if self.alone:
+            res = [None] * len(toks)
+            for c in self._chunks([len(t) - P for t in toks]):
+                for j, p in zip(c, self._letters(self._forward([toks[j][P:] for j in c], prefix), [lids[j] for j in c])):
+                    res[j] = p
+            return res
         out = []
         for i in range(0, len(toks), self.max_rows):
             h = self._forward([t[P:] for t in toks[i: i + self.max_rows]], prefix)

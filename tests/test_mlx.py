@@ -487,6 +487,10 @@ def test_mlx_qwen35_equals_torch(tmp_path):
     assert be.fwd is None and not be.packed
     for r, g in zip(ref, be.run_shared([(TOKS, LIDS)])[0]):
         assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
+    be.TOKEN_BUDGET = 8  # the suffixes in several batches, by length: every readout back in its place
+    for r, g in zip(ref, be.run_shared([(TOKS, LIDS)])[0]):
+        assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
+    be.TOKEN_BUDGET = MLXBackend.TOKEN_BUDGET
     singles = [list(range(1, 40)), list(range(5, 64)) * 2, [9, 8, 7, 6, 5, 4, 3, 2]]
     sl = [[10, 11], [12, 13, 14], [10, 15]]
     ref_s = reference(m, singles, sl)
