@@ -12,15 +12,23 @@ gets SIGTERM when the router is killed.
 Off by default (the replicas' answers then pass through untouched):
   --escalate URL ... --escalate-below P   a cascade: questions whose top probability (calibrated, as the first replica
                                           answers) is under P are asked again of the escalation replicas (a bigger
-                                          model); every answer says "answered_by": "first" or "escalated"
+                                          model); every answer says "answered_by": "first" or "escalated". Repeated,
+                                          the pairs are ordered levels: the first replica is level 1, the k-th
+                                          --escalate level k + 1, and a question goes on from level k to level k + 1
+                                          only while its top probability at level k is under the k-th
+                                          --escalate-below; every answer then also gives its "level" and "model" (as
+                                          that replica reports it). A level that is down or does not answer 200 leaves
+                                          the previous answers. Multi and task answers never escalate.
   --route SCRIPT=URL[,URL]                requests whose state is mostly in that script (latin, cyrillic, greek,
                                           arabic, hebrew, cjk) go to those replicas instead
 
   basal-router --replicas http://127.0.0.1:8001 http://127.0.0.1:8002 --port 8000
   basal-router --gpus 0,1,2,3 --port 8000 -- --model Remek/basal-2.0-mini --mode fast   (starts one basal-serve per
                                                                                           GPU on ports 8001..)
+  basal-router --replicas http://127.0.0.1:8001 --escalate http://127.0.0.1:8002 --escalate-below 0.8 \
+               --escalate http://127.0.0.1:8003 --escalate-below 0.9   (pico on 8001, mini on 8002, ultra on 8003)
 GET /health: 200 when at least one replica is ready, else 503; /metrics: per replica in flight, requests routed by
-state / by load, failures, readiness (Prometheus); /v1/models: the first ready replica's.
+state / by load, failures, readiness, answers per cascade level (Prometheus); /v1/models: the first ready replica's.
 """
 import argparse
 import asyncio
@@ -109,15 +117,19 @@ class Ring:
 
 
 class Router:
-    def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None):
+    def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None,
+                 levels=None):
+        """escalate, below: one cascade level; levels: [(URLs, threshold), ...] for levels 2, 3, ... instead."""
         import httpx
-        self.pools = {"main": list(replicas), "escalate": list(escalate),
+        levels = [(list(u), b) for u, b in (levels if levels is not None else [(escalate, below)]) if u]
+        self.levels = [(f"level:{k}", b) for k, (_, b) in enumerate(levels, start=2)]  # (level k's pool, k - 1's threshold)
+        self.pools = {"main": list(replicas), **{f"level:{k}": u for k, (u, _) in enumerate(levels, start=2)},
                       **{f"script:{k}": list(v) for k, v in (routes or {}).items()}}
         self.replicas = list(dict.fromkeys(u for urls in self.pools.values() for u in urls))
         self.rings = {name: Ring(urls) for name, urls in self.pools.items() if urls}
         self.ring = self.rings.get("main")
-        self.below = below
         self.answered = {"first": 0, "escalated": 0}
+        self.by_level = {k: 0 for k in range(1, len(self.levels) + 2)}
         self.scripts = {}
         self.ready = set()
         self.load = {r: 0 for r in self.replicas}
@@ -154,7 +166,7 @@ class Router:
         """-> (status, content, content type): the request to the replica its pool and state give, then (--escalate)
         its low-confidence questions to the escalation replicas."""
         pool = "main"
-        if len(self.rings) > 1 + ("escalate" in self.rings):  # --route
+        if any(name.startswith("script:") for name in self.rings):  # --route
             try:
                 sc = script_of(json.loads(body).get("state"))
             except (ValueError, AttributeError):
@@ -163,35 +175,53 @@ class Router:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
                 pool = f"script:{sc}" if f"script:{sc}" in self.rings else pool
         status, content, ctype = await self._send(pool, path, body, headers)
-        if "escalate" in self.rings and status == 200:
+        if self.levels and status == 200:
             content = await self._cascade(path, body, content, headers)
         return status, content, ctype
 
     async def _cascade(self, path, body, content, headers):
-        """The answers of the first replica, with those under --escalate-below asked again of the escalation pool."""
+        """The answers of the first replica (level 1), with those under level k's threshold asked again of level k + 1,
+        level by level. A level that is down or does not answer 200 leaves the previous answers (and ends the chain).
+        With one level the response is as before; with more, every answer also gives its level and model."""
         try:
             req, resp = json.loads(body), json.loads(content)
             answers = resp["answers"]
         except (ValueError, KeyError, TypeError):
             return content
-        low = [q for q, a in answers.items() if q in (req.get("questions") or {})
-               and (top_probability(a) if isinstance(a, dict) else None) is not None and top_probability(a) < self.below]
-        for a in answers.values():
+        named = len(self.levels) > 1
+        level = {}
+        for q, a in answers.items():
             if isinstance(a, dict):
                 a["answered_by"] = "first"
+                if named:
+                    a["level"], a["model"] = 1, resp.get("model")
+                level[q] = 1
         done = []
-        if low:
+        for k, (pool, below) in enumerate(self.levels, start=1):
+            low = [q for q, a in answers.items() if q in (req.get("questions") or {}) and level.get(q) == k
+                   and (top_probability(a) if isinstance(a, dict) else None) is not None and top_probability(a) < below]
+            if not low:
+                break
             sub = dict(req, questions={q: req["questions"][q] for q in low})
-            st, c2, _ = await self._send("escalate", path, json.dumps(sub).encode(), headers)
-            if st == 200:
-                for q, a in (json.loads(c2).get("answers") or {}).items():
-                    if q in low and isinstance(a, dict):
-                        a["answered_by"] = "escalated"
-                        answers[q] = a
+            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers)
+            if st != 200:
+                break
+            r2 = json.loads(c2)
+            for q, a in (r2.get("answers") or {}).items():
+                if q in low and isinstance(a, dict):
+                    a["answered_by"] = "escalated"
+                    if named:
+                        a["level"], a["model"] = k + 1, r2.get("model")
+                    answers[q] = a
+                    level[q] = k + 1
+                    if k == 1:
                         done.append(q)
         self.answered["escalated"] += len(done)
         self.answered["first"] += sum(1 for a in answers.values() if isinstance(a, dict)) - len(done)
-        resp["cascade"] = {"below": self.below, "escalated": done}
+        for k in level.values():
+            self.by_level[k] += 1
+        below = [b for _, b in self.levels] if named else self.levels[0][1]
+        resp["cascade"] = {"below": below, "escalated": done}
         return json.dumps(resp, ensure_ascii=False).encode()
 
     async def _send(self, pool, path, body, headers):
@@ -224,7 +254,9 @@ class Router:
             ("basal_router_failed_total", "requests the replica answered with 5xx or not at all", "counter",
              [({"replica": r}, n) for r, n in self.failed.items()])]
             + ([("basal_router_answers_total", "answers by the first replica / escalated (--escalate)", "counter",
-                 [({"answered_by": k}, n) for k, n in self.answered.items()])] if "escalate" in self.rings else [])
+                 [({"answered_by": k}, n) for k, n in self.answered.items()])] if self.levels else [])
+            + ([("basal_router_level_answers_total", "answers by cascade level (1: the first replica)", "counter",
+                 [({"level": str(k)}, n) for k, n in self.by_level.items()])] if len(self.levels) > 1 else [])
             + ([("basal_router_script_total", "requests by the script of their state (--route)", "counter",
                  [({"script": k}, n) for k, n in sorted(self.scripts.items())])] if self.scripts else []))
 
@@ -353,6 +385,19 @@ def spawn(gpus, port0, serve_args):
     return procs, urls
 
 
+def levels(escalate, below):
+    """The cascade levels of --escalate URL ... (repeated: levels 2, 3, ...) and --escalate-below P (one per
+    --escalate, in order; none: 0.8 for each) -> [(URLs, threshold), ...]; [] without escalation replicas."""
+    if not any(escalate):
+        return []
+    if not all(escalate):
+        raise SystemExit("basal-router: --escalate without URLs among several --escalate levels")
+    if below and len(below) != len(escalate):
+        raise SystemExit(f"basal-router: {len(escalate)} --escalate levels and {len(below)} --escalate-below "
+                         "thresholds (give one per level, in the same order, or none for 0.8)")
+    return [(list(u), b) for u, b in zip(escalate, below or [0.8] * len(escalate))]
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     serve_args = argv[argv.index("--") + 1:] if "--" in argv else []
@@ -364,11 +409,14 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--load-factor", dest="load_factor", type=float, default=LOAD_FACTOR)
-    ap.add_argument("--escalate", nargs="*", default=[], help="escalation replicas (a bigger model) for the cascade")
-    ap.add_argument("--escalate-below", dest="escalate_below", type=float, default=0.8,
-                    help="--escalate: questions whose top probability is under this are asked again there")
+    ap.add_argument("--escalate", nargs="*", action="append", default=[],
+                    help="escalation replicas (a bigger model) for the cascade; repeat for further levels")
+    ap.add_argument("--escalate-below", dest="escalate_below", type=float, action="append", default=[],
+                    help="--escalate: questions whose top probability is under this are asked again there (default "
+                         "0.8); one per --escalate, in the same order")
     ap.add_argument("--route", action="append", default=[], help="SCRIPT=URL[,URL]: states in that script go there")
     a = ap.parse_args(argv)
+    cascade = levels(a.escalate, a.escalate_below)
     procs, urls = ([], list(a.replicas))
     if a.gpus:
         procs, more = spawn(a.gpus.split(","), a.replica_port, serve_args)
@@ -385,7 +433,7 @@ def main(argv=None):
         if k not in SCRIPTS + ("other",) or not v:
             raise SystemExit(f"basal-router: --route {x!r}: SCRIPT=URL[,URL], SCRIPT one of {', '.join(SCRIPTS)}, other")
         routes[k] = v.split(",")
-    router = Router(urls, factor=a.load_factor, escalate=a.escalate, below=a.escalate_below, routes=routes)
+    router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes)
 
     def ended(sig, _frame):
         """SIGTERM / SIGINT / SIGHUP outside uvicorn, or re-raised by it after its shutdown: the replicas end first."""
