@@ -548,8 +548,9 @@ def gdn_mps_refused(model):
     until a Metal kernel exists; BASAL_EXPERIMENTAL_GDN_MPS=1 turns it on for development only."""
     return (f"{model}: --mode mps is not served for Qwen3.5 (Gated DeltaNet) models in this version: without "
             "flash-linear-attention's kernels (CUDA only) its Gated DeltaNet layers take seconds per prompt on an Apple "
-            "GPU. On a Mac serve the -GGUF file with --mode gguf (llama.cpp on Metal); MLX (--mode mlx) is the other "
-            "Mac path, for models with an -MLX port. --mode eager (exact) runs it anywhere, --mode fast on CUDA")
+            "GPU. On a Mac serve it with --mode mlx (MLX: the model's own bf16 weights, computed in float32) or the "
+            "-GGUF file with --mode gguf (llama.cpp on Metal). --mode eager (exact) runs it anywhere, --mode fast on "
+            "CUDA")
 
 
 def fp8_refused():
