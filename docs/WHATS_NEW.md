@@ -6,7 +6,8 @@
   on its own `/v1/systemone` and `/v1/decisions`, up to 26 options, without `basal-serve` in front (`llama-server`
   too). Against `basal-serve --mode gguf` on the same files (Apple M4 Pro, 620 questions per model): the same prompts
   token for token and the same top answer on every question answered, probabilities within 0.0041; LM Studio stops a
-  request after 30 s, which 5 long requests of the 4.5B hit. `act`, `multi`, `tool`, the certified thresholds and more
+  request after 30 s, which 5 long requests of the 4.5B hit (split long states or send fewer questions per request; for
+  long documents `basal-serve --mode gguf` has no such limit). `act`, `multi`, `tool`, the certified thresholds and more
   than 26 options stay with `basal-serve`. [INSTALL.md](INSTALL.md#lm-studio-gguf-as-a-decision-model).
 - **`--mlx-forward basal` on Apple Silicon** (opt-in; the default `mlx-lm` is unchanged): basal's own forward over
   mlx-lm's layers for Llama and Gemma 4. The layers from the last one with its own keys and values on run at the
