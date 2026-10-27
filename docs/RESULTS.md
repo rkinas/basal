@@ -92,8 +92,46 @@ then the share of items each model answered (its accuracy on those in brackets):
 Computed from the answers each model gave alone (the readouts behind its card: basal-serve, bf16, both option orders
 averaged, as the Results tables), not from a run through the router; the router uses the top probability of the answer
 as the replica returns it, so with one option order the shares move somewhat. The items ultra answers are the ones the
-smaller models were unsure of, so its accuracy on them is below its accuracy alone. No speed or cost is claimed here:
-measure the share each level answers on your own traffic.
+smaller models were unsure of, so its accuracy on them is below its accuracy alone. The table above claims no speed
+or cost; the measurements below do.
+
+### What a cascade or a blend buys (measured on a held-out half)
+
+The held-out items above (8,860) were split in two halves by a hash of the item id. Every setting below was chosen on
+one half (4,418 items) from 80 cascades (pico -> mini -> ultra, pico -> ultra, mini -> ultra, thresholds 0.5 to 0.99),
+probability and log-probability blends of the three models (weights on a 0.1 grid) and the most confident model's
+answer, and then measured once on the other half (4,442 items). One request per item in the given option order, as
+basal-router asks a replica in its default; differences against ultra alone are paired, with 95% bootstrap intervals.
+
+**Ultra's accuracy for less: mini -> ultra at 0.95.** basal-omni-1.0-mini answers when its top probability is at
+least 0.95; otherwise basal-omni-1.0-ultra does (`--replicas MINI --escalate ULTRA --escalate-below 0.95`). On the
+measured half: 93.0% against 93.2% for ultra alone, -0.1 pt (95% interval -0.4 to +0.2 pt), with ultra answering 37%
+of the questions. Served on one H100, ultra in `--mode fp8` in both setups (alone with its default settings; in the
+cascade beside mini, `--graph-memory-gb 8` for ultra and 6 for mini), the 4,442 measured requests, one question each:
+
+| setup | clients | requests/s | p50 latency | p95 latency | accuracy as served |
+|---|---|---|---|---|---|
+| ultra alone | 1 | 22.0 | 38 ms | 84 ms | 93.6% |
+| mini -> ultra | 1 | 32.7 (x1.49) | 16 ms | 75 ms | 93.6% |
+| ultra alone | 16 | 30.1 | 359 ms | 850 ms | 93.4% |
+| mini -> ultra | 16 | 46.0 (x1.53) | 93 ms | 1,283 ms | 93.5% |
+
+So about 1.5x the requests of ultra at the same accuracy (within 0.5 pt); ultra answered 40% of the questions in
+this run. Most requests are much faster, but at 16 clients the slowest 5% are slower than with ultra alone (p95
+1.28 s against 0.85 s): a question that goes on to ultra waits for both models. If your traffic needs a tight tail,
+measure the cascade at your own load first.
+
+**Above ultra: a blend of the three.** The probability blend 0.6 ultra + 0.2 mini + 0.2 pico (`--blend`,
+[SERVING.md](SERVING.md)) scored 93.6% against 93.2% for ultra alone on the measured half: +0.45 pt (95% interval
++0.09 to +0.81 pt); 43 items right only with the blend, 23 only with ultra. By set: PL decisions 97.5% against 97.3%
+(3,567 items), EN corpus test 74.0% against 72.7% (732), PL-Real 97.2% against 95.8% (143).
+- A quality option, not a speed option: every question goes to all three models. On one H100 at one client, p50
+  52 ms against 36 ms for ultra alone (p95 102 against 75 ms).
+- Less calibrated than ultra: calibration error (ECE) 0.041 against 0.016. Blended answers say `"calibrated": false`
+  and carry no certificates, so refit thresholds with `basal-calibrate` on the blend's output before you automate
+  blended answers.
+- The best cascade (mini -> ultra at 0.97) only matched ultra on the choosing half, and the most confident model's
+  answer scored below it.
 
 ## Other benchmarks
 
