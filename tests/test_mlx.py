@@ -418,3 +418,118 @@ def test_mlx_forward_flag(monkeypatch, tmp_path):
     tiny_llama(tmp_path)
     with pytest.raises(ValueError, match="unknown MLX forward"):
         mlx_stub(tmp_path, forward="fast")
+
+
+def tiny_qwen35(path, dtype=torch.float32):
+    """A tiny Qwen3.5 decoder (Gated DeltaNet and attention layers, tied head as in basal-omni-pico) whose key head size
+    (32) takes mlx-lm's Metal kernel of the gated delta rule; random (1 + w) norm weights."""
+    from transformers import Qwen3_5ForCausalLM, Qwen3_5TextConfig
+    torch.manual_seed(0)
+    m = Qwen3_5ForCausalLM(Qwen3_5TextConfig(
+        vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=4, full_attention_interval=2,
+        layer_types=["linear_attention", "full_attention"] * 2, num_attention_heads=4, num_key_value_heads=2,
+        head_dim=16, linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=32, linear_value_head_dim=16,
+        max_position_embeddings=512, tie_word_embeddings=True,
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.5,
+                         "mrope_section": [2, 1, 1], "mrope_interleaved": True})).eval()
+    with torch.no_grad():
+        for n, p in m.named_parameters():
+            if n.endswith("norm.weight"):
+                p.normal_(0, 0.3)
+    m.to(dtype).save_pretrained(path)
+    return m
+
+
+def test_qwen35_text_override():
+    """transformers' text-only Qwen3.5 (model_type qwen3_5_text) loads as mlx-lm's qwen3_5."""
+    o = mlx_config_overrides({"model_type": "qwen3_5_text", "rope_parameters": {"rope_type": "default",
+                                                                                "rope_theta": 1e7}})
+    assert o == {"model_type": "qwen3_5", "rope_theta": 1e7}
+    assert "model_type" not in mlx_config_overrides({"model_type": "llama"})
+
+
+def test_mlx_refuses_other_recurrent_models_before_loading(tmp_path, monkeypatch):
+    """Only Qwen3.5's states are carried through a shared prefix; other recurrent models stop before mlx is imported."""
+    import json
+    import sys
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_next",
+                                                      "layer_types": ["linear_attention", "full_attention"]}))
+    monkeypatch.setitem(sys.modules, "mlx", None)  # importing mlx would fail
+    be = MLXBackend.__new__(MLXBackend)
+    with pytest.raises(ValueError, match="Qwen3.5.*--mode eager"):
+        be._load(tmp_path)
+
+
+def test_qwen35_norms_read_one_plus_w(tmp_path):
+    from basal.engine import qwen35_norms
+    m = tiny_qwen35(tmp_path, torch.bfloat16)
+    got = qwen35_norms(tmp_path)
+    sd = m.state_dict()
+    assert set(got) == {k for k in sd if k.endswith("norm.weight") and ".linear_attn." not in k}
+    for k, v in got.items():
+        assert v.dtype == torch.float32 and torch.equal(v, 1.0 + sd[k].float())
+    pytest.importorskip("mlx.core")
+    be = mlx_stub(tmp_path)  # bf16 weights: (1 + w) exact in float32, not rounded to bf16
+    import numpy as np
+    w = np.array(be.lm.model.layers[0].input_layernorm.weight)
+    assert np.array_equal(w, got["model.layers.0.input_layernorm.weight"].numpy())
+    assert not np.array_equal(w, (1.0 + sd["model.layers.0.input_layernorm.weight"]).float().numpy())
+
+
+def test_mlx_qwen35_equals_torch(tmp_path):
+    """Qwen3.5 through mlx-lm's forward: a SOAM group (each suffix continues the prefix's Gated DeltaNet states and the
+    attention layers' keys and values), unrelated prompts and a mix of both answer as each prompt's own float32
+    forward."""
+    pytest.importorskip("mlx.core")
+    m = tiny_qwen35(tmp_path)
+    ref = reference(m, TOKS, LIDS)
+    be = mlx_stub(tmp_path)
+    assert be.fwd is None and not be.packed
+    for r, g in zip(ref, be.run_shared([(TOKS, LIDS)])[0]):
+        assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
+    be.TOKEN_BUDGET = 8  # the suffixes in several batches, by length: every readout back in its place
+    for r, g in zip(ref, be.run_shared([(TOKS, LIDS)])[0]):
+        assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
+    be.TOKEN_BUDGET = MLXBackend.TOKEN_BUDGET
+    singles = [list(range(1, 40)), list(range(5, 64)) * 2, [9, 8, 7, 6, 5, 4, 3, 2]]
+    sl = [[10, 11], [12, 13, 14], [10, 15]]
+    ref_s = reference(m, singles, sl)
+    for r, g in zip(ref_s, be.run(singles, sl)):
+        assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
+    mixed = be.run_shared([([singles[0]], [sl[0]]), (TOKS[:2], LIDS[:2])])
+    assert max(abs(x - y) for x, y in zip(mixed[0][0], ref_s[0])) < 2e-4
+    assert max(abs(x - y) for x, y in zip(mixed[1][1], ref[1])) < 2e-4
+
+
+def test_mlx_qwen35_computes_in_float32(tmp_path):
+    """bf16 weights are upcast at load: the readouts follow the float32 forward of the same bf16 weights, not a bf16
+    one. Quantised weights (mlx-q8, a quantised export) are refused for Qwen3.5 before any weights are read."""
+    import json
+    pytest.importorskip("mlx.core")
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+    m = tiny_qwen35(tmp_path, torch.bfloat16).float()
+    be = mlx_stub(tmp_path)
+    assert {v.dtype for _, v in tree_flatten(be.model.parameters())} == {mx.float32}
+    for r, g in zip(reference(m, TOKS, LIDS), be.run_shared([(TOKS, LIDS)])[0]):
+        assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
+    with pytest.raises(ValueError, match="quantised MLX weights are not checked for Qwen3.5"):
+        mlx_stub(tmp_path, "q8")
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    (tmp_path / "config.json").write_text(json.dumps({**cfg, "quantization": {"group_size": 64, "bits": 8}}))
+    with pytest.raises(ValueError, match="quantised MLX weights are not checked for Qwen3.5"):
+        mlx_stub(tmp_path)
+
+
+def test_mlx_state_cache_refused_for_qwen35_before_loading(tmp_path, monkeypatch):
+    """The MLX state cache holds attention keys and values only: --state-cache-gb / --prefix-cache are refused for a
+    Qwen3.5 model before mlx is imported."""
+    import json
+    import sys
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5_text",
+                                                      "layer_types": ["linear_attention", "full_attention"]}))
+    monkeypatch.setitem(sys.modules, "mlx", None)
+    be = MLXBackend.__new__(MLXBackend)
+    be.state_cache = object()
+    with pytest.raises(ValueError, match="--state-cache-gb / --prefix-cache on --mode mlx"):
+        be._load(tmp_path)

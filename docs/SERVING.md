@@ -17,7 +17,7 @@ benchmarking a GPU.
 | `sglang` | SGLang backend, same readout | CUDA GPUs supported by SGLang |
 | `eager` | plain PyTorch reference; `--device cuda\|mps\|cpu` (default: `BASAL_DEVICE`, else CUDA, else Apple Silicon, else CPU) | any GPU, Apple Silicon (MPS) or CPU |
 | `fast-exit` | `fast` + trained early-exit heads, exit policy chosen per request | models that ship `exit_heads/` (basal-1.0 only) |
-| `mlx` *(default on Apple Silicon with `basal[mlx]`)* | Apple Silicon with MLX / mlx-lm: the `-MLX-8bit` ports or bf16 weights; shared-prefix KV cache (opt-in `--mlx-packed`: short Llama groups as one packed forward, [QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon)) | Apple Silicon |
+| `mlx` *(default on Apple Silicon with `basal[mlx]`)* | Apple Silicon with MLX / mlx-lm: the `-MLX-8bit` ports or bf16 weights; shared-prefix KV cache (opt-in `--mlx-packed`: short Llama groups as one packed forward, [QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon)); opt-in `--state-cache-gb N` / `--prefix-cache on` across requests, as on the CUDA graph engine ([HARDWARE.md](HARDWARE.md#apple-m4-state-cache-on---mode-mlx)) | Apple Silicon |
 | `mlx-q8` | `mlx` with 8-bit weights made from bf16 at load time (about half the memory, not faster) | Apple Silicon |
 | `mps` | the PyTorch engine without CUDA graphs: SOAM packing + token-budget batching; on the Mac's GPU, or on the CPU (`--device cpu`, the default without MPS), where a request's state runs once instead of once per prompt as in `eager` | Apple Silicon, CPU |
 | `gguf` | a GGUF file in process through llama.cpp (`--gguf <file>`, extra `basal[gguf]`) | Apple Silicon (Metal), CUDA, CPU |
@@ -231,6 +231,27 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   answer replaces the first one. Every answer says `"answered_by": "first"` or `"escalated"`, the response lists the
   escalated questions under `"cascade"`, and `/metrics` counts both (`basal_router_answers_total`). Questions without
   option probabilities (multi, tasks) are never escalated.
+- **Several levels:** repeat the pair, one `--escalate-below` per `--escalate`, in order (without any, 0.8 for each).
+  The first replica is level 1 and the k-th `--escalate` is level k + 1. A question goes on from level k to level
+  k + 1 only while its top probability at level k is under the k-th `--escalate-below`; the last level's answer stands.
+  For example basal-omni-pico first, basal-omni-1.0-mini for what pico is unsure of, basal-omni-1.0-ultra for what
+  mini is still unsure of:
+
+  ```
+  basal-serve --model Remek/basal-omni-pico --port 8001 &
+  basal-serve --model Remek/basal-omni-1.0-mini --port 8002 &
+  basal-serve --model Remek/basal-omni-1.0-ultra --port 8003 &
+  basal-router --replicas http://127.0.0.1:8001 \
+      --escalate http://127.0.0.1:8002 --escalate-below 0.8 \
+      --escalate http://127.0.0.1:8003 --escalate-below 0.9 --port 8000
+  ```
+
+  With two or more levels every answer also gives its `"level"` (1, 2, 3) and `"model"` (the name the answering
+  replica reports), `"cascade"` lists the thresholds (`"below": [0.8, 0.9]`) and the questions answered above level 1,
+  and `/metrics` counts answers per level (`basal_router_level_answers_total{level="2"}`). A level that is down or does
+  not answer 200 (for example 503 while it loads) leaves the previous answers in place; the request does not fail.
+  [docs/RESULTS.md](RESULTS.md#cascade-pico-mini-ultra) shows accuracy and the share each level answers at
+  thresholds 0.6 to 0.9.
 - `--route SCRIPT=URL[,URL]`: requests whose state is mostly in that script (latin, cyrillic, greek, arabic, hebrew,
   cjk, other) go to those replicas, for example a model trained for Ukrainian; the rest go to `--replicas`
   (`basal_router_script_total`).
@@ -285,7 +306,8 @@ state cache is read without waiting for its lock; while the engine holds it, the
 `basal_state_cache_snapshot_timestamp_seconds` gives their Unix time (0 before the first read; the cache values are
 left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP
 API. basal-router's own metrics are per replica: readiness, requests in flight, requests routed by state and by load,
-failures.
+failures; with `--escalate`, answers by the first replica and escalated (with several levels also per level), and with
+`--route`, requests by script.
 
 ## Inference on a JSONL file
 

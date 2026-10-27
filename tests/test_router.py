@@ -192,6 +192,25 @@ def test_starting_frees_the_port_of_a_process_forked_during_start_up():
         child.join()
 
 
+
+def test_starting_port_is_not_inherited_by_a_spawned_process():
+    """Processes started with exec while the 503 server holds the port (basal-router's replicas, Triton / Inductor
+    compile workers, any subprocess) never get its socket: Python creates it non-inheritable (close-on-exec)."""
+    import subprocess
+    import sys
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    st = S.Starting("127.0.0.1", port)
+    try:
+        fd = st.httpd.socket.fileno()
+        assert not st.httpd.socket.get_inheritable()
+        code = ("import os, stat, sys\ntry:\n"
+                f"    sys.exit(0 if stat.S_ISSOCK(os.fstat({fd}).st_mode) else 3)\nexcept OSError:\n    sys.exit(3)")
+        assert subprocess.run([sys.executable, "-c", code]).returncode == 3  # no socket at that fd in the child
+    finally:
+        st.stop()
+
 def cascade_transport(conf):
     """Fake replicas that answer every question with top probability conf[replica] (and say who answered)."""
     def handler(req):
@@ -348,3 +367,145 @@ def test_router_exits_1_when_every_replica_exited(tmp_path):
     p = subprocess.Popen([sys.executable, "-c", ROUTER, EXITER, "--gpus", "0,1", "--port", str(port),
                           "--replica-port", str(rport)], env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)))
     assert p.wait(timeout=60) == 1
+
+
+# Multi-level cascade (2.5): --escalate URL ... --escalate-below P repeated as ordered levels; the first replica is
+# level 1, the k-th --escalate level k + 1
+SMALL, MID, BIG = "http://small", "http://mid", "http://big"
+
+
+def level_transport(conf, asked, health=None, post=None):
+    """Fake replicas: conf[replica][question] = the top probability of a choice answer (or a whole answer dict); each
+    response names its model ("model-" + host); asked[replica] records the questions each was asked. health / post:
+    status codes per replica (default 200), or an exception to raise for a POST."""
+    def handler(req):
+        base = f"{req.url.scheme}://{req.url.host}"
+        if req.url.path == "/health":
+            return httpx.Response((health or {}).get(base, 200), json={"status": "ok"})
+        st = (post or {}).get(base, 200)
+        if isinstance(st, Exception):
+            raise st
+        if st != 200:
+            return httpx.Response(st, json={"status": "starting"})
+        body = json.loads(req.content)
+        asked.setdefault(base, []).append(sorted(body["questions"]))
+        ans = {}
+        for q in body["questions"]:
+            c = conf[base][q]
+            ans[q] = dict(c) if isinstance(c, dict) else {"type": "choice", "choice": "a",
+                                                          "probabilities": {"a": c, "b": round(1 - c, 6)}}
+        return httpx.Response(200, json={"model": "model-" + req.url.host, "answers": ans, "usage": {"questions": len(ans)}})
+    return httpx.MockTransport(handler)
+
+
+def three_levels(conf, asked, below=(0.8, 0.9), **kw):
+    return R.Router([SMALL], transport=level_transport(conf, asked, **kw), levels=[([MID], below[0]), ([BIG], below[1])])
+
+
+QS = {q: {"type": "choice"} for q in ("q1", "q2", "q3", "q4", "q5")}
+CONF = {SMALL: {"q1": 0.95, "q2": 0.5, "q3": 0.5, "q4": 0.8, "q5": 0.79},  # q4: at level 1's threshold, not under it
+        MID: {"q2": 0.95, "q3": 0.85, "q5": 0.9},                          # q5: at level 2's threshold
+        BIG: {"q3": 0.7}}
+
+
+def test_cascade_levels_follow_each_levels_threshold():
+    asked = {}
+    rt = three_levels(CONF, asked)
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        r = c.post("/v1/systemone", json={"state": "Doc", "questions": QS}).json()
+    a = r["answers"]
+    assert asked == {SMALL: [sorted(QS)], MID: [["q2", "q3", "q5"]], BIG: [["q3"]]}  # only questions under the bar move
+    assert {q: a[q]["level"] for q in QS} == {"q1": 1, "q2": 2, "q3": 3, "q4": 1, "q5": 2}
+    assert {q: a[q]["model"] for q in QS} == {"q1": "model-small", "q2": "model-mid", "q3": "model-big",
+                                              "q4": "model-small", "q5": "model-mid"}
+    assert {q: a[q]["answered_by"] for q in QS} == {"q1": "first", "q2": "escalated", "q3": "escalated",
+                                                    "q4": "first", "q5": "escalated"}
+    assert a["q3"]["probabilities"] == {"a": 0.7, "b": 0.3}  # the last level's answer stands, whatever its probability
+    assert r["model"] == "model-small" and r["cascade"] == {"below": [0.8, 0.9], "escalated": ["q2", "q3", "q5"]}
+
+
+def test_cascade_metrics_count_answers_per_level():
+    rt = three_levels(CONF, {})
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        for _ in range(2):
+            assert c.post("/v1/basal", json={"state": "Doc", "questions": QS}).status_code == 200
+        m = c.get("/metrics").text
+    for lev, n in ((1, 4), (2, 4), (3, 2)):
+        assert f'basal_router_level_answers_total{{level="{lev}"}} {n}' in m
+    assert 'basal_router_answers_total{answered_by="first"} 4' in m
+    assert 'basal_router_answers_total{answered_by="escalated"} 6' in m
+
+
+@pytest.mark.parametrize("down", ["not ready", "503", "unreachable"])
+@pytest.mark.parametrize("level", [2, 3])
+def test_cascade_level_down_keeps_the_previous_answers(down, level):
+    url = MID if level == 2 else BIG
+    kw = {"not ready": {"health": {url: 503}}, "503": {"post": {url: 503}},
+          "unreachable": {"post": {url: httpx.ConnectError("refused")}}}[down]
+    asked = {}
+    rt = three_levels(CONF, asked, **kw)
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        resp = c.post("/v1/systemone", json={"state": "Doc", "questions": QS})
+    assert resp.status_code == 200
+    a = resp.json()["answers"]
+    want = {"q1": 1, "q2": 2, "q3": 2, "q4": 1, "q5": 2} if level == 3 else {q: 1 for q in QS}
+    assert {q: a[q]["level"] for q in QS} == want
+    assert all(a[q]["probabilities"]["a"] == CONF[SMALL if want[q] == 1 else MID][q] for q in QS)
+    assert BIG not in asked
+
+
+def test_cascade_never_escalates_multi_or_tasks():
+    asked = {}
+    conf = {SMALL: {"m": {"type": "multi", "selected": ["x"], "probabilities": {"x": 0.51, "y": 0.2}, "threshold": 0.5},
+                    "c": {"type": "classify", "label": "x", "top_label": "x", "scores": {"x": 0.4, "y": 0.35},
+                          "confidence": 0.4},
+                    "v": {"type": "verify", "claims": {"0": {"verdict": "true", "probabilities": {"true": 0.5}}},
+                          "all_supported": True, "not_supported": []},
+                    "q": 0.4},
+            MID: {"q": 0.5}, BIG: {"q": 0.6}}
+    rt = three_levels(conf, asked, below=(0.99, 0.99))
+    qs = {"m": {"type": "multi"}, "c": {"type": "classify"}, "v": {"type": "verify"}, "q": {"type": "choice"}}
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        a = c.post("/v1/systemone", json={"state": "Doc", "questions": qs}).json()["answers"]
+    assert asked == {SMALL: [sorted(qs)], MID: [["q"]], BIG: [["q"]]}
+    assert {q: a[q]["level"] for q in qs} == {"m": 1, "c": 1, "v": 1, "q": 3}
+    assert a["m"]["probabilities"] == conf[SMALL]["m"]["probabilities"] and a["c"]["scores"] == conf[SMALL]["c"]["scores"]
+
+
+def test_one_level_given_as_levels_answers_as_before():
+    """The one-level form gives the same bytes through levels= as through escalate= / below= (no level or model)."""
+    def run(**kw):
+        rt = R.Router([SMALL], transport=level_transport(CONF, {}), **kw)
+        with TestClient(R.app(rt, poll_s=0.05)) as c:
+            asyncio.run(rt.poll())
+            r = c.post("/v1/systemone", json={"state": "Doc", "questions": QS}).content
+            return r, c.get("/metrics").text
+    old, new = run(escalate=[MID], below=0.8), run(levels=[([MID], 0.8)])
+    assert old == new and b'"level"' not in old[0] and "level_answers" not in old[1]
+    assert json.loads(old[0])["cascade"] == {"below": 0.8, "escalated": ["q2", "q3", "q5"]}
+
+
+def test_levels_from_the_command_line(monkeypatch):
+    got = []
+    monkeypatch.setattr(R, "Router", lambda urls, **kw: got.append(kw["levels"]) or type("F", (), {"dead": False})())
+    monkeypatch.setattr(R, "app", lambda *a, **k: None)
+    monkeypatch.setattr(R.signal, "signal", lambda *a: None)
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    base = ["--replicas", SMALL]
+    R.main(base)
+    R.main(base + ["--escalate-below", "0.7"])
+    R.main(base + ["--escalate", MID])
+    R.main(base + ["--escalate", MID, BIG, "--escalate-below", "0.7"])
+    R.main(base + ["--escalate", MID, "--escalate-below", "0.7", "--escalate", BIG, "--escalate-below", "0.9"])
+    R.main(base + ["--escalate", MID, "--escalate", BIG])
+    assert got == [[], [], [([MID], 0.8)], [([MID, BIG], 0.7)], [([MID], 0.7), ([BIG], 0.9)],
+                   [([MID], 0.8), ([BIG], 0.8)]]
+    for bad in (["--escalate", MID, "--escalate", BIG, "--escalate-below", "0.7"],
+                ["--escalate", MID, "--escalate"]):
+        with pytest.raises(SystemExit, match="basal-router: "):
+            R.main(base + bad)
