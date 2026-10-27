@@ -131,6 +131,15 @@ def _rot(x, cos, sin):
     return x * cos + torch.cat((-x[..., h:], x[..., :h]), -1) * sin
 
 
+def _pack(sel):
+    """Block lists of a FlexAttention block mask from a [query blocks, key blocks] selection: the count per query
+    block and the selected key blocks first, ascending ([1, 1, ...] for every row and head)."""
+    n = sel.shape[1]
+    cols = torch.arange(n, device=sel.device)[None]
+    idx = torch.where(sel, cols, n).sort(1).values.clamp(max=n - 1)
+    return sel.sum(1).to(torch.int32)[None, None], idx.to(torch.int32)[None, None]
+
+
 def _pre(h, P, C, cos, sin, kb=None, vb=None, pk=None, pv=None):
     """A decoder layer up to attention: the input norm and the projections -> (q [b, L, heads x d] as projected,
     k, v [b, kv heads, P + L, d]: normed, keys rotated, written to kb / vb and after the prefix pk / pv; None for a
@@ -586,13 +595,32 @@ class Gemma4Graph:
         full = (d >= 1) & (d <= (W - Bk) // Bk) if W else d >= 1
         part = vis & ~full
 
-        def pack(sel):  # selected key blocks first, ascending
-            idx = torch.where(sel, cols, n).sort(1).values.clamp(max=n - 1)
-            return sel.sum(1).to(torch.int32)[None, None], idx.to(torch.int32)[None, None]
-
         def mod(b, h, q, kv):
             return (q >= kv) & (q - kv < W) if W else q >= kv
-        return BlockMask.from_kv_blocks(*pack(part), *pack(full), BLOCK_SIZE=Bk, mask_mod=mod, seq_lengths=(L, L))
+        return BlockMask.from_kv_blocks(*_pack(part), *_pack(full), BLOCK_SIZE=Bk, mask_mod=mod, seq_lengths=(L, L))
+
+    def _compact_window_block(self, T, cu, W, mod):
+        """FlexAttention block mask of compact rows when every layer runs flex (Blackwell workstation GPUs: no varlen
+        FlashAttention): query block i visits only the key blocks from its first query's prompt start (and window, W
+        not None) on, up to i; a key block is full (no mask evaluated) when it and the query block lie in one prompt
+        and every pair is within the window. mod: the mask inside the partial blocks."""
+        from torch.nn.attention.flex_attention import BlockMask
+        Bk, dev = self.BLOCK, cu.device
+        n = -(-T // Bk)
+        first = torch.arange(n, device=dev) * Bk                        # each block's first token
+        doc = torch.bucketize(torch.stack([first, first + Bk - 1]).clamp(max=T - 1), cu[1:], right=True)  # [2, n]:
+        # the prompt of a block's first / last token (no host tensor: this runs inside graph captures)
+        lo = cu[doc[0]] // Bk                                           # first key block a query block needs
+        if W:
+            lo = torch.maximum(lo, (first - W + 1).clamp(min=0) // Bk)
+        cols = torch.arange(n, device=dev)[None]
+        d = torch.arange(n, device=dev)[:, None] - cols                 # [n, n]: query block - key block
+        vis = (cols >= lo[:, None]) & (d >= 0)
+        full = (d >= 1) & (doc[0][None] == doc[1][:, None])
+        if W:
+            full = full & (d <= (W - Bk) // Bk)
+        return BlockMask.from_kv_blocks(*_pack(vis & ~full), *_pack(full), BLOCK_SIZE=Bk, mask_mod=mod,
+                                        seq_lengths=(T, T))
 
     def _dense_block(self, B, Lq, Lk, mod, dev):
         """A block mask that visits every (query block, key block) pair, each evaluated with mod: its block lists do
@@ -651,10 +679,11 @@ class Gemma4Graph:
 
     # -- the forward --------------------------------------------------------------------------------------------------
     def _compact_masks(self, kernels, T, cu, ro, pads):
-        """Masks of compact rows: each prompt attends to itself only. Sliding layers: FlashAttention 3's varlen kernel
-        with the window; global layers: a flex block mask that visits, for each query block, the key blocks from the
-        start of its first query's prompt on (the prompts are contiguous); the readout rows: a dense block mask over
-        the row (one query per prompt)."""
+        """Masks of compact rows: each prompt attends to itself only. With the fa3 kernels: FlashAttention 3's varlen
+        kernel with the window in the sliding layers and in the global layers a flex block mask that visits, for each
+        query block, the key blocks from the start of its first query's prompt on (the prompts are contiguous); with
+        flex in every layer, _compact_window_block. The readout rows: a dense block mask over the row (one query per
+        prompt)."""
         from torch.nn.attention.flex_attention import BlockMask
         Bk, dev = self.BLOCK, cu.device
         tok = torch.arange(T, device=dev)
@@ -676,6 +705,8 @@ class Gemma4Graph:
                 return ok & (q - kv < W) if W else ok
             if kernels[t] == "fa3":
                 m_all[t] = ("fa3v", W, cu)
+            elif "fa3" not in kernels.values():  # (fa3: the global layers' mask below, as gated on Hopper)
+                m_all[t] = self._compact_window_block(T, cu, W, same)
             else:
                 m_all[t] = BlockMask.from_kv_blocks(num[None, None], idx[None, None].contiguous(), BLOCK_SIZE=Bk,
                                                     mask_mod=same, seq_lengths=(T, T))
@@ -795,7 +826,7 @@ class Gemma4Graph:
 
     @torch.no_grad()
     def forward_compact(self, ids, pos, cu, ro, compiled=True):
-        """Compact rows (--batches compact, with the fa3 kernels): single prompts packed back to back in one row
+        """Compact rows (--batches compact, with the fa3 or flex kernels): single prompts packed back to back in one row
         [1, T] (positions from 0 per prompt, cu: cumulative token counts [prompts + 2], int32; the padding after the
         last prompt is one more prompt nobody reads) -> final hidden states at ro [R] (one readout per prompt): [R, D].
         No padding of rows to graph lengths or of row counts."""

@@ -161,6 +161,40 @@ def test_plain_block_mask_is_the_causal_window(L, W):
     assert torch.equal(got, true)
 
 
+@pytest.mark.parametrize("lens", [[3, 130, 1, 260, 77, 400], [700], [128, 128, 256, 5, 300]])
+@pytest.mark.parametrize("W", [None, 5, 128, 200, 512])
+def test_compact_window_block_is_each_prompts_causal_window(lens, W):
+    """The block mask of a sliding layer over compact rows (flex): full blocks + the mask inside partial blocks give
+    exactly each prompt's causal window, and no query block visits a key block before its prompt or window."""
+    g = Gemma4Graph(tiny("e4b"))
+    cu = torch.tensor([0] + list(torch.tensor(lens).cumsum(0)), dtype=torch.int32)
+    T = int(cu[-1]) + 37  # the padding after the last prompt: one more prompt nobody reads
+    cu = torch.cat([cu, torch.tensor([T], dtype=torch.int32)])
+    doc = torch.bucketize(torch.arange(T), cu[1:], right=True)
+    q, k = torch.arange(T)[:, None], torch.arange(T)[None]
+    true = (doc[:, None] == doc[None]) & (k <= q) & ((q - k < W) if W else True)
+    docp = torch.nn.functional.pad(doc, (0, g.BLOCK), value=-1)
+
+    def same(b, h, q, kv):
+        ok = (docp[q] == docp[kv]) & (q >= kv)
+        return ok & (q - kv < W) if W else ok
+    bm = g._compact_window_block(T, cu, W, same)
+    got = torch.zeros(T, T, dtype=torch.bool)
+    B = g.BLOCK
+    for i in range(-(-T // B)):
+        rows = slice(i * B, (i + 1) * B)
+        for c in range(int(bm.full_kv_num_blocks[0, 0, i])):
+            j = int(bm.full_kv_indices[0, 0, i, c])
+            assert true[rows, j * B: (j + 1) * B].all()
+            got[rows, j * B: (j + 1) * B] = True
+        visited = [int(bm.kv_indices[0, 0, i, c]) for c in range(int(bm.kv_num_blocks[0, 0, i]))]
+        for j in visited:
+            got[rows, j * B: (j + 1) * B] = true[rows, j * B: (j + 1) * B]
+        q0 = i * B
+        assert all(j * B + B > max(int(cu[doc[q0]]), q0 - W + 1 if W else 0) for j in visited)
+    assert torch.equal(got, true)
+
+
 def test_state_cache_second_round_equals_separate():
     """A request cut at its state (--state-cache-gb): the first call computes the state and stores its keys and values
     (own-key layers only, two head sizes), a second request over the same state runs pass 2 only over the cached

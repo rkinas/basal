@@ -2086,7 +2086,8 @@ def add_engine_args(ap):
                          "values")
     ap.add_argument("--batches", choices=["auto", "compact", "default", "fine"], default="auto",
                     help="CUDA graph engine: compact = single prompts packed back to back into one row (FlashAttention "
-                         "3 varlen on Hopper; elsewhere, sm80+, torch's varlen attention, Llama models), no padding to "
+                         "3 varlen on Hopper; elsewhere, sm80+, torch's varlen attention, Llama models; basal-omni with "
+                         "the flex kernels: flex block masks per prompt), no padding to "
                          "graph lengths and row counts; default = rows padded to graph lengths; fine = more row "
                          "counts (less padding of short batches, longer start-up); auto = compact where FlashAttention "
                          "3 runs, else default")
