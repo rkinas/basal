@@ -1261,7 +1261,8 @@ class GraphBackend(EagerBackend):
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, shared=True, warm=True, attn="auto",
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
-                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None):
+                 nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
+                 global_attn="flex"):
         if compile:
             persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
@@ -1336,7 +1337,10 @@ class GraphBackend(EagerBackend):
                     else next(self.model.parameters()).device)
         self.prefill = PREFILL
         if gemma4_graph.is_gemma4(self.model):
-            self._gemma_init(gemma_attn, quant, compile, merge, fp8_scaling, fp8_bf16_layers, nvfp4_amax, nvfp4_scope)
+            self._gemma_init(gemma_attn, quant, compile, merge, fp8_scaling, fp8_bf16_layers, nvfp4_amax, nvfp4_scope,
+                             global_attn)
+        elif global_attn != "flex":
+            raise ValueError(f"--global-attn {global_attn}: basal-omni (Gemma 4) only")
         else:
             causal_sdpa(self.model)
             self._llama_init(merge, quant, lean, tree, compile)
@@ -1378,7 +1382,7 @@ class GraphBackend(EagerBackend):
         self._shape_line()
 
     def _gemma_init(self, kernels, quant, compile, merge, fp8_scaling="row", fp8_bf16_layers=0, nvfp4_amax=None,
-                    nvfp4_scope="all"):
+                    nvfp4_scope="all", global_attn="flex"):
         """basal-omni (Gemma 4): the forward of basal/gemma4_graph.py under the same packing, graphs and caches. Its
         own layer code reads the code rows at the readout positions (`ro`), so its plain graphs take them as an
         input; pass 2 with flex takes the trie as a TreeMask.
@@ -1428,7 +1432,7 @@ class GraphBackend(EagerBackend):
         self.gemma = gemma4_graph.Gemma4Graph(self.model, kernels, compile=compile, merge=merge is True,
                                               fp8="block" if block else "nvfp4" if fp4 else "int8" if int8 else None,
                                               fp8_bf16_layers=fp8_bf16_layers, nvfp4_amax=nvfp4_amax,
-                                              nvfp4_scope=nvfp4_scope, stream=stream)
+                                              nvfp4_scope=nvfp4_scope, stream=stream, global_attn=global_attn)
         self.softcap, self.merged, self.lean = self.gemma.softcap, self.gemma.merged, None
         self.fwd, self.fwd_sfx = self.gemma.forward, self.gemma.forward_suffix
         self.flex = all(k != "math" for k in self.gemma.kernels.values())
