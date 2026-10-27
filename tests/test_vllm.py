@@ -9,6 +9,7 @@ import pytest
 import basal.server as server_module
 from basal.calibrate import engine_name
 from basal.engine import VLLM_PRESETS, VLLMBackend, vllm_args
+from basal.prompt import RequestError
 from basal.server import calibration_file, calibration_name, load_calibration, models_payload, parser
 
 BF16 = {"architectures": ["Gemma4ForConditionalGeneration"], "vision_config": {"hidden_size": 1152},
@@ -172,6 +173,22 @@ def media_backend(monkeypatch, generate):
     be.tok = type("Tok", (), {"image_token_id": 7, "audio_token_id": 9, "apply_chat_template": template})()
     be.llm = type("L", (), {"generate": generate})()
     return be
+
+
+def test_unified_media_refuses_detail_high(monkeypatch):
+    calls = []
+
+    def generate(self, reqs, sps, use_tqdm):
+        calls.append(reqs)
+        return [Out([1, 7, 7, 2], {10: -0.1, 11: -2.4})]
+    be = media_backend(monkeypatch, generate)
+    be.unified = True  # basal-omni-1.1-max: detail "default" passed the media gate, "high" did not
+    msgs = [[{"role": "user", "content": "a"}]]
+    with pytest.raises(RequestError, match='detail "high" is not served with --mode vllm'):
+        be.run_media(msgs, [[10, 11]], ["IMG"], [], 1120)
+    assert not calls
+    assert len(be.run_media(msgs, [[10, 11]], ["IMG"], [], 280)) == 1
+    assert len(be.run_media(msgs, [[10, 11]], [], [[0.0, 0.1]], 1120)) == 1  # audio only: no image detail
 
 
 def test_media_prompts_share_one_vllm_call(monkeypatch):

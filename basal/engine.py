@@ -3105,7 +3105,7 @@ class VLLMBackend:
 
     LOGPROB_TOKEN_IDS = 128  # longest logprob_token_ids list vLLM accepts
     lock = threading.Lock()  # one vLLM call at a time (text batches and media requests); a class default for tests
-    media_kinds, max_audio_s = (), None
+    media_kinds, max_audio_s, unified = (), None, False
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, max_options=10, preset="default",
                  fast_prefill=True, media=False):
@@ -3121,7 +3121,7 @@ class VLLMBackend:
             pc = Path(model_dir) / "processor_config.json"
             self.max_audio_s = audio_window(json.loads(pc.read_text(encoding="utf-8"))) if pc.exists() else None
         os.environ.update(env)  # before vLLM starts its engine process, which reads it
-        unified = media and kw.get("worker_extension_cls")
+        unified = self.unified = bool(media and kw.get("worker_extension_cls"))
         if unified:  # Gemma 4 Unified: patch the prompt processor here, the model in vLLM's worker (vllm_unified.py)
             from . import vllm_unified
             vllm_unified.patch()
@@ -3165,7 +3165,13 @@ class VLLMBackend:
         placeholder per item, which vLLM's Gemma 4 processor expands with the Hugging Face processor (detail: the
         image's soft tokens). All prompts go into one vLLM call, so they share the request's media and state through
         the prefix cache: [(position probabilities, prompt tokens, media tokens)]."""
-        from .media import SAMPLE_RATE
+        from .media import DETAIL, SAMPLE_RATE
+        if self.unified and images and max_soft_tokens > DETAIL["default"]:
+            # basal-omni-1.1-max, detail "high" (1,120 soft tokens, past its 1,024-token sliding window): through vLLM
+            # 0.31 the eager answer on 54.8% of the media check set's images only (accuracy -29.7 points); "default"
+            # passed its gate (97.4%)
+            raise RequestError('detail "high" is not served with --mode vllm for Gemma 4 Unified models '
+                               '(basal-omni-1.1-max): use detail "default", or --mode eager --media on')
         mm = {k: v for k, v in (("image", list(images)), ("audio", [(a, SAMPLE_RATE) for a in audio])) if v}
         reqs = [{"prompt": self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
                                                         enable_thinking=False) + self.prefill,
