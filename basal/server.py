@@ -2195,6 +2195,11 @@ class Starting:
             self.httpd = None
             return
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        # a process forked during start-up (vLLM's engine core) would hold a copy of this listening socket for its
+        # whole life, so the port stayed taken after stop() and the real server's bind failed (address already in
+        # use): the child closes its copy at once
+        sock = self.httpd.socket
+        os.register_at_fork(after_in_child=sock.close)
 
     def stop(self):
         if self.httpd is not None:
