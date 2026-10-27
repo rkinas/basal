@@ -174,8 +174,8 @@ def test_default_mode_of_qwen35_on_cuda(monkeypatch, qwen35, cc, fla, mode):
 
 
 def test_default_mode_of_other_recurrent_models(monkeypatch, qwen35, qwen3_next, llama):
-    """Without --mode: eager for other recurrent models on CUDA and for every one on Apple Silicon (mps refuses them,
-    mlx is not checked on them); attention-only models keep their defaults."""
+    """Without --mode: eager for other recurrent models on CUDA and for every one on Apple Silicon (mps refuses them;
+    mlx serves Qwen3.5 only when asked); attention-only models keep their defaults."""
     monkeypatch.setattr(server_module, "resolve", lambda name, revision=None, metadata_only=False: name)
     monkeypatch.setattr(server_module, "gemma_fast_kernels", lambda: "fa3")
     monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: True)

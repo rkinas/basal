@@ -127,8 +127,9 @@ def default_mode(model=None, revision=None):
     GPU classes where its fast configuration passed its gate (gemma_fast_kernels: Hopper with flash_attn_3, Blackwell
     workstation GPUs), eager on other GPUs until they pass theirs (2.2.0 had no working default for it there: fast
     stopped at "'Gemma4Model' object has no attribute 'layers'"). A model with recurrent-state layers gets eager on CUDA
-    and Apple Silicon (mps refuses it, mlx is not checked on it), except a Qwen3.5 model (Gated DeltaNet), which gets
-    fast on the GPU class where the graph engine's port passed its gate (gdn_graph.default_fast: Hopper with fla)."""
+    and Apple Silicon (mps refuses it; mlx serves Qwen3.5 only when asked, --mode mlx), except a Qwen3.5 model (Gated
+    DeltaNet), which gets fast on the GPU class where the graph engine's port passed its gate (gdn_graph.default_fast:
+    Hopper with fla)."""
     if torch.cuda.is_available():
         if model is not None and _recurrent(model, revision):
             return "fast" if _gdn(model, revision) and gdn_default_fast() else "eager"
