@@ -676,11 +676,13 @@ while without the cache it grows with it:
 ## AMD Strix Halo (experimental, community-maintained)
 
 `--mode strix` ([basal/strix.py](../basal/strix.py)) was contributed and is maintained by
-[@kardysm](https://github.com/kardysm) ([#14](https://github.com/rkinas/basal/pull/14)), not by the core team. It runs
+[@kardysm](https://github.com/kardysm) ([#14](https://github.com/rkinas/basal/pull/14)), not by the core team:
+community-maintained, not yet verified on our hardware. It runs
 the Llama-architecture models basal-1.5 and basal-2.0 only, and was measured with the 4.5B ones. Shapes its kernels
 cannot run are refused at start-up with a message naming what does not fit: the mini models (hidden size 1,536, 6 query
 heads per kv head) and basal-omni (Gemma 4) are not supported; the 11B max models pass the checks but have not been
-measured. ROCm only, bf16, tile configs tuned on the Radeon 8060S. **Every number in this section was measured by
+measured. ROCm only, bf16, tile configs tuned on the Radeon 8060S. It needs a C compiler at start-up: Triton builds its
+launcher there (`sudo apt install build-essential`). **Every number in this section was measured by
 @kardysm** on the machine below, except the last bullet (a second machine, measured by @piotrkowski); we have not
 reproduced them. The benchmark scripts and raw results are in the author's fork,
 [kardysm/basal#3](https://github.com/kardysm/basal/pull/3).
