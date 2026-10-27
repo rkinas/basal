@@ -457,14 +457,21 @@ class StrixHaloFastBackend(GraphBackend):
                            self.layers[i + 1][0] if i + 1 < n else self.final_norm)
         return x[torch.argsort(order)]
 
-    @staticmethod
-    def _wait():
-        """Wait for the GPU by polling an event with short sleeps: ROCm's synchronize spins a CPU core at 100% for
-        the whole forward (seconds on long rows), this costs at most half a millisecond."""
+    SPIN_S = 0.3  # seconds of a forward waited for by spinning before polling (_wait)
+
+    @classmethod
+    def _wait(cls):
+        """Wait for the GPU: query an event in a loop for the first SPIN_S seconds, then poll it with 0.5 ms sleeps.
+        ROCm's synchronize spins a CPU core at 100% for the whole forward (seconds on long rows). Polling from the start
+        let short forwards run up to 3x slower on a Radeon 8060S in an HP Z2 Mini, as the GPU clocked down while the CPU
+        slept (one 200-token question 230-510 ms instead of 155-162 ms), while forwards of 0.7 s and more ran as fast
+        polled as spun. So a short forward is waited for spinning, and a long one costs at most SPIN_S of a core."""
         ev = torch.cuda.Event()
         ev.record()
+        end = time.perf_counter() + cls.SPIN_S
         while not ev.query():
-            time.sleep(0.0005)
+            if time.perf_counter() > end:
+                time.sleep(0.0005)
 
     @torch.no_grad()
     def run(self, prompts, ids_list):

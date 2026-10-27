@@ -63,8 +63,10 @@ reaches 16–19 useful TFLOPS at every request size. GPU time by operation, from
   round(q cos) + round(rot(q) sin), silu(gate) and its product with up rounded to bf16, bias then residual each
   rounded). q, k and v are one projection; the Hugging Face modules keep views of the fused weights, so the evidence
   head still runs the stock model.
-- The server waits for the GPU by polling an event with 0.5 ms sleeps: ROCm's synchronize spins a CPU core at 100% for
-  the whole forward.
+- The server waits for the GPU by querying an event in a loop for the first 0.3 s of a forward, then polling it with
+  0.5 ms sleeps: ROCm's synchronize spins a CPU core at 100% for the whole forward. Engine 2.4.1 polled from the start,
+  and on a Radeon 8060S in an HP Z2 Mini short forwards then ran up to 3x slower, as the GPU clocked down while the CPU
+  slept (one 200-token question 230-510 ms instead of 155-162 ms); forwards of 0.7 s and more run as fast either way.
 - Start-up compiles every kernel copy a request can need. Triton compiles a kernel once per tile config and per class
   of each length argument (1, a multiple of 16, other), and the row count picks both, so a request that needs a copy
   not compiled yet waits for it: 0.2–0.3 s per copy here, about 1 ms when Triton's disk cache (`~/.triton/cache`)

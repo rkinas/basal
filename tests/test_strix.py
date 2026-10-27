@@ -320,6 +320,27 @@ def test_mode_selects_the_backend(monkeypatch, tmp_path):
     assert server_module.MODES["strix"][0] == "strix" and "strix" in server_module.DETERMINISTIC_KINDS
 
 
+def test_wait_spins_then_polls(monkeypatch):
+    """_wait queries the event without sleeping for the first SPIN_S seconds of a forward, then sleeps between queries."""
+    from basal.strix import StrixHaloFastBackend as B
+    import basal.strix as strix_module
+
+    class Event:
+        def __init__(self): self.left = 5
+        def record(self): pass
+        def query(self):
+            self.left -= 1
+            return self.left < 0
+    sleeps = []
+    monkeypatch.setattr(strix_module.torch.cuda, "Event", Event)
+    monkeypatch.setattr(strix_module.time, "sleep", sleeps.append)
+    B._wait()
+    assert sleeps == []
+    monkeypatch.setattr(B, "SPIN_S", -1.0)
+    B._wait()
+    assert sleeps == [0.0005] * 5
+
+
 def test_graph_backend_untouched():
     """The new mode lives in basal/strix.py; GraphBackend's packing is what it reuses."""
     assert GraphBackend._pack([[1, 2, 3], [1, 2, 4]])[4] == [-1, 0, 0]
