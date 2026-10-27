@@ -280,7 +280,9 @@ curl http://127.0.0.1:1234/v1/systemone -H "Content-Type: application/json" -d '
   on the same files, Apple M4 Pro, 620 questions per model (synthetic, Polish and English, states up to ~2,000
   tokens): the prompts are identical token for token; basal-omni-pico 620 of 620 answered, the same top answer on all,
   probabilities within 0.0013; basal-2.0-4.5B 607 of 620 answered (13 questions in 5 long requests stopped at the
-  30-second limit), the same top answer on all 607, probabilities within 0.0041.
+  30-second limit), the same top answer on all 607, probabilities within 0.0041. LM Studio's `/v1/decisions`
+  renders the same prompt as its `/v1/systemone`; the probabilities agree within LM Studio's own run-to-run variation
+  (max 0.0014; two identical calls differ by up to 0.0008).
 
 For your own calibration, fit it with `basal-calibrate` on the same file (`--model ./basal-2.0-4.5B-GGUF --mode gguf
 --gguf <file>`) and write it into a new copy with `--systemone --calibration CALIBRATION.custom.json`. Details of the
