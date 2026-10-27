@@ -258,7 +258,8 @@ def test_uncut_runs_products_at_the_uncached_row_count(monkeypatch):
 def test_uncut_attention_runs_over_the_uncached_key_count(monkeypatch, mask):
     """Inside _uncut(rows, ref) an attention of `rows` queries over fewer than ref keys runs over ref keys (zero
     padding, masked for the real rows) and gives the rows of the unpadded call (fp32, within rounding); other calls
-    run as they are; whether its rows depend on the key count is recorded once per shape."""
+    run as they are. Once per shape it checks whether its rows depend on the key count: the same call over more
+    padding keys (KEY_CHECKS), then its first half over its own keys."""
     mx = pytest.importorskip("mlx.core")
     from mlx_lm.models.base import create_causal_mask
     be = MLXBackend.__new__(MLXBackend)
@@ -270,14 +271,14 @@ def test_uncut_attention_runs_over_the_uncached_key_count(monkeypatch, mask):
         return real(q, k, v, **kw)
     monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", spy)
     q, k, v = (mx.random.normal((1, h, n, 16), key=mx.random.key(i)) * 0.3
-               for i, (h, n) in enumerate([(4, 20), (2, 50), (2, 50)]))
-    m = "causal" if mask == "causal" else create_causal_mask(20, 30, window_size=8)
-    be.MIN_CONTINUE = 16  # 20 // 2 rows: too few for the first-half check
-    with be._uncut(20, 64):
+               for i, (h, n) in enumerate([(4, 40), (2, 70), (2, 70)]))
+    m = "causal" if mask == "causal" else create_causal_mask(40, 30, window_size=8)
+    with be._uncut(40, 96):
         got = mx.fast.scaled_dot_product_attention(q, k, v, scale=0.25, mask=m)
         mx.fast.scaled_dot_product_attention(q[:, :, :1], k, v, scale=0.25, mask=None)
-    assert seen[0] == (34, 64) and seen[-1] == (1, 50)  # padded; as it is
-    assert seen[1:-1] == [(34 + e, 64 + e) for e in be.KEY_CHECKS][: len(seen) - 2]  # the key-count check
+    checks = [(66 + e, 96 + e) for e in be.KEY_CHECKS] + [(20, 50)]  # 40 // 3 rows: too few queries to check
+    assert seen[0] == (66, 96) and seen[-1] == (1, 70)  # padded; as it is
+    assert seen[1:-1] == checks[: len(seen) - 2] and len(seen) > 2
     assert mx.fast.scaled_dot_product_attention is spy and len(be._attn_keys) == 1
     assert mx.allclose(got, real(q, k, v, scale=0.25, mask=m), atol=1e-6).item()
 
