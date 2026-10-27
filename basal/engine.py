@@ -18,7 +18,8 @@ Backends:
   MLXBackend        Apple Silicon, MLX / mlx-lm (1.5): MLX fp8 / fp4 exports or bf16 weights (optional 8-bit at load
                     time); shared-prefix KV cache; opt-in (2.5, --mlx-forward basal) for Llama and Gemma 4:
                     basal/mlx_forward.py, the last layers at the readout rows only, merged projections checked bit for
-                    bit at load; Qwen3.5 (2.5, Gated DeltaNet: basal-omni-pico) with the prefix's recurrent states
+                    bit at load; Qwen3.5 (2.5, Gated DeltaNet: basal-omni-pico) in float32, with the prefix's
+                    recurrent states
   GGUFBackend       a GGUF file in process through llama.cpp (llama-cpp-python; Metal, CUDA or CPU); shared prefix as
                     llama.cpp sequences
   OllamaBackend     Ollama with the GGUF exports (1.5): raw prompt, one token, top log-probabilities of the letters
@@ -3315,10 +3316,10 @@ class MLXBackend:
     (not bit for bit). Other architectures keep mlx-lm's forward.
 
     Qwen3.5 (2.5; Gated DeltaNet and attention layers, basal-omni-pico) runs mlx-lm's forward with its Metal kernel of
-    the gated delta rule: the prefix of a group keeps each Gated DeltaNet layer's convolution and recurrent states
-    beside the attention layers' keys and values, and every suffix row continues them (as the CUDA graph engine
-    carries the state into each branch); a right-padded row reads its last real token, which the padding after it
-    cannot reach. No packed rows and no --mlx-forward basal for it (mlx-lm's forward). Other recurrent models (Mamba,
+    the gated delta rule, in float32 from bf16 weights (not quantised): the prefix of a group keeps each Gated DeltaNet
+    layer's convolution and recurrent states beside the attention layers' keys and values, and every suffix row
+    continues them (as the CUDA graph engine carries the state into each branch); a right-padded row reads its last real
+    token, which the padding after it cannot reach. No packed rows and no --mlx-forward basal for it (mlx-lm's forward). Other recurrent models (Mamba,
     Qwen3-Next and hybrids) are refused: their states are not carried here."""
 
     MAX_ROWS = 16      # suffix rows per forward
@@ -3357,6 +3358,9 @@ class MLXBackend:
             raise ValueError(f"unknown MLX quantisation {quant!r} (q8)")
         if forward not in self.FORWARDS:
             raise ValueError(f"unknown MLX forward {forward!r} ({', '.join(self.FORWARDS)})")
+        if what and (quant or cfg.get("quantization")):
+            raise ValueError(f"{md}: quantised MLX weights are not checked for Qwen3.5 (Gated DeltaNet) models; serve "
+                             "its bf16 weights with --mode mlx")
         # lazy for q8: the weights are materialised once, after quantisation (never the full bf16 copy)
         self.model, self.config = load_model(md, lazy=bool(quant), model_config=mlx_config_overrides(cfg))
         # the final logit softcap of the decoder (Gemma) is applied to the fp32 code logits
@@ -3364,6 +3368,11 @@ class MLXBackend:
         self.quantization = self.config.get("quantization")
         if what:
             self._exact_norms(md)
+            # Qwen3.5 computes in float32, its bf16 weights upcast here: with bf16 activations the 0.8B pico's readouts
+            # moved with the rounding (17,000 held-out readouts against CUDA eager fp32: top-1 99.33%, 8 flips at a margin
+            # >= 0.05; CUDA's own bf16 path 99.48%, 3)
+            self.model.set_dtype(mx.float32)
+            mx.eval(self.model.parameters())
         if quant:
             if self.quantization:
                 raise ValueError(f"{md} is already quantised ({self.quantization}); use it without --quant")

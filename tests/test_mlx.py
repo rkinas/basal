@@ -478,18 +478,15 @@ def test_qwen35_norms_read_one_plus_w(tmp_path):
 
 def test_mlx_qwen35_equals_torch(tmp_path):
     """Qwen3.5 through mlx-lm's forward: a SOAM group (each suffix continues the prefix's Gated DeltaNet states and the
-    attention layers' keys and values), right-padded unrelated prompts and a mix of both answer as each prompt's own
-    float32 forward; mlx-q8 stays close."""
+    attention layers' keys and values), unrelated prompts and a mix of both answer as each prompt's own float32
+    forward."""
     pytest.importorskip("mlx.core")
     m = tiny_qwen35(tmp_path)
     ref = reference(m, TOKS, LIDS)
-    for quant, tol in ((None, 2e-4), ("q8", 0.05)):
-        be = mlx_stub(tmp_path, quant)
-        assert be.fwd is None and not be.packed
-        got = be.run_shared([(TOKS, LIDS)])[0]
-        for r, g in zip(ref, got):
-            assert max(abs(x - y) for x, y in zip(r, g)) < tol
     be = mlx_stub(tmp_path)
+    assert be.fwd is None and not be.packed
+    for r, g in zip(ref, be.run_shared([(TOKS, LIDS)])[0]):
+        assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
     singles = [list(range(1, 40)), list(range(5, 64)) * 2, [9, 8, 7, 6, 5, 4, 3, 2]]
     sl = [[10, 11], [12, 13, 14], [10, 15]]
     ref_s = reference(m, singles, sl)
@@ -498,3 +495,23 @@ def test_mlx_qwen35_equals_torch(tmp_path):
     mixed = be.run_shared([([singles[0]], [sl[0]]), (TOKS[:2], LIDS[:2])])
     assert max(abs(x - y) for x, y in zip(mixed[0][0], ref_s[0])) < 2e-4
     assert max(abs(x - y) for x, y in zip(mixed[1][1], ref[1])) < 2e-4
+
+
+def test_mlx_qwen35_computes_in_float32(tmp_path):
+    """bf16 weights are upcast at load: the readouts follow the float32 forward of the same bf16 weights, not a bf16
+    one. Quantised weights (mlx-q8, a quantised export) are refused for Qwen3.5 before any weights are read."""
+    import json
+    pytest.importorskip("mlx.core")
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+    m = tiny_qwen35(tmp_path, torch.bfloat16).float()
+    be = mlx_stub(tmp_path)
+    assert {v.dtype for _, v in tree_flatten(be.model.parameters())} == {mx.float32}
+    for r, g in zip(reference(m, TOKS, LIDS), be.run_shared([(TOKS, LIDS)])[0]):
+        assert max(abs(x - y) for x, y in zip(r, g)) < 2e-4
+    with pytest.raises(ValueError, match="quantised MLX weights are not checked for Qwen3.5"):
+        mlx_stub(tmp_path, "q8")
+    cfg = json.loads((tmp_path / "config.json").read_text())
+    (tmp_path / "config.json").write_text(json.dumps({**cfg, "quantization": {"group_size": 64, "bits": 8}}))
+    with pytest.raises(ValueError, match="quantised MLX weights are not checked for Qwen3.5"):
+        mlx_stub(tmp_path)
