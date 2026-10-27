@@ -125,7 +125,8 @@ def test_gdn_engine_needs_cuda_and_fla(monkeypatch, qwen35):
 
 
 @pytest.mark.parametrize("args, words", [(["--mode", "fast-exit"], "--mode fast-exit keeps"),
-                                         (["--mode", "fp8"], "--mode fp8"), (["--mode", "nvfp4"], "--mode nvfp4")])
+                                         (["--mode", "fp8"], "--mode fp8"), (["--mode", "nvfp4"], "--mode nvfp4"),
+                                         (["--mode", "fast", "--long-lane", "on"], "--long-lane")])
 def test_server_refuses_qwen35_settings_before_download(monkeypatch, qwen35, args, words):
     monkeypatch.setattr(gdn_module.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(gdn_module, "fla_rule", lambda: object())

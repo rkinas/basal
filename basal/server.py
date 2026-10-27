@@ -1056,6 +1056,9 @@ class Server:
                                   getattr(a, "prefix_cache", "off") == "on", getattr(a, "batches", "default"),
                                   lean_arg(getattr(a, "lean", "off")), getattr(a, "tree", "dense"),
                                   getattr(a, "readout_layer", "off"), getattr(a, "template_prefix", "off"))
+                # --long-lane on Qwen3.5: bf16 answers 0.12 pt further from fp32 than eager's (five questions per state)
+                if not why and getattr(a, "long_lane", "off") == "on":
+                    why = "--long-lane is not available for Qwen3.5 (Gated DeltaNet) models in this version"
                 if not why and getattr(a, "lanes", 1) > 1:
                     why = "--lanes is not available for Qwen3.5 (Gated DeltaNet) models"
                 if why:
