@@ -50,6 +50,7 @@ def _build():
     def kernel(Q, K, V, O, sq_b, sq_h, sq_l, sk_b, sk_h, sk_l, sv_b, sv_h, sv_l, so_b, so_h, so_l, L, n_m, qk_scale,
                HQ: tl.constexpr, GROUP: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, D: tl.constexpr,
                DV: tl.constexpr):
+        qk_scale = qk_scale.to(tl.float32)  # (a compiled graph passes Python floats as fp64)
         pid_m = n_m - 1 - tl.program_id(0)  # the longest rows of the causal triangle first
         bh, part = tl.program_id(1), tl.program_id(2)
         b, h = bh // HQ, bh % HQ
