@@ -61,7 +61,7 @@ def request(state, n_q, first=20):
 def packed(be, groups):
     """Units of groups concatenated as one sequence: ids, positions, sub_end, and the ancestor mask of the packed
     tries (GraphBackend's block mask, rows of different units see nothing of each other)."""
-    ids, pos, sub, seg_g, par_g, unit = [], [], [], [], [], []
+    ids, pos, sub, seg_g, par_g = [], [], [], [], []
     off = nb = 0
     for u, (pk, *_rest) in enumerate(be._units(groups)):
         t, pp, sg, last, par = pk

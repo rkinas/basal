@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/ruff-action@4919ec5cf1f49eff0871dbcea0da843445b837e6  # v3.6.1
+        with:
+          version: "0.15.16"
+          src: basal tests
+
+  test-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          python-version: ${{ matrix.python }}
+      # CPU torch: uv.lock on Linux pulls ~86 nvidia CUDA wheels (several GB) that no CPU test needs
+      - run: uv venv
+      - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: uv pip install -e ".[test]"
+      - run: uv run --no-sync pytest -q
+
+  test-macos:
+    runs-on: macos-latest  # Apple Silicon: also runs the MLX tests
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --extra test
+      - run: uv run --no-sync pytest -q

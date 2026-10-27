@@ -601,7 +601,7 @@ def sample_size(decisions, units, targets):
             need = accepted_needed(risk)
             if n_fit >= need:
                 continue
-            falls = (f"its answers report automated: null at this max_error" if name in TASKS else
+            falls = ("its answers report automated: null at this max_error" if name in TASKS else
                      f"basal-serve defers the automatic actions of act and tool on {name} at this max_error")
             out.append(f"{name}: max_error {risk:g} needs >= {need} accepted FIT decisions without an error "
                        f"({accepted_needed(risk, 1)} with 1 error, {accepted_needed(risk, 2)} with 2); this file gives "
