@@ -33,7 +33,7 @@ import os
 import re
 import threading
 import traceback
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -1024,10 +1024,11 @@ class StateCache:
             out.append(h)
         return out
 
-    def longest(self, tokens):
+    def longest(self, tokens, use=None):
         """The cached state sharing the longest prefix with tokens -> (its key, its keys / values, the length of the
         common prefix, its length), or None (no common full block). Found by the longest common block, then extended
-        token by token: a state that extends a cached one shares all of it, an edited one up to the edit."""
+        token by token: a state that extends a cached one shares all of it, an edited one up to the edit. use(key):
+        whether the caller will continue the found entry (a prefix hit is counted only then; default: yes)."""
         blocks = self._blocks(tokens)
         with self.lock:
             for i in range(len(blocks) - 1, -1, -1):
@@ -1043,7 +1044,7 @@ class StateCache:
             diff = np.nonzero(own[m:n] != t[m:n])[0]
             m = m + int(diff[0]) if len(diff) else n
             self.entries.move_to_end(key)
-            self.prefix_hits += 1
+            self.prefix_hits += use is None or bool(use(key))
             return key, kv, m, len(own)
 
     def _drop(self, key):
@@ -3283,8 +3284,9 @@ class MLXBackend:
     decisions in fp32) and the shipped CALIBRATION.mlx.json was fitted on the KV-cache path. With a state cache
     (state_cache_gb, prefix: --state-cache-gb / --prefix-cache, as on the CUDA graph engine) a group the server cut at
     its state or template prefix takes the keys / values of that root from the cache across requests (_state) and
-    computes only the rest; such groups use the KV-cache path. All MLX work runs on one dedicated thread (the server
-    calls the backend from an executor).
+    computes only the rest; such groups use the KV-cache path, and those forwards run at the row and key counts of
+    the uncached forward (_uncut), so their probabilities equal it bit for bit. All MLX work runs on one dedicated
+    thread (the server calls the backend from an executor).
 
     forward="mlx-lm" (the default) is mlx-lm's forward, as before 2.5. forward="basal" (opt-in, basal-serve --mlx-forward
     basal, 2.5): Llama and Gemma 4 decoders run through basal/mlx_forward.py, which reads the same modules and weights
@@ -3304,12 +3306,23 @@ class MLXBackend:
     # there (server.cut_of); PREFIX_GB is the state-cache budget when only the template prefixes are kept
     PREFIX_SFX = [256]
     PREFIX_GB = 0.25
-    # a prefill that continues cached keys / values runs one token or at least this many: MLX's fused attention over a
-    # cache (mx.fast.scaled_dot_product_attention, MLX 0.32.4) loses bf16 precision when 2-8 queries times the query
-    # heads per KV head exceed 32 (basal-2.0-mini, 6 per KV head: 6-8 queries; 4.5B, 8: 5-8; max error against an fp32
-    # reference 4-6e-2 instead of 5-8e-3, any key length). On basal-2.0-mini a BAN-PL decision went from 0.46 to 0.16
-    # when a state continued a cached one by 8 tokens.
-    MIN_CONTINUE = 9
+    # a prefill that continues cached keys / values runs at least this many tokens: MLX's fused attention over a cache
+    # (mx.fast.scaled_dot_product_attention, MLX 0.32.4) takes a vector kernel for up to 8 queries, which loses bf16
+    # precision when the queries times the query heads per KV head exceed 32 (basal-2.0-mini, 6 per KV head: 6-8
+    # queries; 4.5B, 8: 5-8; max error against an fp32 reference 4-6e-2 instead of 5-8e-3, any key length; on
+    # basal-2.0-mini a BAN-PL decision went from 0.46 to 0.16 when a state continued a cached one by 8 tokens), and
+    # each row has the bits of the uncached forward's same row only from 16 queries on (basal-omni-1.0-mini's
+    # sliding-window layers, head size 256, M4 Pro: 9 queries differ in the last bits, 16-1,024 equal)
+    MIN_CONTINUE = 16
+    # MLX picks its matmul kernel by the row count (quantised: a vector kernel for a few rows, split-K while the output
+    # tiles are few, plain tiles above), and each sums in another order: a row's bits depend on how many rows its
+    # forward runs. A cut forward (the state, its continuation, the rest of a single prompt) therefore runs every
+    # linear layer at the row count of the uncached forward, or at the fewest rows from which the kernel no longer
+    # depends on it (probed per weight shape at up to PROBE_ROWS rows), padded with zero rows (_uncut)
+    PROBE_ROWS = 4096
+    # more padding keys with which an attention's rows must not change, beside its first half and third over their own
+    # keys (_uncut: whether a row's attention depends on the key count)
+    KEY_CHECKS = (1, 37, 128, 512)
     state_cache = None  # StateCache: keys / values of request states (or template prefixes), reused across requests
     prefix = False
 
@@ -3471,9 +3484,10 @@ class MLXBackend:
         h = self.lm.model(ids, cache=cache)
         return h[mx.arange(B), mx.array([len(r) - 1 for r in rows])]
 
-    def _prefix(self, toks, initial=None):
+    def _prefix(self, toks, initial=None, ref=None):
         """Per-layer (keys, values) [1, kv heads, length, head size] of toks. initial: those of toks[:m], which the
-        forward continues over toks[m:] (positions m..)."""
+        forward continues over toks[m:] (positions m..). ref: the rows of the uncached forward these keys / values
+        stand for (a cut forward, _uncut)."""
         mx = self.mx
         from mlx_lm.models.cache import KVCache, make_prompt_cache
         m = 0
@@ -3481,47 +3495,173 @@ class MLXBackend:
             m = initial[0][0].shape[2]
             if m >= len(toks):
                 return initial
-            if 1 < len(toks) - m < self.MIN_CONTINUE:  # start earlier: MIN_CONTINUE tokens over the shorter prefix
+            if len(toks) - m < self.MIN_CONTINUE:  # start earlier: MIN_CONTINUE tokens over the shorter prefix
                 m = max(0, len(toks) - self.MIN_CONTINUE)
                 initial = [(k[..., :m, :], v[..., :m, :]) for k, v in initial] if m else None
-        if self.fwd is not None:  # basal/mlx_forward.py: the own-key layers' keys / values, continuing initial
-            kv = self.fwd.prefix(mx.array([list(toks[m:])]), past=initial)
+        with self._uncut(len(toks) - m, ref) if ref else nullcontext():
+            if self.fwd is not None:  # basal/mlx_forward.py: the own-key layers' keys / values, continuing initial
+                kv = self.fwd.prefix(mx.array([list(toks[m:])]), past=initial)
+                mx.eval(kv)
+                return kv
+            # plain caches: a sliding-window layer (Gemma 4) gets a rotating cache from mlx-lm, which keeps only the
+            # last window of the prefix; here every layer keeps the whole prefix and the window is applied by the mask
+            cache = [KVCache() for _ in make_prompt_cache(self.model)]
+            if initial is not None:
+                for c, (k, v) in zip(cache, initial):  # the forward writes into new buffers, never into these
+                    c.keys, c.values, c.offset = k, v, m
+            self.lm.model(mx.array([list(toks[m:])]), cache=cache)
+            kv = [(c.keys[..., : c.offset, :], c.values[..., : c.offset, :]) for c in cache]
             mx.eval(kv)
-            return kv
-        # plain caches: a sliding-window layer (Gemma 4) gets a rotating cache from mlx-lm, which keeps only the last
-        # window of the prefix; here every layer keeps the whole prefix and the window is applied by the mask
-        cache = [KVCache() for _ in make_prompt_cache(self.model)]
-        if initial is not None:
-            for c, (k, v) in zip(cache, initial):  # the forward writes into new buffers, never into these
-                c.keys, c.values, c.offset = k, v, m
-        self.lm.model(mx.array([list(toks[m:])]), cache=cache)
-        kv = [(c.keys[..., : c.offset, :], c.values[..., : c.offset, :]) for c in cache]
-        mx.eval(kv)
         return kv
 
-    def _state(self, root):
+    def _kernel_rows(self, f, x, w, kw):
+        """The fewest rows from which the product f (a quantised or dense linear layer: x -> x times w) gives each row
+        the bits it has at PROBE_ROWS rows, for this weight shape, layer kind (kw) and input dtype: probed once (a
+        bisection over random inputs, then checked at rows above it); None when no such row count checks out."""
+        mx = self.mx
+        key = (tuple(w.shape), str(w.dtype), x.shape[-1], str(x.dtype),
+               tuple(sorted((k, (v.shape, str(v.dtype)) if isinstance(v, mx.array) else str(v)) for k, v in kw.items())))
+        memo = self.__dict__.setdefault("_qmm_rows", {})
+        if key not in memo:
+            n = self.PROBE_ROWS
+            xs = mx.random.normal((n, x.shape[-1]), key=mx.random.key(0)).astype(x.dtype)
+            ref = f(xs)
+            mx.eval(ref)
+
+            def same(r):
+                return bool(mx.array_equal(f(xs[:r]), ref[:r]).item())
+            lo, hi = 1, n
+            while lo < hi:
+                mid = (lo + hi) // 2
+                lo, hi = (lo, mid) if same(mid) else (mid + 1, hi)
+            memo[key] = lo if all(same(r) for r in {lo + 1, lo + 31, lo + 32, 2 * lo, (lo + n) // 2} if r <= n) \
+                else None
+        return memo[key]
+
+    def _keys_padded(self, sdpa, q, k, v, mask, pad, kw):
+        """sdpa (MLX's fused attention) of the queries q over the keys / values k, v, all padded at the end with `pad`
+        zero rows: the call's key count is that of the uncached forward (on head sizes without a fused kernel, 256 / 512
+        on Gemma 4, MLX sums a row's attention by the key count). The mask keeps its rows, with the padding keys masked
+        ("causal" keeps them out by itself); the padding rows see the keys up to their own. -> the rows of q."""
+        mx = self.mx
+        qL, kL = q.shape[2], k.shape[2]
+
+        def z(x):
+            return mx.concatenate([x, mx.zeros((*x.shape[:2], pad, x.shape[3]), dtype=x.dtype)], axis=2)
+        if not isinstance(mask, str):
+            lead = mask.shape[:-2]
+            top = mx.concatenate([mask, mx.zeros((*lead, qL, pad), dtype=mx.bool_)], axis=-1)
+            low = mx.concatenate([mx.ones((pad, kL), dtype=mx.bool_), mx.tril(mx.ones((pad, pad), dtype=mx.bool_))],
+                                 axis=-1)
+            mask = mx.concatenate([top, mx.broadcast_to(low, (*lead, pad, kL + pad))], axis=-2)
+        return sdpa(z(q), z(k), z(v), mask=mask, **kw)[:, :, :qL]
+
+    @contextmanager
+    def _uncut(self, rows, ref):
+        """While a cut forward of `rows` tokens (one row) builds its graph, it runs as the uncached forward of `ref`
+        tokens would: every linear layer over its rows (MLX's quantised matmul, or a dense nn.Linear such as Gemma 4's
+        per-layer input projection) padded with zero rows to ref, or to fewer rows when from that many on its kernel no
+        longer depends on the row count (_kernel_rows); its attention over ref keys (_keys_padded). So each of its rows
+        has the bits of the same row of the uncached forward (PROBE_ROWS). Products over other row counts (the readout
+        rows of basal's forward) and every other op are left as they are; attention runs at least MIN_CONTINUE
+        queries. The first padded attention of each shape also checks whether its rows depend on the key count
+        (KEY_CHECKS; _attn_keys, used by _kernels). mx.quantized_matmul, nn.Linear.__call__ and
+        mx.fast.scaled_dot_product_attention are replaced for the duration, for calls from this thread (all MLX work of
+        the backend runs on its one thread)."""
+        import mlx.nn as nn
+        mx = self.mx
+        qmm, linear, sdpa = mx.quantized_matmul, nn.Linear.__call__, mx.fast.scaled_dot_product_attention
+        me, by_keys = threading.get_ident(), self.__dict__.setdefault("_attn_keys", {})
+
+        def ours(x):
+            return (threading.get_ident() == me and x.ndim >= 2 and x.shape[-2] == rows
+                    and x.size == rows * x.shape[-1])
+
+        def run(f, x, w, kw):  # f over x padded to the uncached row count, then x's rows
+            fewest = self._kernel_rows(f, x, w, kw)
+            to = ref if fewest is None else min(ref, max(fewest, rows))
+            if to <= rows:
+                return f(x)
+            pad = mx.zeros((*x.shape[:-2], to - rows, x.shape[-1]), dtype=x.dtype)
+            return f(mx.concatenate([x, pad], axis=-2))[..., :rows, :]
+
+        def quantized(x, w, *a, **kw):
+            if a or not kw.get("transpose", True) or not ours(x):
+                return qmm(x, w, *a, **kw)
+            return run(lambda y: qmm(y, w, **kw), x, w, kw)
+
+        def dense(mod, x):
+            if not ours(x):
+                return linear(mod, x)
+            return run(lambda y: linear(mod, y), x, mod["weight"], {"bias": "bias" in mod})
+
+        def attention(q, k, v, *a, mask=None, **kw):
+            pad = ref - k.shape[2]
+            causal = isinstance(mask, str) and mask == "causal"
+            boolean = isinstance(mask, mx.array) and mask.dtype == mx.bool_ and mask.shape[-2:] == (q.shape[2],
+                                                                                                    k.shape[2])
+            if (a or kw.get("sinks") is not None or threading.get_ident() != me or q.ndim != 4 or q.shape[0] != 1
+                    or q.shape[2] != rows or pad <= 0 or not (causal or boolean)):
+                return sdpa(q, k, v, *a, mask=mask, **kw)
+            out = self._keys_padded(sdpa, q, k, v, mask, pad, kw)
+            sig = (q.shape[1], k.shape[1], q.shape[3], str(q.dtype), causal)
+            if sig not in by_keys:  # its rows over other key counts: equal unless summed by the key count
+                off = k.shape[2] - q.shape[2]
+                alt = [self._keys_padded(sdpa, q, k, v, mask, pad + e, kw) for e in self.KEY_CHECKS]
+                alt += [sdpa(q[:, :, :r], k[:, :, :off + r], v[:, :, :off + r],
+                             mask=mask if causal else mask[..., :r, :off + r], **kw)
+                        for r in (rows // 2, rows // 3) if r >= self.MIN_CONTINUE]
+                by_keys[sig] = not all(mx.array_equal(x, out[:, :, :x.shape[2]]).item() for x in alt)
+            return out
+        mx.quantized_matmul, nn.Linear.__call__, mx.fast.scaled_dot_product_attention = quantized, dense, attention
+        try:
+            yield
+        finally:
+            mx.quantized_matmul, nn.Linear.__call__, mx.fast.scaled_dot_product_attention = qmm, linear, sdpa
+
+    def _state(self, root, ref=None):
         """Per-layer (keys, values) of a group's root (its tokens up to the server's cut: the state, or the template
         prefix) from the state cache, computed and stored on a miss. A root that begins with a cached one (a growing
         agent trace or chat history, or an edited state up to the edit, StateCache.longest) computes only its tokens
         past the common prefix, and the entry it extends to its end is replaced. Entries are stored as copies
         (mx.contiguous): a slice of mlx-lm's KVCache buffer, which grows in steps of 256 tokens, keeps the whole buffer
-        alive, so the cache would hold more memory than its budget counts."""
+        alive, so the cache would hold more memory than its budget counts. ref: the rows of the request's uncached
+        forward (_uncut). A cached entry is continued only when its rows have the bits this request's uncached forward
+        gives them (the same _kernels for the row count it was computed for); otherwise the root is computed afresh
+        (and still replaces the entry it extends)."""
         mx, cache = self.mx, self.state_cache
         key = cache.key(root)
         kv = cache.get(key)
         if kv is not None:
             return kv
+        refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
+
+        def same_bits(old):
+            return self._kernels(refs.get(old)) == self._kernels(ref)
         initial, replaces = None, None
-        found = cache.longest(root)
+        found = cache.longest(root, use=same_bits)
         if found is not None:
             old, pkv, m, n = found
             if cache.BLOCK <= m < len(root):
-                initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
                 replaces = old if m == n else None
-        kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial)]
+                if same_bits(old):
+                    initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
+        kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial, ref)]
         mx.eval(kv)
         cache.put(key, kv, tokens=root, replaces=replaces)
+        refs[key] = ref
+        if len(refs) > 2 * len(cache.entries) + 64:  # entries evicted or replaced since
+            self._refs = {k: r for k, r in refs.items() if k in cache.entries}
         return kv
+
+    def _kernels(self, ref):
+        """What decides a cut forward's bits for an uncached forward of ref rows (_uncut): per probed weight shape the
+        row count its products run at, and ref itself when an attention's rows depend on the key count. Two row counts
+        with the same give every row the same bits. None: not known."""
+        if ref is None:
+            return None
+        rows = tuple(ref if c is None else min(ref, c) for c in self.__dict__.get("_qmm_rows", {}).values())
+        return rows + ((ref,) if any(self.__dict__.get("_attn_keys", {}).values()) else ())
 
     @staticmethod
     def _shared_len(toks):
@@ -3559,16 +3699,20 @@ class MLXBackend:
     def _group(self, toks, lids, cut=None):
         """One group: shared prefix once, then the suffixes in batches of max_rows. cut: the server's state-cache cut
         (tokens of the root, which every prompt of the group begins with): the root's keys / values come from the state
-        cache (_state) and only the rest of the shared prefix is computed over them. The cold and the cached request
-        run the same forwards, so a cached state gives bit-identical probabilities; against the same request without
-        the cache (the shared prefix in one forward) they are equal up to rounding in fp32 and differ slightly with
-        bf16 / quantised weights (other kernels for other row counts; the same top answers at margins >= 0.2 in
-        HARDWARE.md#apple-m4-state-cache-on---mode-mlx)."""
+        cache (_state) and only the rest of the shared prefix is computed over them; a single prompt runs as
+        _cut_single. The cold and the cached request run the same forwards, so a cached state gives bit-identical
+        probabilities. Against the same request without the cache (the shared prefix in one forward) the cut forwards
+        run their linear layers and attention at the uncached forward's row and key counts (_uncut), so a state
+        computed for this request gives the uncached bits; one computed for another request (other questions) can
+        differ in the last bits where that request's length picked other kernels
+        (HARDWARE.md#apple-m4-state-cache-on---mode-mlx)."""
+        if cut and self.state_cache is not None and len(toks) == 1 and cut < len(toks[0]):
+            return [self._cut_single(toks[0], lids[0], cut)]
         P = self._shared_len(toks)
         if cut and self.state_cache is not None and cut <= P:
-            prefix = self._state(list(toks[0][:cut]))
+            prefix = self._state(list(toks[0][:cut]), P)
             if P > cut:
-                prefix = self._prefix(toks[0][:P], prefix)
+                prefix = self._prefix(toks[0][:P], prefix, P)
         else:
             prefix = self._prefix(toks[0][:P]) if P > 0 else None
         out = []
@@ -3576,6 +3720,19 @@ class MLXBackend:
             h = self._forward([t[P:] for t in toks[i: i + self.max_rows]], prefix)
             out += self._letters(h, lids[i: i + self.max_rows])
         return out
+
+    def _cut_single(self, toks, lids, cut):
+        """A single prompt with a cut, as the uncached path reads it (_singles: one forward of the whole prompt): the
+        state's keys / values from the cache (_state), then the rest of the prompt in one forward over them (at least
+        MIN_CONTINUE tokens: from earlier in the state when the rest is shorter), read out at its last token, at the
+        whole prompt's row and key counts (_uncut)."""
+        L = len(toks)
+        root = self._state(list(toks[:cut]), L)
+        m = max(0, min(cut, L - self.MIN_CONTINUE))
+        past = [(k[..., :m, :], v[..., :m, :]) for k, v in root] if m else None
+        with self._uncut(L - m, L):
+            h = self._forward([toks[m:]], past)
+        return self._letters(h, [lids])[0]
 
     def _chunks(self, lens, budget=None):
         """Indices of rows of these lengths, sorted by length, in right-padded batches of at most max_rows rows and
