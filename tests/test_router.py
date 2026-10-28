@@ -673,7 +673,7 @@ def fallback_transport(conf, asked, llm=None, **kw):
     return httpx.MockTransport(handler)
 
 
-FB = {"url": LLM, "model": "llm-x", "below": 0.6, "timeout": 5.0, "extra": {}}
+FB = {"url": LLM, "model": "llm-x", "below": 0.6, "timeout": 5.0, "max_tokens": 8192, "extra": {}}
 OPTS = {"a": "Approve", "b": "Reject", "c": "Escalate"}
 
 
@@ -709,7 +709,8 @@ def test_fallback_takes_only_questions_under_its_threshold():
     (req,) = asked["llm"]
     user = req["messages"][-1]["content"]
     assert "Invoice 17 is overdue." in user and "What to do?" in user and "A. a: Approve\nB. b: Reject\nC. c: Escalate" in user
-    assert req["model"] == "llm-x" and req["temperature"] == 0 and req["logprobs"] is True
+    assert req["model"] == "llm-x" and req["temperature"] == 0 and req["seed"] == 0 and req["logprobs"] is True
+    assert req["max_tokens"] == 8192
     assert req["response_format"]["json_schema"]["schema"]["properties"]["answer"]["enum"] == ["A", "B", "C"]
     assert 'basal_router_fallback_total{result="answered"} 1' in m
 
@@ -809,11 +810,13 @@ def test_fallback_from_the_command_line(monkeypatch):
     R.main(base)
     R.main(base + ["--fallback", LLM, "--fallback-model", "m"])
     R.main(base + ["--fallback", LLM, "--fallback-model", "m", "--fallback-below", "0.7", "--fallback-timeout", "20",
-                   "--fallback-extra", '{"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": true}}'])
-    assert got == [None, {"url": LLM, "model": "m", "below": 0.5, "timeout": 60.0, "extra": {}},
-                   {"url": LLM, "model": "m", "below": 0.7, "timeout": 20.0,
-                    "extra": {"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": True}}}]
-    for bad in (["--fallback", LLM], ["--fallback-model", "m"], ["--fallback", LLM, "--fallback-model", "m",
+                   "--fallback-max-tokens", "16384",
+                   "--fallback-extra", '{"chat_template_kwargs": {"enable_thinking": true}}'])
+    assert got == [None, {"url": LLM, "model": "m", "below": 0.5, "timeout": 60.0, "max_tokens": 8192, "extra": {}},
+                   {"url": LLM, "model": "m", "below": 0.7, "timeout": 20.0, "max_tokens": 16384,
+                    "extra": {"chat_template_kwargs": {"enable_thinking": True}}}]
+    for bad in (["--fallback", LLM], ["--fallback-model", "m"], ["--fallback-max-tokens", "10"],
+                ["--fallback", LLM, "--fallback-model", "m", "--fallback-max-tokens", "0"], ["--fallback", LLM, "--fallback-model", "m",
                 "--fallback-extra", "[1]"], ["--fallback", LLM, "--fallback-model", "m", "--fallback-below", "0"],
                 ["--fallback", LLM, "--fallback-model", "m", "--blend", MID, "--blend-weights", "1", "1"]):
         with pytest.raises(SystemExit, match="basal-router: "):
@@ -822,6 +825,8 @@ def test_fallback_from_the_command_line(monkeypatch):
 
 def test_fallback_request_merges_extra():
     msgs = R.fallback_messages("doc", {"instructions": "Q?"}, [("a", "x"), ("b", "y")])
-    body = R.fallback_request("m", msgs, 2, {"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": True}})
-    assert body["max_tokens"] == 4096 and body["chat_template_kwargs"] == {"enable_thinking": True}
+    body = R.fallback_request("m", msgs, 2, {"chat_template_kwargs": {"enable_thinking": True}}, max_tokens=16384)
+    assert body["max_tokens"] == 16384 and body["chat_template_kwargs"] == {"enable_thinking": True}
+    assert body["temperature"] == 0 and body["seed"] == 0
+    assert R.fallback_request("m", msgs, 2, {"max_tokens": 100})["max_tokens"] == 100  # extra is merged last
     assert body["response_format"]["json_schema"]["schema"]["properties"]["answer"]["enum"] == ["A", "B"]

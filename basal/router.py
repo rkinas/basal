@@ -38,8 +38,10 @@ Off by default (the replicas' answers then pass through untouched):
                                           schema that admits only the options' letters. Its answer says "answered_by":
                                           "fallback", the "model", "calibrated": false, option probabilities from the
                                           endpoint's logprobs (renormalised over the options; null without them) and
-                                          the basal answer it replaced. Down, --fallback-timeout (60 s), an answer
-                                          that does not parse or is not an option: the basal answer stays. Multi, task,
+                                          the basal answer it replaced. Greedy (temperature 0, seed 0), up to
+                                          --fallback-max-tokens (8192) tokens. Down, --fallback-timeout (60 s), an
+                                          answer that does not parse or is not an option: the basal answer stays.
+                                          Multi, task,
                                           coverage / max_error / evidence questions and requests with media never go.
                                           --fallback-extra JSON is merged into the chat request (e.g. a thinking
                                           switch); BASAL_FALLBACK_API_KEY, if set, is sent as a bearer token.
@@ -183,12 +185,13 @@ def fallback_messages(state, question, options):
     return [{"role": "system", "content": FALLBACK_SYSTEM}, {"role": "user", "content": user}]
 
 
-def fallback_request(model, messages, n, extra=None):
-    """The chat completion request: greedy, logprobs, and a JSON schema that admits only the n options' letters."""
+def fallback_request(model, messages, n, extra=None, max_tokens=8192, seed=0):
+    """The chat completion request: greedy (temperature 0, a fixed seed), a token budget with room for a model's
+    thinking, logprobs, and a JSON schema that admits only the n options' letters; extra merged last."""
     schema = {"type": "object", "properties": {"answer": {"type": "string", "enum": list(LETTERS[:n])}},
               "required": ["answer"], "additionalProperties": False}
-    body = {"model": model, "messages": messages, "temperature": 0, "max_tokens": 64, "logprobs": True,
-            "top_logprobs": 20,
+    body = {"model": model, "messages": messages, "temperature": 0, "seed": seed, "max_tokens": max_tokens,
+            "logprobs": True, "top_logprobs": 20,
             "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "strict": True, "schema": schema}}}
     body.update(extra or {})
     return body
@@ -391,7 +394,8 @@ class Router:
         """-> (option index or None, probabilities or None, result, model) of one fallback call."""
         import httpx
         f = self.fallback
-        body = fallback_request(f["model"], fallback_messages(state, question, options), len(options), f.get("extra"))
+        body = fallback_request(f["model"], fallback_messages(state, question, options), len(options), f.get("extra"),
+                                f.get("max_tokens", 8192))
         headers = {"content-type": "application/json"}
         if os.environ.get("BASAL_FALLBACK_API_KEY"):
             headers["authorization"] = "Bearer " + os.environ["BASAL_FALLBACK_API_KEY"]
@@ -690,12 +694,13 @@ def blends(blend, weights, cascade):
 
 
 def fallback_config(a, blend):
-    """--fallback URL --fallback-model NAME [--fallback-below T --fallback-timeout S --fallback-extra JSON] -> the
-    Router's fallback dict; None without --fallback."""
-    given = [f for f in ("fallback_model", "fallback_below", "fallback_timeout", "fallback_extra") if getattr(a, f) is not None]
+    """--fallback URL --fallback-model NAME [--fallback-below T --fallback-timeout S --fallback-max-tokens N
+    --fallback-extra JSON] -> the Router's fallback dict; None without --fallback."""
+    given = [f for f in ("fallback_model", "fallback_below", "fallback_timeout", "fallback_max_tokens", "fallback_extra")
+             if getattr(a, f) is not None]
     if not a.fallback:
         if given:
-            raise SystemExit("basal-router: --fallback-model / -below / -timeout / -extra need --fallback URL")
+            raise SystemExit("basal-router: --fallback-model / -below / -timeout / -max-tokens / -extra need --fallback URL")
         return None
     if blend:
         raise SystemExit("basal-router: --fallback and --blend do not go together")
@@ -703,15 +708,18 @@ def fallback_config(a, blend):
         raise SystemExit("basal-router: --fallback needs --fallback-model NAME (the model the endpoint serves)")
     below = 0.5 if a.fallback_below is None else a.fallback_below
     timeout = 60.0 if a.fallback_timeout is None else a.fallback_timeout
-    if not 0 < below <= 1 or not timeout > 0:
-        raise SystemExit("basal-router: --fallback-below must be in (0, 1] and --fallback-timeout > 0")
+    max_tokens = 8192 if a.fallback_max_tokens is None else a.fallback_max_tokens
+    if not 0 < below <= 1 or not timeout > 0 or max_tokens < 1:
+        raise SystemExit("basal-router: --fallback-below must be in (0, 1], --fallback-timeout > 0, "
+                         "--fallback-max-tokens >= 1")
     try:
         extra = json.loads(a.fallback_extra) if a.fallback_extra else {}
     except ValueError:
         extra = None
     if not isinstance(extra, dict):
         raise SystemExit("basal-router: --fallback-extra must be a JSON object")
-    return {"url": a.fallback, "model": a.fallback_model, "below": below, "timeout": timeout, "extra": extra}
+    return {"url": a.fallback, "model": a.fallback_model, "below": below, "timeout": timeout, "max_tokens": max_tokens,
+            "extra": extra}
 
 
 def main(argv=None):
@@ -742,9 +750,12 @@ def main(argv=None):
                     help="--fallback: questions whose top probability is under this go (default 0.5)")
     ap.add_argument("--fallback-timeout", dest="fallback_timeout", type=float, default=None,
                     help="--fallback: seconds per call (default 60); then the basal answer stays")
+    ap.add_argument("--fallback-max-tokens", dest="fallback_max_tokens", type=int, default=None,
+                    help="--fallback: the token budget of a call, thinking included (default 8192; the endpoint's "
+                         "context must hold the prompt plus this)")
     ap.add_argument("--fallback-extra", dest="fallback_extra", default=None,
-                    help='--fallback: JSON merged into the chat request, e.g. \'{"max_tokens": 4096, '
-                         '"chat_template_kwargs": {"enable_thinking": true}}\'')
+                    help='--fallback: JSON merged into the chat request, e.g. a thinking switch: '
+                         '\'{"chat_template_kwargs": {"enable_thinking": true}}\'')
     a = ap.parse_args(argv)
     cascade = levels(a.escalate, a.escalate_below)
     first, blend = blends(a.blend, a.blend_weights, cascade)

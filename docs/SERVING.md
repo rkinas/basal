@@ -280,7 +280,8 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   plain choice question whose top probability is still under T goes to an LLM behind an OpenAI-compatible chat
   endpoint (`URL` is its base, such as `http://127.0.0.1:8100/v1` for vLLM). The router writes the prompt from the
   request's document, question and options (lettered A, B, ...) and asks for JSON that only admits those letters
-  (`response_format` with a JSON schema; greedy, with logprobs). The answer replaces the basal one and says
+  (`response_format` with a JSON schema; greedy: temperature 0 and a fixed seed; with logprobs; up to
+  `--fallback-max-tokens`, default 8,192, so a model can think first). The answer replaces the basal one and says
   `"answered_by": "fallback"`, the `"model"`, `"calibrated": false`, the option probabilities from the endpoint's
   logprobs renormalised over the options (`null` when it returns none) and the basal answer it replaced
   (`"basal": {choice, confidence, model}`); the response lists `"fallback": {below, asked, answered}`.
@@ -289,15 +290,23 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
     `/metrics` counts the calls by result (`basal_router_fallback_total`).
   - Never sent: multi, act, tool and task questions, noul and score, questions with `coverage`, `max_error` or
     `evidence`, and requests with media.
-  - `--fallback-extra JSON` is merged into the chat request, for example a model's thinking switch and room for it:
-    `'{"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": true}}'`. `BASAL_FALLBACK_API_KEY`, if set, is
-    sent as a bearer token.
+  - `--fallback-extra JSON` is merged into the chat request, for example a model's thinking switch:
+    `'{"chat_template_kwargs": {"enable_thinking": true}}'`. The endpoint's context must hold the prompt plus
+    `--fallback-max-tokens`. `BASAL_FALLBACK_API_KEY`, if set, is sent as a bearer token.
   - The LLM's answers are not calibrated: no basal threshold or certificate holds for them.
+  - **Repeatable answers need a repeatable endpoint.** Greedy decoding alone is not enough: with vLLM's default
+    batching, a long thinking answer can come out differently when other requests share its batch. Serve the model
+    with batch-invariant kernels, as basal-serve's `--vllm-preset deterministic` does: the environment variable
+    `VLLM_BATCH_INVARIANT=1`, `--no-enable-prefix-caching`, `--no-enable-chunked-prefill` and
+    `--attention-backend TRITON_ATTN`.
 
   ```
-  vllm serve google/gemma-4-31B-it --port 8100 --reasoning-parser gemma4     # for example
+  VLLM_BATCH_INVARIANT=1 vllm serve google/gemma-4-31B-it --port 8100 --reasoning-parser gemma4 \
+      --max-model-len 16384 --no-enable-prefix-caching --no-enable-chunked-prefill \
+      --attention-backend TRITON_ATTN                                          # for example
   basal-router --replicas http://127.0.0.1:8001 --fallback http://127.0.0.1:8100/v1 \
-      --fallback-model google/gemma-4-31B-it --fallback-below 0.6 --port 8000
+      --fallback-model google/gemma-4-31B-it --fallback-below 0.8 \
+      --fallback-extra '{"chat_template_kwargs": {"enable_thinking": true}}' --fallback-timeout 300 --port 8000
   ```
 - `--route SCRIPT=URL[,URL]`: requests whose state is mostly in that script (latin, cyrillic, greek, arabic, hebrew,
   cjk, other) go to those replicas, for example a model trained for Ukrainian; the rest go to `--replicas`
