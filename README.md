@@ -416,6 +416,10 @@ crewai_tool` gives a tool over a running server, with ready question sets (`pres
 | [HARDWARE](docs/HARDWARE.md) · [PORTS](docs/PORTS.md) · [GGUF](docs/GGUF.md) · [QUANTIZATION](docs/QUANTIZATION.md) | which mode on which GPU; MLX and GGUF ports; FP8 and other low precision |
 | [WHATS_NEW](docs/WHATS_NEW.md) · [basal-1.0 report](docs/basal-1.pdf) | the full list of changes in 2.0; the basal-1.0 technical report |
 
+**Community projects:** [basal-lite](https://github.com/lukaszpodgorski-pl/basal-lite) by @lukaszpodgorski-pl serves basal
+models from a stock `vllm serve` through a thin client (community-maintained, not verified by us; see its README for the
+models it covers).
+
 ## Limitations
 
 - Evaluated on held-out and hidden test sets and on public benchmarks; claims about a specific document collection
