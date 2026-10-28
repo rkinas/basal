@@ -175,6 +175,12 @@ def validate(name, objective, keys, threshold=None, min=None, max=None, exclusiv
                 or not 0 <= fallback_threshold <= 1:
             raise ValueError(f"question {name!r}: fallback_threshold must be a number in 0..1")
     if objective == "threshold":
+        for k, v in (("min", min), ("max", max)):
+            if v is not None:
+                try:
+                    int(v)  # keep the legacy coercion, but reject bad bounds before inference
+                except (TypeError, ValueError, OverflowError):
+                    raise ValueError(f"question {name!r}: {k} must convert to an integer, got {v!r}") from None
         return
     if threshold is not None:
         raise ValueError(f"question {name!r}: threshold applies only to objective \"threshold\"")

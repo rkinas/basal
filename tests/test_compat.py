@@ -92,7 +92,9 @@ def test_images_alias():
 def test_error_format():
     from basal.prompt import RequestError
     e = RequestError("missing field 'state'")
-    assert error_body(e) == ({"error": "missing field 'state'"}, 422)
+    assert error_body(e) == ({"error": "missing field 'state'", "code": "INVALID_REQUEST",
+                              "detail": [{"loc": ["body"], "msg": "missing field 'state'", "type": "value_error"}]}, 422)
+    assert error_body(RuntimeError("boom")) == ({"error": "boom", "code": "INTERNAL_ERROR"}, 500)  # #62's code, no detail
     assert error_body(e, "openai") == ({"error": {"message": "missing field 'state'", "type": "validation_error",
                                                   "code": 422}}, 422)
     assert error_body(RuntimeError("boom"), "openai")[0]["error"]["type"] == "server_error"

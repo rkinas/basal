@@ -64,6 +64,10 @@ def post(srv, body=None, content=None):
     ({"state": "s", "questions": {"q": dict(Q, criteria={"a": "Alpha"})}}, None, "1 options"),
     ({"state": "s", "questions": {"q": dict(Q, option_keys="maybe")}}, None, "option_keys"),
     ({"state": "s", "questions": {"q": dict(Q, type="act", costs={"defer": 1})}}, None, "missing field 'wrong'"),
+    ({"state": "s", "questions": {"q": dict(Q, type="act", costs={"wrong": 1, "defer": .1},
+                                             max_error="low")}}, None, "max_error must be a number"),
+    ({"state": "s", "questions": {"q": dict(Q, type="multi", min="one")}}, None, "min must convert to an integer"),
+    ({"state": "s", "questions": {"q": dict(Q, type="multi", max="one")}}, None, "max must convert to an integer"),
     ({"state": "s", "questions": {"q": dict(Q, type="multi", threshold="high")}}, None, "could not convert"),
     ({"state": "s", "questions": {"q": {"type": "tool", "tools": [{"type": "web"}]}}}, None, "function tools only"),
     ({"state": "s", "questions": {"q": Q}, "lang": "de"}, None, "lang must be"),
@@ -71,28 +75,33 @@ def post(srv, body=None, content=None):
 def test_invalid_requests_answer_422(body, content, message):
     srv = AppServer(Engine())
     r = post(srv, body, content)
-    assert r.status_code == 422 and message in r.json()["error"]
+    error = r.json()
+    assert r.status_code == 422 and message in error["error"]
+    assert error["code"] == "INVALID_REQUEST"
+    assert error["detail"] == [{"loc": ["body"], "msg": error["error"], "type": "value_error"}]
+    assert not srv.backend.entered.is_set()
     assert srv.load() == {"running": 0, "queued": 0}
 
 
-@pytest.mark.parametrize("error,status", [
-    (RuntimeError("engine failed"), 500),
-    (KeyError("layer"), 500),  # a bug in the engine is the server's error, not the request's
-    (torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB"), 503),
-    (RuntimeError("MPS backend out of memory (MPS allocated: 20 GB)"), 503),
+@pytest.mark.parametrize("error,status,code", [
+    (RuntimeError("engine failed"), 500, "INTERNAL_ERROR"),
+    (KeyError("layer"), 500, "INTERNAL_ERROR"),  # a bug in the engine is the server's error, not the request's
+    (torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB"), 503, "OUT_OF_MEMORY"),
+    (RuntimeError("MPS backend out of memory (MPS allocated: 20 GB)"), 503, "OUT_OF_MEMORY"),
     (RuntimeError("[METAL] Command buffer execution failed: Insufficient Memory "
-                  "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"), 503),
+                  "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"), 503, "OUT_OF_MEMORY"),
 ])
-def test_server_errors_answer_500_and_out_of_memory_503(error, status):
+def test_server_errors_answer_500_and_out_of_memory_503(error, status, code):
     srv = AppServer(Engine(error))
     r = post(srv, BODY)
-    assert r.status_code == status and r.json() == {"error": str(error)}
+    assert r.status_code == status and r.json() == {"error": str(error), "code": code}
     assert srv.load() == {"running": 0, "queued": 0}
 
 
-def test_a_valid_request_answers_200():
+def test_a_valid_request_answers_200_without_error_fields():
     r = post(AppServer(Engine()), BODY)
     assert r.status_code == 200 and r.json()["answers"]["q"]["choice"] in ("a", "b")
+    assert "error" not in r.json() and "code" not in r.json()
 
 
 def test_status_of_errors():

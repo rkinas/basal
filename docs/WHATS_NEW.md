@@ -1,5 +1,8 @@
 # What is new in basal 2.5
 
+- **Serving errors:** invalid `max_error` and set bounds are rejected before inference; error responses include a `code`
+  (`INVALID_REQUEST`, `OUT_OF_MEMORY` or `INTERNAL_ERROR`) and 422 responses include `detail`.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#62](https://github.com/rkinas/basal/pull/62).
 - **Fix: task questions next to a question named `<task>::<part>`**: such a name is one of the task's expanded
   questions, so the task read that question's answer as its own (a `classify` named `task` answered with the label of a
   `choice` named `task::labels`) and the other answer was dropped. In a request with task questions a name with `::`

@@ -322,6 +322,12 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
 
 def act_spec(name, q, outcomes):
     """Cost matrix C[action][outcome] from the full form or the short form {"wrong": W, "defer": D}."""
+    max_error = q.get("max_error")
+    if max_error is not None:
+        try:
+            max_error = float(max_error)
+        except (TypeError, ValueError, OverflowError):
+            raise RequestError(f"question {name!r}: max_error must be a number") from None
     costs = q.get("costs")
     if not isinstance(costs, dict) or not costs:
         raise RequestError(f"question {name!r}: act needs costs")
@@ -330,13 +336,13 @@ def act_spec(name, q, outcomes):
         C = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
         if "defer" in costs:
             C["defer"] = {z: float(costs["defer"]) for z in outcomes}
-        return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=q.get("max_error"))
+        return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=max_error)
     for a, row in costs.items():
         if not isinstance(row, dict) or set(row) != set(outcomes):
             raise RequestError(f"question {name!r}: costs[{a!r}] must give a cost for every outcome {outcomes}")
     C = {a: {z: float(v) for z, v in row.items()} for a, row in costs.items()}
     defer = q.get("defer_action") or next((a for a in ("defer", "human") if a in C), None)
-    return dict(costs=C, defer=defer, max_error=q.get("max_error"))
+    return dict(costs=C, defer=defer, max_error=max_error)
 
 
 NO_CERTIFICATE = "no certified threshold for this type at this max_error"
@@ -2225,13 +2231,18 @@ class Starting:
 
 
 def error_body(e, error_format="basal"):
-    """The body and status of a failed request: {"error": message}; with --error-format openai {"error": {"message",
-    "type", "code"}}, the shape of OpenAI-style servers (vLLM's structured-diffusion example among them)."""
+    """The body and status of a failed request: {"error": message, "code": code} (a 422 adds "detail"); with
+    --error-format openai {"error": {"message", "type", "code"}}, the shape of OpenAI-style servers (vLLM's
+    structured-diffusion example among them)."""
     status = http_status(e)
     if error_format == "openai":
         kind = "validation_error" if status == 422 else "server_error"
         return {"error": {"message": str(e), "type": kind, "code": status}}, status
-    return {"error": str(e)}, status
+    code = {422: "INVALID_REQUEST", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[status]
+    body = {"error": str(e), "code": code}
+    if status == 422:
+        body["detail"] = [{"loc": ["body"], "msg": str(e), "type": "value_error"}]
+    return body, status
 
 
 def http_app(srv, mode, mcp=None, error_format="basal"):
