@@ -287,7 +287,12 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   (`"basal": {choice, confidence, model}`); the response lists `"fallback": {below, asked, answered}`.
   - The basal answer stays when the endpoint is down, answers an error, takes longer than `--fallback-timeout`
     (default 60 s), or returns anything but exactly `{"answer": "<one of the letters>"}`; the request does not fail.
-    `/metrics` counts the calls by result (`basal_router_fallback_total`).
+    A connection the endpoint closed just as it was reused (its keep-alive) is tried once more. `/metrics` counts the
+    calls by result (`basal_router_fallback_total`).
+  - **Thinking takes time.** With a 31B model thinking first, on one H100 with the repeatable settings below, one call
+    took 54 s at the median and 308 s at p95 (one request at a time). The default `--fallback-timeout 60` suits live
+    serving, but it cuts many such calls: in that measurement 46 of 100 calls took longer and kept the basal answer.
+    For offline or review use, where waiting is fine, set `--fallback-timeout 600`.
   - Never sent: multi, act, tool and task questions, noul and score, questions with `coverage`, `max_error` or
     `evidence`, and requests with media.
   - `--fallback-extra JSON` is merged into the chat request, for example a model's thinking switch:

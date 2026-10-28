@@ -399,13 +399,18 @@ class Router:
         headers = {"content-type": "application/json"}
         if os.environ.get("BASAL_FALLBACK_API_KEY"):
             headers["authorization"] = "Bearer " + os.environ["BASAL_FALLBACK_API_KEY"]
-        try:
-            r = await self.client.post(f["url"].rstrip("/") + "/chat/completions", content=json.dumps(body).encode(),
-                                       headers=headers, timeout=f.get("timeout", 60.0))
-        except httpx.TimeoutException:
-            return None, None, "timeout", None
-        except Exception:  # noqa: BLE001  (down, refused, reset)
-            return None, None, "error", None
+        for attempt in (0, 1):
+            try:
+                r = await self.client.post(f["url"].rstrip("/") + "/chat/completions", content=json.dumps(body).encode(),
+                                           headers=headers, timeout=f.get("timeout", 60.0))
+                break
+            except httpx.TimeoutException:
+                return None, None, "timeout", None
+            except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError):
+                if attempt:  # (once more: a pooled connection the endpoint closed as it was reused, at its keep-alive)
+                    return None, None, "error", None
+            except Exception:  # noqa: BLE001  (down, refused)
+                return None, None, "error", None
         if r.status_code != 200:
             return None, None, "error", None
         try:

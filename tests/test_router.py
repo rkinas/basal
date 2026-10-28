@@ -756,6 +756,22 @@ def test_fallback_failure_keeps_the_basal_answer(llm, result):
     assert f'basal_router_fallback_total{{result="{result}"}} 1' in m
 
 
+@pytest.mark.parametrize("errors,result,calls", [
+    ([httpx.ReadError("closed")], "answered", 2),                                    # a stale pooled connection: retried
+    ([httpx.RemoteProtocolError("disconnected")], "answered", 2),
+    ([httpx.ReadError("closed"), httpx.ReadError("closed")], "error", 2),              # once only
+    ([httpx.ConnectError("refused")], "error", 1),                                   # down: no retry
+])
+def test_fallback_retries_once_on_a_connection_the_endpoint_closed(errors, result, calls):
+    conf, asked, left = {SMALL: {"q": _ch(0.4)}}, {}, list(errors)
+    rt = R.Router([SMALL], transport=fallback_transport(conf, asked, lambda b: left.pop(0) if left else llm_reply("B")),
+                  fallback=FB)
+    r, m = _ask(rt, {"state": "s", "questions": {"q": {"criteria": OPTS}}})
+    assert r.status_code == 200 and len(asked["llm"]) == calls
+    assert (r.json()["answers"]["q"].get("answered_by") == "fallback") == (result == "answered")
+    assert f'basal_router_fallback_total{{result="{result}"}} 1' in m
+
+
 def test_fallback_never_takes_multi_tasks_limits_evidence_media_or_other_types():
     asked = {}
     low = _ch(0.3)
