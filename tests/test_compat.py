@@ -111,5 +111,6 @@ def test_error_format():
             w.cancel()
     default, basal, openai = (asyncio.run(go(f)) for f in (None, "basal", "openai"))
     assert default.status_code == basal.status_code == openai.status_code == 422
-    assert default.content == basal.content == b'{"error":"missing field \'state\'"}'
+    assert default.content == basal.content
+    assert basal.json()["error"] == "missing field 'state'" and basal.json()["code"] == "INVALID_REQUEST"  # #62
     assert openai.json()["error"]["message"] == "missing field 'state'"
