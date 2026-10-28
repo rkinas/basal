@@ -8,6 +8,7 @@
 Tools: `decide` (one question) and `decide_many` (several questions over one state, every question type of the HTTP
 API). Both are read-only. Needs the optional extra: `uv pip install "basal[mcp]"`."""
 import argparse
+import inspect
 from typing import Annotated, Any, Literal
 
 INSTALL = 'MCP needs the mcp package: uv pip install "basal[mcp]"'
@@ -28,6 +29,11 @@ answers.
 Using the answer: `confidence` is the calibrated probability of the returned answer. Below the confidence your task \
 needs, check the case yourself or ask the user. 2-255 options per question (basal-1.x models: 2-10)."""
 
+SEVERAL = """
+
+Several models are loaded on this server: call `list_models` and pass one of them as `model` to every decision."""
+
+
 def available():
     """None when the mcp package imports, else the install hint (checked before a model is loaded)."""
     try:
@@ -37,8 +43,9 @@ def available():
     return None
 
 
-def build(decide, model="basal"):
-    """decide: async request body -> response (Server.decide, or `remote` for the bridge). -> the MCP server."""
+def build(decide, model="basal", models=None):
+    """decide: async request body -> response (Server.decide, or `remote` for the bridge). models: callable for loaded
+    model ids, or None for one model. -> the MCP server."""
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import ToolAnnotations
@@ -49,10 +56,27 @@ def build(decide, model="basal"):
     Lang = Annotated[Literal["pl", "en"] | None, Field(description="The prompt language, when the state text does not "
                                                                    "show it (default: Polish if the state or question "
                                                                    "has Polish diacritics, else English).")]
+    Model = Annotated[str | None, Field(description="A loaded model id (see list_models).")]
     from . import __version__
 
-    srv = MCPServer(name="basal", version=__version__, instructions=HOW.format(model=model), log_level="WARNING")
+    srv = MCPServer(name="basal", version=__version__,
+                    instructions=HOW.format(model=model) + (SEVERAL if models is not None else ""),
+                    log_level="WARNING")
     ro = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+
+    def tool(fn):
+        name = "decide" if fn.__name__ == "decide_one" else fn.__name__
+        if models is not None:
+            return srv.tool(name=name, annotations=ro)(fn)
+
+        async def one_model(**kwargs):
+            return await fn(**kwargs, model=None)
+
+        one_model.__name__, one_model.__doc__ = fn.__name__, fn.__doc__
+        signature = inspect.signature(fn)
+        one_model.__signature__ = signature.replace(
+            parameters=[p for p in signature.parameters.values() if p.name != "model"])
+        return srv.tool(name=name, annotations=ro)(one_model)
 
     async def ask(body):
         try:
@@ -60,7 +84,7 @@ def build(decide, model="basal"):
         except Exception as e:  # noqa: BLE001
             raise ToolError(str(e)) from e  # the message of the HTTP API's error, so the agent can fix its call
 
-    @srv.tool(name="decide", annotations=ro)
+    @tool
     async def decide_one(
             state: State,
             question: Annotated[str, Field(description="The question: one condition, phrased for the state.")],
@@ -71,7 +95,8 @@ def build(decide, model="basal"):
                                Field(description="choice / multi: key -> what the option means (or a list of keys); "
                                                  "score: the levels, lowest first; noul: optional {\"true\": ..., "
                                                  "\"false\": ...}.")] = None,
-            lang: Lang = None) -> dict[str, Any]:
+            lang: Lang = None,
+            model: Model = None) -> dict[str, Any]:
         """Answer one typed question about a state with calibrated probabilities. Returns the answer (choice, noul,
         score or selected), its probabilities and confidence, and the model name."""
         q: dict[str, Any] = {"type": type, "instructions": question}
@@ -80,10 +105,12 @@ def build(decide, model="basal"):
         body: dict[str, Any] = {"state": state, "questions": {"answer": q}}
         if lang:
             body["lang"] = lang
+        if model is not None:
+            body["model"] = model
         r = await ask(body)
         return {"model": r.get("model"), **r["answers"]["answer"]}
 
-    @srv.tool(annotations=ro)
+    @tool
     async def decide_many(
             state: State,
             questions: Annotated[dict[str, dict[str, Any]],
@@ -96,8 +123,8 @@ def build(decide, model="basal"):
             lang: Lang = None,
             facts: Annotated[Literal["off", "auto"] | None,
                              Field(description="auto: append computed calendar and money facts to a Polish "
-                                               "state.")] = None
-    ) -> dict[str, Any]:
+                                               "state.")] = None,
+            model: Model = None) -> dict[str, Any]:
         """Answer several typed questions about one state in one pass (every question type of the basal HTTP API,
         including cost-aware actions with deferral to a person, and the next tool of an agent). Returns the API
         response: answers by question name, the model name and usage."""
@@ -105,27 +132,38 @@ def build(decide, model="basal"):
         for k, v in (("lang", lang), ("facts", facts)):
             if v:
                 body[k] = v
+        if model is not None:
+            body["model"] = model
         return await ask(body)
+
+    if models is not None:
+        @srv.tool(annotations=ro)
+        async def list_models() -> dict[str, Any]:
+            """The ids of the models loaded on this server: pass one as `model` to decide and decide_many."""
+            return {"models": list(models())}
 
     return srv
 
 
-def http(server, host):
+def http(server, host, models=None):
     """--mcp on: the MCP tools of a running basal server -> (routes for /mcp, the session manager's lifespan).
     Stateless JSON responses: every call is one request. Bound to a loopback host, Host / Origin are checked (DNS
-    rebinding)."""
-    m = build(getattr(server, "serve", server.decide), getattr(server, "name", None) or "basal")
+    rebinding). models: see build (basal-ui's API server)."""
+    m = build(getattr(server, "serve", server.decide), getattr(server, "name", None) or "basal", models)
     app = m.streamable_http_app(host=host, stateless_http=True, json_response=True)
     return app.routes, m.session_manager.run
 
 
-def remote(url, timeout=60.0, transport=None):
-    """decide over HTTP for the bridge: POST <url>/v1/systemone; the server's error message on HTTP errors."""
+def remote(url, timeout=60.0, transport=None, model=None):
+    """decide over HTTP for the bridge: POST <url>/v1/systemone (with `model` when given); the server's error message
+    on HTTP errors."""
     import httpx
 
     client = httpx.AsyncClient(base_url=url.rstrip("/"), timeout=timeout, transport=transport)
 
     async def decide(body):
+        if model is not None:
+            body = {"model": model, **body}
         r = await client.post("/v1/systemone", json=body)
         if r.status_code != 200:
             try:
@@ -152,12 +190,14 @@ def main():
     ap = argparse.ArgumentParser(description="basal over MCP (stdio): a bridge to a running basal server for agent "
                                              "hosts that start MCP servers as local processes")
     ap.add_argument("--url", default="http://127.0.0.1:8000", help="the basal server (basal-serve)")
+    ap.add_argument("--model", help="the model id to ask on a server with several models")
     ap.add_argument("--timeout", type=float, default=60.0, help="seconds per request")
     a = ap.parse_args()
     msg = available()
     if msg:
         raise SystemExit(msg)
-    build(remote(a.url, a.timeout), model_name(a.url)).run("stdio")
+    name = a.model or model_name(a.url)
+    build(remote(a.url, a.timeout, model=a.model), name).run("stdio")
 
 
 if __name__ == "__main__":

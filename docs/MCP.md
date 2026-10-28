@@ -19,6 +19,21 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --hos
 claude mcp add --transport http basal http://127.0.0.1:8000/mcp     # Claude Code; other hosts take the same URL
 ```
 
+## Several models
+
+When the MCP server is given a callable that lists its loaded models, it adds a `list_models` tool and an optional
+`model` argument to `decide` and `decide_many`. Pass a listed model id to route a decision; omitting it leaves model
+selection to the server. `basal-serve --mcp on` remains a single-model server.
+
+For a stdio bridge to a multi-model API server, pass the selected model on the bridge command:
+
+```json
+{"mcpServers": {"basal": {"command": "/home/me/basal-env/bin/basal-mcp", "args": ["--url", "http://127.0.0.1:8000", "--model", "Remek/model"]}}}
+```
+
+`basal-mcp --model NAME` adds `NAME` to every forwarded request. Without it, `basal-mcp` continues to use the first
+model reported by `GET /v1/models` as its displayed model name and leaves request selection unchanged.
+
 For hosts that start MCP servers as local processes, `basal-mcp` is a stdio bridge to a running server (use the full
 path of `basal-mcp` in your environment):
 

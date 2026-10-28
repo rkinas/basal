@@ -1,5 +1,8 @@
 # What is new in basal 2.5
 
+- **MCP model selection:** servers configured with a model list expose `list_models` and optional `model` arguments on
+  `decide` and `decide_many`; `basal-mcp --model NAME` forwards that model on each request.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#66](https://github.com/rkinas/basal/pull/66).
 - **`GET /v1/models` reports certified thresholds and context.** Calibration thresholds are listed per question type when
   the calibration matches the served model; context metadata includes its limit, overflow policy and truncation head share.
   Contributed by Paweł Kiszczak (@pawelkiszczak), [#64](https://github.com/rkinas/basal/pull/64).

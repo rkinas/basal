@@ -2,6 +2,7 @@
 --mcp on serves the tools at /mcp next to /v1/systemone (Host checked on a loopback bind), the basal-mcp bridge
 forwards over HTTP, and --mcp on without the package is refused before a model loads."""
 import asyncio
+import json
 import socket
 import sys
 import threading
@@ -36,7 +37,7 @@ def call(server, name, args):
     return asyncio.run(go())
 
 
-def test_two_read_only_tools():
+def test_two_read_only_tools_without_models_keep_their_schemas():
     async def go():
         async with Client(mcp_server.build(Engine().decide, "basal-test")) as c:
             return (await c.list_tools()).tools
@@ -44,6 +45,8 @@ def test_two_read_only_tools():
     assert set(tools) == {"decide", "decide_many"}
     assert all(t.annotations.read_only_hint and not t.annotations.destructive_hint for t in tools.values())
     assert tools["decide"].input_schema["required"] == ["state", "question"]
+    assert "model" not in tools["decide"].input_schema["properties"]
+    assert "model" not in tools["decide_many"].input_schema["properties"]
 
 
 def test_decide_asks_one_question():
@@ -83,6 +86,42 @@ def test_decide_many_passes_the_api_request_through():
 def test_server_errors_reach_the_agent():
     r = call(mcp_server.build(Engine().decide), "decide", {"state": "x", "question": "?", "options": ["only"]})
     assert r.is_error and "1 options (supported: 2..10)" in r.content[0].text   # the server's message, not a generic one
+
+
+def test_multiple_models_are_listed_and_selected():
+    eng = Engine()
+
+    async def go():
+        async with Client(mcp_server.build(eng.decide, models=lambda: ["a", "b"])) as c:
+            tools = {t.name: t for t in (await c.list_tools()).tools}
+            listed = await c.call_tool("list_models", {})
+            result = await c.call_tool(
+                "decide", {"model": "b", "state": "s", "question": "q?", "options": ["yes", "no"]})
+            many = await c.call_tool("decide_many", {"model": "a", "state": "s",
+                                                     "questions": {"answer": {"type": "noul", "instructions": "q?"}}})
+            return tools, listed, result, many
+
+    tools, listed, result, many = asyncio.run(go())
+    assert set(tools) == {"decide", "decide_many", "list_models"}
+    assert "model" in tools["decide"].input_schema["properties"]
+    assert "model" not in tools["decide"].input_schema["required"]
+    assert "model" in tools["decide_many"].input_schema["properties"]
+    assert "model" not in tools["decide_many"].input_schema["required"]
+    assert listed.structured_content == {"models": ["a", "b"]}
+    assert not result.is_error and not many.is_error
+    assert eng.bodies[-2] == {"state": "s", "questions": {"answer": {
+        "type": "choice", "instructions": "q?", "criteria": ["yes", "no"]}}, "model": "b"}
+    assert eng.bodies[-1] == {"state": "s", "questions": {"answer": {"type": "noul", "instructions": "q?"}},
+                              "model": "a"}
+
+
+def test_unknown_model_error_reaches_the_agent():
+    async def decide(body):
+        raise ValueError(f"unknown model: {body['model']}")
+
+    result = call(mcp_server.build(decide, models=lambda: ["a"]), "decide",
+                  {"model": "unknown", "state": "s", "question": "q?"})
+    assert result.is_error and "unknown model: unknown" in result.content[0].text
 
 
 def free_port():
@@ -147,6 +186,36 @@ def test_bridge_forwards_over_http_and_reports_errors():
     assert r.structured_content == {"model": "m", "type": "noul", "noul": 0.7} and seen[0][0] == "/v1/systemone"
     r = call(mcp_server.build(decide), "decide_many", {"state": "s", "questions": {"q": {"type": "guess"}}})
     assert r.is_error and "422" in r.content[0].text and "unknown question type: guess" in r.content[0].text
+
+
+def test_bridge_model_option_names_the_model_in_every_request():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"answers": {}})
+
+    decide = mcp_server.remote("http://basal:8000", transport=httpx.MockTransport(handler), model="Remek/m")
+    asyncio.run(decide({"state": "x"}))
+    assert seen == [{"model": "Remek/m", "state": "x"}]
+
+
+def test_bridge_model_flag_configures_remote(monkeypatch):
+    captured = {}
+
+    def remote(url, timeout, model):
+        captured["remote"] = (url, timeout, model)
+
+    class Bridge:
+        def run(self, transport):
+            captured["transport"] = transport
+
+    monkeypatch.setattr(sys, "argv", ["basal-mcp", "--model", "Remek/m"])
+    monkeypatch.setattr(mcp_server, "available", lambda: None)
+    monkeypatch.setattr(mcp_server, "remote", remote)
+    monkeypatch.setattr(mcp_server, "build", lambda decide, model: Bridge())
+    mcp_server.main()
+    assert captured == {"remote": ("http://127.0.0.1:8000", 60.0, "Remek/m"), "transport": "stdio"}
 
 
 def test_mcp_without_the_package_fails_before_model_loading(monkeypatch):
