@@ -91,6 +91,33 @@ def test_router_stops_when_every_started_replica_exited():
     assert called == [1] and rt.dead
 
 
+FIRST_METRICS = """
+import asyncio, json, sys, time
+import httpx
+from starlette.testclient import TestClient
+from basal import router as R
+names = ["http://r0", "http://r1"]
+rt = R.Router(names, transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"status": "ok"})))
+with TestClient(R.app(rt, poll_s=3600)) as c:
+    asyncio.run(rt.poll())
+    before = "torch" in sys.modules
+    t = time.perf_counter()
+    status = c.get("/metrics").status_code
+    print(json.dumps(dict(status=status, seconds=time.perf_counter() - t, torch_before=before,
+                          torch_after="torch" in sys.modules)))
+"""
+
+
+def test_first_router_metrics_imports_no_torch():
+    """RMET: basal-router's first /metrics after a start formats the text without importing basal.server (torch,
+    transformers: 6-9 s with the router's event loop blocked); a fresh interpreter, since this test process has torch."""
+    out = subprocess.run([sys.executable, "-c", FIRST_METRICS], capture_output=True, text=True, timeout=120,
+                         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    r = json.loads(out.stdout.strip().splitlines()[-1])
+    assert r["status"] == 200 and not r["torch_before"] and not r["torch_after"]
+    assert r["seconds"] < 1.0
+
+
 def test_prometheus_text():
     t = S.prometheus([("a_total", "help a", "counter", [({}, 3)]),
                       ("b", "help b", "gauge", [({"replica": 'x"y\\z\nw'}, 1.5)])])

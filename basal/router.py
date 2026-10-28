@@ -59,6 +59,8 @@ import subprocess
 import sys
 import time
 
+from .metrics import prometheus
+
 LOAD_FACTOR = 1.25
 VNODES = 64
 POLL_S = 2.0
@@ -330,7 +332,6 @@ class Router:
             self.load[r] -= 1
 
     def metrics(self):
-        from .server import prometheus
         return prometheus([
             ("basal_router_replica_ready", "1 when the replica answers /health with 200", "gauge",
              [({"replica": r}, int(r in self.ready)) for r in self.replicas]),

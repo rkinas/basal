@@ -50,6 +50,7 @@ from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFB
                      VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
                      resolve, set_fp8_fast_accum)
 from .evidence import Evidence
+from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import tasks
@@ -2190,20 +2191,6 @@ def parser():
     from .think import add_think_args  # --think off|auto (experimental; off = this server unchanged)
     add_think_args(ap)
     return ap
-
-
-def prometheus(metrics):
-    """Prometheus text exposition of [(name, help, type, [(labels dict, value)])]; label values escaped as the format
-    asks (backslash, newline, double quote)."""
-    def esc(v):
-        return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
-    out = []
-    for name, help_, kind, samples in metrics:
-        out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
-        for labels, value in samples:
-            lab = ",".join(f'{k}="{esc(v)}"' for k, v in labels.items())
-            out.append(f"{name}{{{lab}}} {value}" if lab else f"{name} {value}")
-    return "\n".join(out) + "\n"
 
 
 class Starting:
