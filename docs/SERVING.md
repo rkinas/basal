@@ -365,11 +365,11 @@ basal-serve exports:
 The values are read when Prometheus scrapes: nothing is added to the request path, and nothing waits for the GPU. The
 state cache is read without waiting for its lock; while the engine holds it, the last values are reported again, and
 `basal_state_cache_snapshot_timestamp_seconds` gives their Unix time (0 before the first read; the cache values are
-left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP
-API. basal-router's own metrics are per replica: readiness, requests in flight, requests routed by state and by load,
-failures; with `--escalate`, answers by the first replica and escalated (with several levels also per level); with
-`--blend`, blended answers by the number of models; with `--fallback`, LLM calls by result; with `--route`,
-requests by script.
+left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP API
+(with `--api-keys`, it needs a key like every route but `GET /health`). basal-router's own metrics are per replica:
+readiness, requests in flight, requests routed by state and by load, failures; with `--escalate`, answers by the first
+replica and escalated (with several levels also per level); with `--blend`, blended answers by the number of models;
+with `--fallback`, LLM calls by result; with `--route`, requests by script.
 
 ## API access
 
