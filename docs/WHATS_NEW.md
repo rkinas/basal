@@ -1,5 +1,9 @@
 # What is new in basal 2.5
 
+- **`basal-interpolate`: linear weight interpolation of two checkpoints** that share a base model (WiSE-FT, model
+  soups), streamed tensor by tensor; quantized or mismatched pairs (tensors, config, tokenizer) are refused before
+  anything is written. [INTERPOLATION.md](INTERPOLATION.md). Contributed by Dariusz Koryto (@dkoryto),
+  [#60](https://github.com/rkinas/basal/pull/60).
 - **API keys, CORS and request IDs for `basal-serve`:** opt-in `--api-keys` protects HTTP and MCP routes (except
   `GET /health`), `--cors-origins` enables browser access from listed origins, and responses carry request IDs.
   Contributed by Paweł Kiszczak (@pawelkiszczak), [#68](https://github.com/rkinas/basal/pull/68).

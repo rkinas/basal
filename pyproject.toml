@@ -57,6 +57,7 @@ basal-selfcheck = "basal.selfcheck:main"
 basal-prepare = "basal.prepared:main"
 basal-attach = "basal.attach:main"
 basal-viz = "basal.viz:main"
+basal-interpolate = "basal.interpolate:main"
 
 [tool.setuptools]
 packages = ["basal"]
