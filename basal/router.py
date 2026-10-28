@@ -148,6 +148,7 @@ def blend_answer(answer, members):
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 FALLBACK_RESULTS = ("answered", "error", "timeout", "unparseable", "not_an_option")
+RETRY_MIN_S = 1.0  # a fallback call is retried (once) only with at least this much of --fallback-timeout left
 FALLBACK_SYSTEM = ("You answer a question about a document. Read the document, then pick the one option that answers "
                    'the question. Reply with JSON only: {"answer": "<the letter of the option>"}.')
 
@@ -399,15 +400,20 @@ class Router:
         headers = {"content-type": "application/json"}
         if os.environ.get("BASAL_FALLBACK_API_KEY"):
             headers["authorization"] = "Bearer " + os.environ["BASAL_FALLBACK_API_KEY"]
+        deadline = time.monotonic() + f.get("timeout", 60.0)  # (both attempts together)
         for attempt in (0, 1):
+            left = deadline - time.monotonic()
             try:
-                r = await self.client.post(f["url"].rstrip("/") + "/chat/completions", content=json.dumps(body).encode(),
-                                           headers=headers, timeout=f.get("timeout", 60.0))
+                r = await asyncio.wait_for(self.client.post(
+                    f["url"].rstrip("/") + "/chat/completions", content=json.dumps(body).encode(), headers=headers,
+                    timeout=left), left)
                 break
-            except httpx.TimeoutException:
+            except (httpx.TimeoutException, asyncio.TimeoutError):
                 return None, None, "timeout", None
             except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError):
-                if attempt:  # (once more: a pooled connection the endpoint closed as it was reused, at its keep-alive)
+                # once more, in the time left (at least RETRY_MIN_S): a pooled connection the endpoint closed as it
+                # was reused, at its keep-alive
+                if attempt or deadline - time.monotonic() < RETRY_MIN_S:
                     return None, None, "error", None
             except Exception:  # noqa: BLE001  (down, refused)
                 return None, None, "error", None

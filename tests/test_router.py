@@ -772,6 +772,33 @@ def test_fallback_retries_once_on_a_connection_the_endpoint_closed(errors, resul
     assert f'basal_router_fallback_total{{result="{result}"}} 1' in m
 
 
+@pytest.mark.parametrize("first_s,second_s,result,calls", [
+    (0.5, 3.0, "timeout", 2),    # the retry gets only the 1.5 s left of 2 s, then times out
+    (1.3, 0.0, "error", 1),      # 0.7 s left < RETRY_MIN_S: no retry
+])
+def test_fallback_retry_stays_inside_the_timeout(first_s, second_s, result, calls):
+    """The two attempts together stay inside --fallback-timeout."""
+    calls_made = []
+
+    async def handler(req):
+        if req.url.host == "llm":
+            calls_made.append(time.monotonic())
+            if len(calls_made) == 1:
+                await asyncio.sleep(first_s)
+                raise httpx.ReadError("closed")
+            await asyncio.sleep(second_s)
+            return httpx.Response(200, json=llm_reply("B"))
+        if req.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(200, json={"model": "m", "answers": {"q": _ch(0.4)}})
+    rt = R.Router([SMALL], transport=httpx.MockTransport(handler), fallback=dict(FB, timeout=2.0))
+    t = time.monotonic()
+    r, m = _ask(rt, {"state": "s", "questions": {"q": {"criteria": OPTS}}})
+    assert r.status_code == 200 and len(calls_made) == calls
+    assert calls_made[0] - t < 1.0 and time.monotonic() - calls_made[0] < 2.0 + 0.5   # (TestClient start-up excluded)
+    assert f'basal_router_fallback_total{{result="{result}"}} 1' in m
+
+
 def test_fallback_never_takes_multi_tasks_limits_evidence_media_or_other_types():
     asked = {}
     low = _ch(0.3)
