@@ -1,5 +1,10 @@
 # What is new in basal 2.5
 
+- **Fix: task questions next to a question named `<task>::<part>`**: such a name is one of the task's expanded
+  questions, so the task read that question's answer as its own (a `classify` named `task` answered with the label of a
+  `choice` named `task::labels`) and the other answer was dropped. In a request with task questions a name with `::`
+  is now refused (HTTP 422), as a task question's own name already was. Reported by Sourcery's review of #58.
+  Contributed by Dariusz Koryto (@dkoryto), [#59](https://github.com/rkinas/basal/pull/59).
 - **`POST /v1/decisions`: OpenAI's Decisions API on basal-serve.** `client.decisions.create` of the OpenAI Python SDK
   works against basal-serve: predicate, choice and score questions are decided as the System One request they stand
   for (predicate as noul), with the same probabilities as `/v1/systemone`, and answered in OpenAI's shape; errors in

@@ -305,11 +305,12 @@ def expand(body, max_options=255):
     questions, plans = {}, {}
     text_pl = not body.get("lang") and lang_of(text) == "pl"  # once per request, not once per task question
     for name, q in body["questions"].items():
+        if SEP in name:  # the expanded names are <task question>::<part>: another "::" name could be one of them
+            raise ValueError(f"question {name!r}: in a request with task questions, a question's name may not "
+                             f"contain {SEP!r}")
         if not is_task(q):
             questions[name] = q
             continue
-        if SEP in name:
-            raise ValueError(f"question {name!r}: a task question's name may not contain {SEP!r}")
         t = q["type"]
         lang = body.get("lang") or ("pl" if text_pl else lang_of(str(q.get("instructions") or "")))
         w = W[lang]
