@@ -276,6 +276,43 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   basal-router --replicas http://127.0.0.1:8003 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8001 \
       --blend-weights 0.6 0.2 0.2 --port 8000          # ultra first, then mini and pico
   ```
+- `--fallback URL --fallback-model NAME --fallback-below T` (opt-in): after the last level (or the single model), a
+  plain choice question whose top probability is still under T goes to an LLM behind an OpenAI-compatible chat
+  endpoint (`URL` is its base, such as `http://127.0.0.1:8100/v1` for vLLM). The router writes the prompt from the
+  request's document, question and options (lettered A, B, ...) and asks for JSON that only admits those letters
+  (`response_format` with a JSON schema; greedy: temperature 0 and a fixed seed; with logprobs; up to
+  `--fallback-max-tokens`, default 8,192, so a model can think first). The answer replaces the basal one and says
+  `"answered_by": "fallback"`, the `"model"`, `"calibrated": false`, the option probabilities from the endpoint's
+  logprobs renormalised over the options (`null` when it returns none) and the basal answer it replaced
+  (`"basal": {choice, confidence, model}`); the response lists `"fallback": {below, asked, answered}`.
+  - The basal answer stays when the endpoint is down, answers an error, takes longer than `--fallback-timeout`
+    (default 60 s), or returns anything but exactly `{"answer": "<one of the letters>"}`; the request does not fail.
+    A connection the endpoint closed just as it was reused (its keep-alive) is tried once more. `/metrics` counts the
+    calls by result (`basal_router_fallback_total`).
+  - **Thinking takes time.** With a 31B model thinking first, on one H100 with the repeatable settings below, one call
+    took 54 s at the median and 308 s at p95 (one request at a time). The default `--fallback-timeout 60` suits live
+    serving, but it cuts many such calls: in that measurement 46 of 100 calls took longer and kept the basal answer.
+    For offline or review use, where waiting is fine, set `--fallback-timeout 600`.
+  - Never sent: multi, act, tool and task questions, noul and score, questions with `coverage`, `max_error` or
+    `evidence`, and requests with media.
+  - `--fallback-extra JSON` is merged into the chat request, for example a model's thinking switch:
+    `'{"chat_template_kwargs": {"enable_thinking": true}}'`. The endpoint's context must hold the prompt plus
+    `--fallback-max-tokens`. `BASAL_FALLBACK_API_KEY`, if set, is sent as a bearer token.
+  - The LLM's answers are not calibrated: no basal threshold or certificate holds for them.
+  - **Repeatable answers need a repeatable endpoint.** Greedy decoding alone is not enough: with vLLM's default
+    batching, a long thinking answer can come out differently when other requests share its batch. Serve the model
+    with batch-invariant kernels, as basal-serve's `--vllm-preset deterministic` does: the environment variable
+    `VLLM_BATCH_INVARIANT=1`, `--no-enable-prefix-caching`, `--no-enable-chunked-prefill` and
+    `--attention-backend TRITON_ATTN`.
+
+  ```
+  VLLM_BATCH_INVARIANT=1 vllm serve google/gemma-4-31B-it --port 8100 --reasoning-parser gemma4 \
+      --max-model-len 16384 --no-enable-prefix-caching --no-enable-chunked-prefill \
+      --attention-backend TRITON_ATTN                                          # for example
+  basal-router --replicas http://127.0.0.1:8001 --fallback http://127.0.0.1:8100/v1 \
+      --fallback-model google/gemma-4-31B-it --fallback-below 0.8 \
+      --fallback-extra '{"chat_template_kwargs": {"enable_thinking": true}}' --fallback-timeout 300 --port 8000
+  ```
 - `--route SCRIPT=URL[,URL]`: requests whose state is mostly in that script (latin, cyrillic, greek, arabic, hebrew,
   cjk, other) go to those replicas, for example a model trained for Ukrainian; the rest go to `--replicas`
   (`basal_router_script_total`).
@@ -331,7 +368,8 @@ state cache is read without waiting for its lock; while the engine holds it, the
 left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP
 API. basal-router's own metrics are per replica: readiness, requests in flight, requests routed by state and by load,
 failures; with `--escalate`, answers by the first replica and escalated (with several levels also per level); with
-`--blend`, blended answers by the number of models; with `--route`, requests by script.
+`--blend`, blended answers by the number of models; with `--fallback`, LLM calls by result; with `--route`,
+requests by script.
 
 ## API access
 

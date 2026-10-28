@@ -30,6 +30,21 @@ Off by default (the replicas' answers then pass through untouched):
                                           (the weights of the rest are used). Every question costs a call per model.
                                           Multi, act, tool, task answers, questions with coverage / max_error /
                                           evidence keep the first replica's answer. Not with --escalate.
+  --fallback URL --fallback-model NAME --fallback-below T
+                                          an LLM after the last level (or the single model): a plain choice question
+                                          whose top probability there is under T goes to an OpenAI-compatible chat
+                                          endpoint (URL: its base, e.g. http://127.0.0.1:8100/v1), with a prompt the
+                                          router builds from the document, the question and the options, and a JSON
+                                          schema that admits only the options' letters. Its answer says "answered_by":
+                                          "fallback", the "model", "calibrated": false, option probabilities from the
+                                          endpoint's logprobs (renormalised over the options; null without them) and
+                                          the basal answer it replaced. Greedy (temperature 0, seed 0), up to
+                                          --fallback-max-tokens (8192) tokens. Down, --fallback-timeout (60 s), an
+                                          answer that does not parse or is not an option: the basal answer stays.
+                                          Multi, task,
+                                          coverage / max_error / evidence questions and requests with media never go.
+                                          --fallback-extra JSON is merged into the chat request (e.g. a thinking
+                                          switch); BASAL_FALLBACK_API_KEY, if set, is sent as a bearer token.
   --route SCRIPT=URL[,URL]                requests whose state is mostly in that script (latin, cyrillic, greek,
                                           arabic, hebrew, cjk) go to those replicas instead
 
@@ -41,8 +56,8 @@ Off by default (the replicas' answers then pass through untouched):
   basal-router --replicas http://127.0.0.1:8003 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8001 \
                --blend-weights 0.6 0.2 0.2   (ultra first: answers that are not blended are its own)
 GET /health: 200 when at least one replica is ready, else 503; /metrics: per replica in flight, requests routed by
-state / by load, failures, readiness, answers per cascade level, blended answers (Prometheus); /v1/models: the first
-ready replica's.
+state / by load, failures, readiness, answers per cascade level, blended answers, fallback calls by result
+(Prometheus); /v1/models: the first ready replica's.
 """
 import argparse
 import asyncio
@@ -133,6 +148,109 @@ def blend_answer(answer, members):
     return out
 
 
+LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+FALLBACK_RESULTS = ("answered", "error", "timeout", "unparseable", "not_an_option")
+RETRY_MIN_S = 1.0  # a fallback call is retried (once) only with at least this much of --fallback-timeout left
+FALLBACK_SYSTEM = ("You answer a question about a document. Read the document, then pick the one option that answers "
+                   'the question. Reply with JSON only: {"answer": "<the letter of the option>"}.')
+
+
+def _text(x):
+    return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
+
+
+def fallback_options(question, answer):
+    """[(key, text)] of a plain choice question in the answer's order, the texts as basal-serve shows them to the model
+    (option_keys); None when the question does not go to the fallback (another type, limits, evidence, multi, keys
+    that do not match the answer's, fewer than 2 or more than 26 options)."""
+    if not (isinstance(answer, dict) and answer.get("type") == "choice" and isinstance(answer.get("probabilities"), dict)
+            and isinstance(question, dict) and question.get("type", "choice") == "choice"
+            and not any(k in question for k in PLAIN)):
+        return None
+    crit = question.get("criteria") or {}
+    if isinstance(crit, list):
+        crit = {k: None for k in crit}
+    if not isinstance(crit, dict) or [str(k) for k in crit] != list(answer["probabilities"]) or not 2 <= len(crit) <= 26:
+        return None
+    texts = [str(k) if v is None else _text(v) for k, v in crit.items()]
+    dup = {t for t in texts if texts.count(t) > 1}
+    hide = question.get("option_keys") == "hide"
+    return [(str(k), t if v is None or (hide and t not in dup) else f"{k}: {t}")
+            for (k, v), t in zip(crit.items(), texts)]
+
+
+def fallback_messages(state, question, options):
+    """The chat messages for the fallback: the document, the question and the options as lettered lines."""
+    q = question.get("instructions")
+    lines = "\n".join(f"{LETTERS[i]}. {t}" for i, (_, t) in enumerate(options))
+    user = (f"Document:\n{_text(state)}\n\nQuestion:\n{_text(q) if q else 'Which option fits the document?'}\n\n"
+            f"Options:\n{lines}")
+    return [{"role": "system", "content": FALLBACK_SYSTEM}, {"role": "user", "content": user}]
+
+
+def fallback_request(model, messages, n, extra=None, max_tokens=8192, seed=0):
+    """The chat completion request: greedy (temperature 0, a fixed seed), a token budget with room for a model's
+    thinking, logprobs, and a JSON schema that admits only the n options' letters; extra merged last."""
+    schema = {"type": "object", "properties": {"answer": {"type": "string", "enum": list(LETTERS[:n])}},
+              "required": ["answer"], "additionalProperties": False}
+    body = {"model": model, "messages": messages, "temperature": 0, "seed": seed, "max_tokens": max_tokens,
+            "logprobs": True, "top_logprobs": 20,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "strict": True, "schema": schema}}}
+    body.update(extra or {})
+    return body
+
+
+def _letter_probs(entries, letter, n):
+    """Probabilities of the n letters at the token that carries the answer's letter (the last '"answer": "' of the
+    output), from its top logprobs renormalised over the letters (letters not among them: 0); None if not found."""
+    toks = [(e.get("token") or "") if isinstance(e, dict) else "" for e in entries]
+    text = "".join(toks)
+    hits = list(re.finditer(r'"answer"\s*:\s*"', text))
+    if not hits:
+        return None
+    v, pos = hits[-1].end(), 0
+    for i, t in enumerate(toks):
+        if pos <= v < pos + len(t):
+            break
+        pos += len(t)
+    else:
+        return None
+    pre, chosen = text[pos:v], toks[i]
+    if chosen[len(pre):len(pre) + 1] != letter or not isinstance(entries[i], dict):
+        return None
+    rest = chosen[len(pre) + 1:]
+    lp = {letter: entries[i].get("logprob")}
+    for alt in entries[i].get("top_logprobs") or []:
+        t = alt.get("token") or ""
+        c = t[len(pre):len(pre) + 1]
+        if t.startswith(pre) and c and c in LETTERS[:n] and t[len(pre) + 1:] == rest and alt.get("logprob") is not None:
+            lp[c] = max(lp.get(c) if lp.get(c) is not None else -math.inf, alt["logprob"])
+    lp = {c: x for c, x in lp.items() if isinstance(x, (int, float)) and math.isfinite(x)}  # (a masked letter: -inf)
+    if letter not in lp:
+        return None
+    top = max(lp.values())
+    ex = {c: math.exp(x - top) for c, x in lp.items()}
+    total = sum(ex.values())
+    return [ex.get(c, 0.0) / total for c in LETTERS[:n]]
+
+
+def fallback_parse(data, n):
+    """A chat completion -> (option index or None, probabilities or None, result): strict, the content must be
+    exactly {"answer": "<one of the n letters>"}."""
+    try:
+        choice = data["choices"][0]
+        content = choice["message"]["content"]
+        ans = json.loads(content)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None, None, "unparseable"
+    if not isinstance(ans, dict) or set(ans) != {"answer"} or not isinstance(ans["answer"], str):
+        return None, None, "unparseable"
+    if len(ans["answer"]) != 1 or ans["answer"] not in LETTERS[:n]:
+        return None, None, "not_an_option"
+    entries = ((choice.get("logprobs") or {}).get("content") or []) if isinstance(choice, dict) else []
+    return LETTERS.index(ans["answer"]), _letter_probs(entries, ans["answer"], n) if entries else None, "answered"
+
+
 def _h(text):
     return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
 
@@ -164,9 +282,10 @@ class Ring:
 
 class Router:
     def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None,
-                 levels=None, blend=None, blend_weight=1.0):
+                 levels=None, blend=None, blend_weight=1.0, fallback=None):
         """escalate, below: one cascade level; levels: [(URLs, threshold), ...] for levels 2, 3, ... instead;
-        blend: [(URLs, weight), ...] asked beside the replicas (weight blend_weight)."""
+        blend: [(URLs, weight), ...] asked beside the replicas (weight blend_weight); fallback: {url, model, below,
+        timeout, extra} of the LLM after the last level."""
         import httpx
         levels = [(list(u), b) for u, b in (levels if levels is not None else [(escalate, below)]) if u]
         self.levels = [(f"level:{k}", b) for k, (_, b) in enumerate(levels, start=2)]  # (level k's pool, k - 1's threshold)
@@ -174,6 +293,8 @@ class Router:
         self.blends = [(f"blend:{k}", w) for k, (_, w) in enumerate(blend, start=2)]
         self.blend_weight = blend_weight
         self.blended = {}
+        self.fallback = fallback
+        self.fallback_counts = {k: 0 for k in FALLBACK_RESULTS}
         self.pools = {"main": list(replicas), **{f"level:{k}": u for k, (u, _) in enumerate(levels, start=2)},
                       **{f"blend:{k}": u for k, (u, _) in enumerate(blend, start=2)},
                       **{f"script:{k}": list(v) for k, v in (routes or {}).items()}}
@@ -227,11 +348,85 @@ class Router:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
                 pool = f"script:{sc}" if f"script:{sc}" in self.rings else pool
         status, content, ctype = await self._send(pool, path, body, headers)
+        level = {}
         if self.levels and status == 200:
-            content = await self._cascade(path, body, content, headers)
+            content = await self._cascade(path, body, content, headers, level)
         if self.blends and status == 200:
             content = await self._blend(path, body, content, headers)
+        if self.fallback and status == 200:
+            content = await self._fallback(body, content, level if self.levels else None)
         return status, content, ctype
+
+    async def _fallback(self, body, content, level=None):
+        """The answers of the last level (level: the cascade's level of each question; None: one model) whose top
+        probability is under --fallback-below asked of the LLM, concurrently; its answer replaces the basal one."""
+        try:
+            req, resp = json.loads(body), json.loads(content)
+            answers = resp["answers"]
+            qs = req.get("questions") or {}
+            if req.get("media"):
+                return content
+            go = []
+            for q, a in answers.items():
+                opts = fallback_options(qs.get(q), a) if q in qs else None
+                if opts and (level is None or level.get(q) == len(self.levels) + 1) \
+                        and top_probability(a) < self.fallback["below"]:
+                    go.append((q, a, opts))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return content
+        if not go:
+            return content
+        res = await asyncio.gather(*(self._ask_fallback(req.get("state"), qs[q], opts) for q, _, opts in go))
+        answered = []
+        for (q, a, opts), (i, probs, result, model) in zip(go, res):
+            self.fallback_counts[result] += 1
+            if i is None:
+                continue
+            keys = [k for k, _ in opts]
+            p = None if probs is None else dict(zip(keys, probs))
+            answers[q] = {"type": "choice", "choice": keys[i], "probabilities": p,
+                          "confidence": None if p is None else max(p.values()), "answered_by": "fallback",
+                          "model": model, "calibrated": False,
+                          "basal": {"choice": a.get("choice"), "confidence": top_probability(a),
+                                    "model": a.get("model", resp.get("model"))}}
+            answered.append(q)
+        resp["fallback"] = {"below": self.fallback["below"], "asked": [q for q, _, _ in go], "answered": answered}
+        return json.dumps(resp, ensure_ascii=False).encode()
+
+    async def _ask_fallback(self, state, question, options):
+        """-> (option index or None, probabilities or None, result, model) of one fallback call."""
+        import httpx
+        f = self.fallback
+        body = fallback_request(f["model"], fallback_messages(state, question, options), len(options), f.get("extra"),
+                                f.get("max_tokens", 8192))
+        headers = {"content-type": "application/json"}
+        if os.environ.get("BASAL_FALLBACK_API_KEY"):
+            headers["authorization"] = "Bearer " + os.environ["BASAL_FALLBACK_API_KEY"]
+        deadline = time.monotonic() + f.get("timeout", 60.0)  # (both attempts together)
+        for attempt in (0, 1):
+            left = deadline - time.monotonic()
+            try:
+                r = await asyncio.wait_for(self.client.post(
+                    f["url"].rstrip("/") + "/chat/completions", content=json.dumps(body).encode(), headers=headers,
+                    timeout=left), left)
+                break
+            except (httpx.TimeoutException, asyncio.TimeoutError):
+                return None, None, "timeout", None
+            except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError):
+                # once more, in the time left (at least RETRY_MIN_S): a pooled connection the endpoint closed as it
+                # was reused, at its keep-alive
+                if attempt or deadline - time.monotonic() < RETRY_MIN_S:
+                    return None, None, "error", None
+            except Exception:  # noqa: BLE001  (down, refused)
+                return None, None, "error", None
+        if r.status_code != 200:
+            return None, None, "error", None
+        try:
+            data = r.json()
+        except ValueError:
+            return None, None, "unparseable", None
+        i, probs, result = fallback_parse(data, len(options))
+        return i, probs, result, (data.get("model") if isinstance(data, dict) else None) or f["model"]
 
     async def _blend(self, path, body, content, headers):
         """The first replica's answers, the blendable ones mixed with the --blend pools' (asked at once, concurrently)."""
@@ -268,7 +463,7 @@ class Router:
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _cascade(self, path, body, content, headers):
+    async def _cascade(self, path, body, content, headers, level_out=None):
         """The answers of the first replica (level 1), with those under level k's threshold asked again of level k + 1,
         level by level. A level that is down or does not answer 200 leaves the previous answers (and ends the chain).
         With one level the response is as before; with more, every answer also gives its level and model."""
@@ -278,7 +473,7 @@ class Router:
         except (ValueError, KeyError, TypeError):
             return content
         named = len(self.levels) > 1
-        level = {}
+        level = {} if level_out is None else level_out
         for q, a in answers.items():
             if isinstance(a, dict):
                 a["answered_by"] = "first"
@@ -345,6 +540,9 @@ class Router:
                  [({"answered_by": k}, n) for k, n in self.answered.items()])] if self.levels else [])
             + ([("basal_router_level_answers_total", "answers by cascade level (1: the first replica)", "counter",
                  [({"level": str(k)}, n) for k, n in self.by_level.items()])] if len(self.levels) > 1 else [])
+            + ([("basal_router_fallback_total", "questions sent to the --fallback LLM, by result (answered: its answer "
+                 "replaced the basal one)", "counter", [({"result": k}, n) for k, n in self.fallback_counts.items()])]
+               if self.fallback else [])
             + ([("basal_router_blend_answers_total", "answers blended (--blend), by the number of models in the blend",
                  "counter", [({"models": str(k)}, n) for k, n in sorted(self.blended.items())])] if self.blends else [])
             + ([("basal_router_script_total", "requests by the script of their state (--route)", "counter",
@@ -507,6 +705,35 @@ def blends(blend, weights, cascade):
     return weights[0], [(list(u), w) for u, w in zip(blend, weights[1:])]
 
 
+def fallback_config(a, blend):
+    """--fallback URL --fallback-model NAME [--fallback-below T --fallback-timeout S --fallback-max-tokens N
+    --fallback-extra JSON] -> the Router's fallback dict; None without --fallback."""
+    given = [f for f in ("fallback_model", "fallback_below", "fallback_timeout", "fallback_max_tokens", "fallback_extra")
+             if getattr(a, f) is not None]
+    if not a.fallback:
+        if given:
+            raise SystemExit("basal-router: --fallback-model / -below / -timeout / -max-tokens / -extra need --fallback URL")
+        return None
+    if blend:
+        raise SystemExit("basal-router: --fallback and --blend do not go together")
+    if not a.fallback_model:
+        raise SystemExit("basal-router: --fallback needs --fallback-model NAME (the model the endpoint serves)")
+    below = 0.5 if a.fallback_below is None else a.fallback_below
+    timeout = 60.0 if a.fallback_timeout is None else a.fallback_timeout
+    max_tokens = 8192 if a.fallback_max_tokens is None else a.fallback_max_tokens
+    if not 0 < below <= 1 or not timeout > 0 or max_tokens < 1:
+        raise SystemExit("basal-router: --fallback-below must be in (0, 1], --fallback-timeout > 0, "
+                         "--fallback-max-tokens >= 1")
+    try:
+        extra = json.loads(a.fallback_extra) if a.fallback_extra else {}
+    except ValueError:
+        extra = None
+    if not isinstance(extra, dict):
+        raise SystemExit("basal-router: --fallback-extra must be a JSON object")
+    return {"url": a.fallback, "model": a.fallback_model, "below": below, "timeout": timeout, "max_tokens": max_tokens,
+            "extra": extra}
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     serve_args = argv[argv.index("--") + 1:] if "--" in argv else []
@@ -528,9 +755,23 @@ def main(argv=None):
                     help="replicas of one more model whose probabilities are blended in; repeat for each model")
     ap.add_argument("--blend-weights", dest="blend_weights", nargs="+", type=float, default=None,
                     help="--blend: the weight of --replicas, then of each --blend, in order")
+    ap.add_argument("--fallback", default=None, help="base URL of an OpenAI-compatible chat endpoint (an LLM) for "
+                    "questions still unsure after the last level, e.g. http://127.0.0.1:8100/v1")
+    ap.add_argument("--fallback-model", dest="fallback_model", default=None, help="--fallback: the model it serves")
+    ap.add_argument("--fallback-below", dest="fallback_below", type=float, default=None,
+                    help="--fallback: questions whose top probability is under this go (default 0.5)")
+    ap.add_argument("--fallback-timeout", dest="fallback_timeout", type=float, default=None,
+                    help="--fallback: seconds per call (default 60); then the basal answer stays")
+    ap.add_argument("--fallback-max-tokens", dest="fallback_max_tokens", type=int, default=None,
+                    help="--fallback: the token budget of a call, thinking included (default 8192; the endpoint's "
+                         "context must hold the prompt plus this)")
+    ap.add_argument("--fallback-extra", dest="fallback_extra", default=None,
+                    help='--fallback: JSON merged into the chat request, e.g. a thinking switch: '
+                         '\'{"chat_template_kwargs": {"enable_thinking": true}}\'')
     a = ap.parse_args(argv)
     cascade = levels(a.escalate, a.escalate_below)
     first, blend = blends(a.blend, a.blend_weights, cascade)
+    fallback = fallback_config(a, blend)
     procs, urls = ([], list(a.replicas))
     if a.gpus:
         procs, more = spawn(a.gpus.split(","), a.replica_port, serve_args)
@@ -547,7 +788,8 @@ def main(argv=None):
         if k not in SCRIPTS + ("other",) or not v:
             raise SystemExit(f"basal-router: --route {x!r}: SCRIPT=URL[,URL], SCRIPT one of {', '.join(SCRIPTS)}, other")
         routes[k] = v.split(",")
-    router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes, blend=blend, blend_weight=first)
+    router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes, blend=blend, blend_weight=first,
+                    fallback=fallback)
 
     def ended(sig, _frame):
         """SIGTERM / SIGINT / SIGHUP outside uvicorn, or re-raised by it after its shutdown: the replicas end first."""
