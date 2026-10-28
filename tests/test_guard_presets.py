@@ -1,11 +1,12 @@
 """guard_input / guard_output / route_intent presets and their decision steps (basal/presets.py), no model."""
+import asyncio
 import json
 
 import httpx
 import pytest
 
 from basal import presets
-from basal.client import Basal
+from basal.client import AsyncBasal, Basal
 
 
 def noul(p, abstain=None):
@@ -98,3 +99,20 @@ def test_client_guard_asks_the_battery_with_max_error():
     r = b.guard("Hello there", "output", "permissive", "en", max_error=0.05)
     assert r["action"] == "pass" and set(r["answers"]) == {"policy_break", "harmful", "medical", "self_harm", "severity"}
     assert seen[0]["questions"]["harmful"]["max_error"] == 0.05
+
+
+def test_async_client_presets_send_and_return_what_basal_does():
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        return httpx.Response(200, json={"answers": {k: noul(0.0, False) if v["type"] == "noul" else sev(0, False)
+                                                     for k, v in body["questions"].items()}})
+
+    async def go():
+        async with AsyncBasal("http://basal", transport=httpx.MockTransport(handler)) as b:
+            return await b.guard("Hello there", "output", "permissive", "en", max_error=0.05)
+    seen = []
+    want = Basal("http://basal", transport=httpx.MockTransport(handler)).guard("Hello there", "output", "permissive",
+                                                                              "en", max_error=0.05)
+    got = asyncio.run(go())
+    assert got == want and seen[0] == seen[1]

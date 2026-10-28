@@ -135,6 +135,26 @@ print(round(a["score"], 2), a["probabilities"])          # expected level 0-3 an
 print(b.yes_no(state, "Czy problem dotyczy płatności kartą?")["noul"])   # P(yes)
 ```
 
+Every question and task type has a method (`choice`, `yes_no`, `score`, `multi`, `act`, `tool`, `classify`, `verify`,
+`compress`, `extract`); `decide` asks several questions over one state in one request, and `AsyncBasal` has the same
+methods for asyncio:
+
+```python
+import asyncio
+from basal.client import AsyncBasal, choice, yes_no
+
+async def main():
+    async with AsyncBasal("http://127.0.0.1:8000", retries=2) as b:   # retries: a 503 (GPU out of memory) only
+        a = await b.decide(state, {"dept": choice("Który dział?", {"it": "IT", "kasy": "Obsługa kas"}),
+                                   "card": yes_no("Czy problem dotyczy płatności kartą?")})
+        print(a["dept"]["choice"], a["card"]["noul"])
+
+asyncio.run(main())
+```
+
+Errors are `InvalidRequest` (422), `OutOfMemory` (503) and `ServerError` (500), all `BasalError` with `.status` (a
+`RuntimeError`, as before). `http=` takes your own `httpx.Client` / `httpx.AsyncClient` (headers, proxies, transport).
+
 ### FP8 checkpoints (basal engine)
 
 The `-FP8` repositories are NVIDIA ModelOpt FP8 checkpoints that the basal engine loads natively (the same install as

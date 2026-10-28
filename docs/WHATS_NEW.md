@@ -1,5 +1,12 @@
 # What is new in basal 2.5
 
+- **A Python client for every question type** (`basal.client`): methods for `multi`, `act`, `tool`, `classify`,
+  `verify`, `compress` and `extract` next to `choice`, `yes_no` and `score`; `decide` with question builders for several
+  questions in one request; `AsyncBasal` for asyncio; the server's status codes as `InvalidRequest` (422),
+  `OutOfMemory` (503, retried with `retries=`) and `ServerError` (500), all still a `RuntimeError`; `models()`,
+  `health()` and your own httpx client (`http=`). Existing calls are unchanged.
+  [INSTALL.md](INSTALL.md#nvidia-gpu-the-basal-engine-recommended). Contributed by Dariusz Koryto (@dkoryto),
+  [#58](https://github.com/rkinas/basal/pull/58).
 - **MCP model selection:** servers configured with a model list expose `list_models` and optional `model` arguments on
   `decide` and `decide_many`; `basal-mcp --model NAME` forwards that model on each request.
   Contributed by Paweł Kiszczak (@pawelkiszczak), [#66](https://github.com/rkinas/basal/pull/66).
