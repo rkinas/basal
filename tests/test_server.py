@@ -263,6 +263,22 @@ def test_model_list_conforms_to_official_schema():
     assert models_payload("basal-1.5-4.5B", "mlx", {})["models"][0]["temperature_per_prim"] == {}
 
 
+def test_certified_model_metadata():
+    cal = {"thresholds": {
+        "0.01": {"per_type": {"choice": {"confidence": 0.99}, "noul": {"confidence": None},
+                              "score": {"confidence": 0.95}, "act": {"confidence": 0.9}}},
+        "0.05": {"per_type": {"choice": {"confidence": 0.9}, "noul": {"confidence": 0.8}}},
+    }}
+    assert server_module.certified_table(cal) == {"0.01": {"choice": 0.99, "score": 0.95},
+                                                   "0.05": {"choice": 0.9, "noul": 0.8}}
+    assert server_module.certified_table({}) == {}
+    entry = models_payload("m", "fast", {}, certified=server_module.certified_table(cal),
+                           context={"limit": 8192, "overflow": "refuse", "truncate_head": 1 / 3})["models"][0]
+    assert entry["certified"] == server_module.certified_table(cal)
+    assert entry["context"]["limit"] == 8192
+    assert "certified" not in models_payload("m", "fast", {}, certified=None)["models"][0]
+
+
 def swapped_prompts_differ(crit_a, crit_b, t="choice"):
     q = lambda c: to_items("Customer selected shipping service B.", {"q": {"type": t, "instructions": "Which code?",
                                                                             "criteria": c}})[0]["options"]

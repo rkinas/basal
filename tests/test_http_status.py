@@ -36,7 +36,10 @@ class AppServer(FakeServer):
     def __init__(self, engine):
         super().__init__([0.5, 0.5])
         self.backend, self.max_batch, self.wait, self.long_tokens = engine, 8, 0.0, None
+        self.context, self.overflow, self.trunc_head = (8192, "model context"), "refuse", 1 / 3
+        self.cal, self.cal_mismatch, self.temps, self.fmt, self.orders = {}, None, {}, 1, 2
         self.queue = asyncio.Queue()
+
 
 
 async def on_app(srv, fn):
@@ -54,6 +57,22 @@ def post(srv, body=None, content=None):
         return await (c.post("/v1/systemone", content=content) if content is not None
                       else c.post("/v1/systemone", json=body))
     return asyncio.run(on_app(srv, go))
+
+
+def test_models_endpoint_reports_context_and_hides_mismatched_certification():
+    srv = AppServer(Engine())
+    srv.cal = {"thresholds": {"0.05": {"per_type": {"choice": {"confidence": 0.9}}}}}
+
+    async def go(c):
+        return await c.get("/v1/models")
+
+    response = asyncio.run(on_app(srv, go))
+    entry = response.json()["models"][0]
+    assert entry["certified"] == {"0.05": {"choice": 0.9}}
+    assert entry["context"] == {"limit": 8192, "overflow": "refuse", "truncate_head": 1 / 3}
+    srv.cal_mismatch = "wrong model"
+    response = asyncio.run(on_app(srv, go))
+    assert "certified" not in response.json()["models"][0]
 
 
 @pytest.mark.parametrize("body,content,message", [

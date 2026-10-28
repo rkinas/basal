@@ -1,5 +1,8 @@
 # What is new in basal 2.5
 
+- **`GET /v1/models` reports certified thresholds and context.** Calibration thresholds are listed per question type when
+  the calibration matches the served model; context metadata includes its limit, overflow policy and truncation head share.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#64](https://github.com/rkinas/basal/pull/64).
 - **Serving errors:** invalid `max_error` and set bounds are rejected before inference; error responses include a `code`
   (`INVALID_REQUEST`, `OUT_OF_MEMORY` or `INTERNAL_ERROR`) and 422 responses include `detail`.
   Contributed by Paweł Kiszczak (@pawelkiszczak), [#62](https://github.com/rkinas/basal/pull/62).
