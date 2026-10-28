@@ -505,6 +505,13 @@ def test_max_len_flag_for_vllm_and_sglang():
     assert parser().parse_args(["--mode", "sglang", "--max-len", "32768"]).max_len == 32768
 
 
+def test_api_key_and_cors_flags():
+    defaults = parser().parse_args([])
+    assert defaults.api_keys is None and defaults.cors_origins == ""
+    args = parser().parse_args(["--api-keys", "keys.json", "--cors-origins", "https://a.example,https://b.example"])
+    assert args.api_keys == "keys.json" and args.cors_origins == "https://a.example,https://b.example"
+
+
 def test_viz_segments_rebuild_the_prompt():
     from basal.prompt import render
     from basal.viz import segments

@@ -333,6 +333,33 @@ API. basal-router's own metrics are per replica: readiness, requests in flight, 
 failures; with `--escalate`, answers by the first replica and escalated (with several levels also per level); with
 `--blend`, blended answers by the number of models; with `--route`, requests by script.
 
+## API access
+
+`basal-serve` is open by default. To require API keys, pass `--api-keys PATH` with a JSON file containing SHA-256
+digests (never plaintext secrets):
+
+```json
+{"keys": [{"name": "laptop", "sha256": "<64-character lowercase SHA-256 hex digest>", "admin": false}]}
+```
+
+Send the secret as `Authorization: Bearer <secret>` or `X-API-Key: <secret>`. `GET /health` remains open.
+`GET /v1/keys` requires an admin key and reports each key's in-memory `last_used` time. File changes take effect
+without restarting the server. MCP at `/mcp` uses the same authentication.
+
+`--cors-origins` accepts a comma-separated list of browser origins, for example
+`--cors-origins https://app.example,https://admin.example`. CORS is disabled by default; use `*` to allow all origins.
+Allowed preflight methods are GET, POST and OPTIONS.
+Preflight requests may include `X-Request-Id`; the response echoes it as `x-request-id`.
+
+```bash
+basal-serve --model Remek/basal-2.0-mini --api-keys ./api-keys.json --cors-origins https://app.example
+```
+
+Without `--api-keys` there is no authentication and `GET /v1/keys` is not served: bind `--host 127.0.0.1` or put a
+gateway in front. Known limit: basal-router does not forward API keys yet, so a replica started with `--api-keys`
+answers the router's requests with 401. Check the keys in front of the router, or run the replicas without
+`--api-keys` on a private network; forwarding comes in 2.5.1.
+
 ## Inference on a JSONL file
 
 `basal-run` sends every line of a JSONL file to a running server (concurrently; the server batches the requests) and

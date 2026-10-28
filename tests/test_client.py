@@ -244,3 +244,11 @@ def test_errors_raise_with_the_body():
         lambda r: httpx.Response(422, json={"error": {"message": "bad", "type": "validation_error"}})))
     with pytest.raises(RuntimeError, match="validation_error"):
         b.yes_no("x", "Urgent?")
+
+
+def test_api_key_sets_bearer_header():
+    client = Basal(api_key="secret")
+    try:
+        assert client.http.headers["authorization"] == "Bearer secret"
+    finally:
+        client.http.close()

@@ -2175,6 +2175,9 @@ def parser():
                     help="refuse to start when the --calibration file was fitted on another model or revision "
                          "(default: a warning)")
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
+    ap.add_argument("--api-keys", default=None, metavar="PATH",
+                    help="JSON API key file; when set, require a key for every endpoint except GET /health")
+    ap.add_argument("--cors-origins", default="", help="comma-separated browser origins allowed by CORS")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--error-format", dest="error_format", choices=["basal", "openai"], default="basal",
@@ -2182,8 +2185,8 @@ def parser():
                          "\"code\"}} (openai, as OpenAI-style servers answer); the status codes are the same")
     ap.add_argument("--mcp", choices=["off", "on"], default="off",
                     help="also serve MCP (streamable HTTP) at /mcp for agents: tools decide and decide_many over the "
-                         "same queue (needs basal[mcp]; no authentication, like the HTTP API: bind --host 127.0.0.1 "
-                         "for agents on this machine)")
+                         "same queue (needs basal[mcp]; without --api-keys no authentication, like the HTTP API: bind "
+                         "--host 127.0.0.1 for agents on this machine; with --api-keys /mcp needs a key too)")
     from .think import add_think_args  # --think off|auto (experimental; off = this server unchanged)
     add_think_args(ap)
     return ap
@@ -2435,7 +2438,9 @@ def main():
         from .mcp_server import http
         mcp = http(srv, a.host)
         print(f"basal: MCP (streamable HTTP) at http://{a.host}:{a.port}/mcp", flush=True)
-    app = http_app(srv, a.mode, mcp, a.error_format)
+    from .auth import ApiKeys, protect, request_ids
+    origins = [origin.strip() for origin in a.cors_origins.split(",") if origin.strip()]
+    app = request_ids(protect(http_app(srv, a.mode, mcp, a.error_format), ApiKeys(a.api_keys) if a.api_keys else None, origins))
     try:  # uvloop + httptools when available (uvicorn[standard]); plain asyncio otherwise
         import httptools  # noqa: F401
         import uvloop  # noqa: F401

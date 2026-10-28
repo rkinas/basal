@@ -203,7 +203,7 @@ def test_bridge_model_option_names_the_model_in_every_request():
 def test_bridge_model_flag_configures_remote(monkeypatch):
     captured = {}
 
-    def remote(url, timeout, model):
+    def remote(url, timeout, model, api_key=None):
         captured["remote"] = (url, timeout, model)
 
     class Bridge:
@@ -216,6 +216,49 @@ def test_bridge_model_flag_configures_remote(monkeypatch):
     monkeypatch.setattr(mcp_server, "build", lambda decide, model: Bridge())
     mcp_server.main()
     assert captured == {"remote": ("http://127.0.0.1:8000", 60.0, "Remek/m"), "transport": "stdio"}
+
+
+def test_bridge_sends_api_key_with_mock_transport():
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"model": "m", "answers": {}})
+
+    decide = mcp_server.remote("http://basal:8000/", transport=httpx.MockTransport(handler), api_key="secret")
+    assert asyncio.run(decide({"state": "s", "questions": {}})) == {"model": "m", "answers": {}}
+    assert seen == ["Bearer secret"]
+
+
+def test_bridge_cli_api_key_uses_bearer_header(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"model": "m", "answers": {}})
+
+    original_remote = mcp_server.remote
+
+    def remote(url, timeout, model=None, api_key=None):
+        return original_remote(url, timeout, transport=httpx.MockTransport(handler), model=model, api_key=api_key)
+
+    class Runner:
+        def __init__(self, decide):
+            self.decide = decide
+
+        def run(self, transport):
+            assert transport == "stdio"
+            assert asyncio.run(self.decide({"state": "s", "questions": {}})) == {"model": "m", "answers": {}}
+
+    monkeypatch.setattr(sys, "argv", ["basal-mcp", "--api-key", "secret"])
+    monkeypatch.setattr(mcp_server, "remote", remote)
+    def model_name(url, api_key=None):
+        assert api_key == "secret"
+        return "m"
+    monkeypatch.setattr(mcp_server, "model_name", model_name)
+    monkeypatch.setattr(mcp_server, "build", lambda decide, model: Runner(decide))
+    mcp_server.main()
+    assert seen == ["Bearer secret"]
 
 
 def test_mcp_without_the_package_fails_before_model_loading(monkeypatch):

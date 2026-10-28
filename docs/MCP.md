@@ -41,5 +41,7 @@ path of `basal-mcp` in your environment):
 {"mcpServers": {"basal": {"command": "/home/me/basal-env/bin/basal-mcp", "args": ["--url", "http://127.0.0.1:8000"]}}}
 ```
 
-The MCP endpoint has no authentication, like the HTTP API. Bind `--host 127.0.0.1` for agents on the same machine
-(the Host and Origin headers are then checked against DNS rebinding), or put the server behind your own gateway.
+The HTTP and MCP endpoints are open by default. To protect them with `basal-serve --api-keys PATH`, pass the same key
+to the stdio bridge as `basal-mcp --api-key KEY`; `GET /health` remains open. Bind `--host 127.0.0.1` for agents on the
+same machine (the Host and Origin headers are then checked against DNS rebinding), or use the key file for remote
+access.

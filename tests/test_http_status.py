@@ -2,12 +2,15 @@
 server error 500, all with {"error": ...}; GET /health counts the requests in flight as running and queued. Through
 the app of basal-serve (http_app) with its batching worker and a stub engine."""
 import asyncio
+import hashlib
+import json
 import threading
 
 import httpx
 import pytest
 import torch
 
+from basal.auth import ApiKeys, protect, request_ids
 from basal.prompt import RequestError
 from basal.server import http_app, http_status, out_of_memory
 from tests.test_server import FakeServer
@@ -41,22 +44,22 @@ class AppServer(FakeServer):
         self.queue = asyncio.Queue()
 
 
-
-async def on_app(srv, fn):
+async def on_app(srv, fn, decorate=None):
     worker = asyncio.get_running_loop().create_task(srv.worker())
     try:
-        transport = httpx.ASGITransport(app=http_app(srv, "fast"))
+        app = http_app(srv, "fast")
+        transport = httpx.ASGITransport(app=decorate(app) if decorate else app)
         async with httpx.AsyncClient(transport=transport, base_url="http://basal") as c:
             return await fn(c)
     finally:
         worker.cancel()
 
 
-def post(srv, body=None, content=None):
+def post(srv, body=None, content=None, decorate=None):
     async def go(c):
         return await (c.post("/v1/systemone", content=content) if content is not None
                       else c.post("/v1/systemone", json=body))
-    return asyncio.run(on_app(srv, go))
+    return asyncio.run(on_app(srv, go, decorate))
 
 
 def test_models_endpoint_reports_context_and_hides_mismatched_certification():
@@ -121,6 +124,59 @@ def test_a_valid_request_answers_200_without_error_fields():
     r = post(AppServer(Engine()), BODY)
     assert r.status_code == 200 and r.json()["answers"]["q"]["choice"] in ("a", "b")
     assert "error" not in r.json() and "code" not in r.json()
+
+
+def test_request_ids_preserve_unprotected_response_bytes():
+    async def endpoint(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+    async def go():
+        app = request_ids(protect(endpoint, None))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://basal") as c:
+            return await c.get("/")
+
+    decorated = asyncio.run(go())
+    assert decorated.content == b'{"ok":true}'
+    assert decorated.headers["x-request-id"].startswith("req_")
+    supplied = asyncio.run(on_app(AppServer(Engine()), lambda c: c.get("/health", headers={"X-Request-Id": "trace-1"}),
+                                  decorate=lambda app: request_ids(protect(app, None))))
+    assert supplied.headers["x-request-id"] == "trace-1"
+
+
+def test_api_keys_protect_api_but_not_health(tmp_path):
+    secret = "key-123"
+    path = tmp_path / "keys.json"
+    path.write_text(json.dumps({"keys": [{"name": "test", "sha256": hashlib.sha256(secret.encode()).hexdigest()}]}))
+    decorate = lambda app: request_ids(protect(app, ApiKeys(path)))
+
+    async def go(c):
+        return (await c.post("/v1/systemone", json=BODY),
+                await c.post("/v1/systemone", json=BODY, headers={"Authorization": f"Bearer {secret}"}),
+                await c.post("/v1/systemone", json=BODY, headers={"X-API-Key": secret}),
+                await c.get("/health"))
+
+    unauth, bearer, api_key, health = asyncio.run(on_app(AppServer(Engine()), go, decorate))
+    assert unauth.status_code == 401
+    assert unauth.json() == {"error": "missing or invalid API key", "code": "UNAUTHORIZED"}
+    assert bearer.status_code == api_key.status_code == 200
+    assert health.status_code == 200
+    assert all("x-request-id" in response.headers for response in (unauth, bearer, api_key, health))
+
+
+def test_cors_preflight_is_limited_to_configured_origins():
+    decorate = lambda app: request_ids(protect(app, None, ("https://allowed.example",)))
+
+    async def go(c):
+        allowed = await c.options("/v1/systemone", headers={"Origin": "https://allowed.example",
+                                                            "Access-Control-Request-Method": "POST"})
+        denied = await c.options("/v1/systemone", headers={"Origin": "https://other.example",
+                                                           "Access-Control-Request-Method": "POST"})
+        return allowed, denied
+
+    allowed, denied = asyncio.run(on_app(AppServer(Engine()), go, decorate))
+    assert allowed.headers["access-control-allow-origin"] == "https://allowed.example"
+    assert "access-control-allow-origin" not in denied.headers
 
 
 def test_status_of_errors():

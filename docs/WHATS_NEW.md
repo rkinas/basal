@@ -1,5 +1,8 @@
 # What is new in basal 2.5
 
+- **API keys, CORS and request IDs for `basal-serve`:** opt-in `--api-keys` protects HTTP and MCP routes (except
+  `GET /health`), `--cors-origins` enables browser access from listed origins, and responses carry request IDs.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#68](https://github.com/rkinas/basal/pull/68).
 - **A Python client for every question type** (`basal.client`): methods for `multi`, `act`, `tool`, `classify`,
   `verify`, `compress` and `extract` next to `choice`, `yes_no` and `score`; `decide` with question builders for several
   questions in one request; `AsyncBasal` for asyncio; the server's status codes as `InvalidRequest` (422),

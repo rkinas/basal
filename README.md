@@ -389,8 +389,8 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --hos
 claude mcp add --transport http basal http://127.0.0.1:8000/mcp     # Claude Code; other hosts take the same URL
 ```
 
-No authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway in front. Details:
-[docs/MCP.md](docs/MCP.md).
+Use `--api-keys PATH` to protect HTTP and MCP requests (except `GET /health`), or bind to `127.0.0.1`. Details:
+[`docs/SERVING.md`](docs/SERVING.md#api-access) and [`docs/MCP.md`](docs/MCP.md).
 
 For LangChain, LlamaIndex and CrewAI agents, `from basal.adapters import langchain_tool, llamaindex_tool,
 crewai_tool` gives a tool over a running server, with ready question sets (`preset="triage"`, `"moderation"`,
