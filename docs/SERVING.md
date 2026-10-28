@@ -276,6 +276,29 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   basal-router --replicas http://127.0.0.1:8003 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8001 \
       --blend-weights 0.6 0.2 0.2 --port 8000          # ultra first, then mini and pico
   ```
+- `--fallback URL --fallback-model NAME --fallback-below T` (opt-in): after the last level (or the single model), a
+  plain choice question whose top probability is still under T goes to an LLM behind an OpenAI-compatible chat
+  endpoint (`URL` is its base, such as `http://127.0.0.1:8100/v1` for vLLM). The router writes the prompt from the
+  request's document, question and options (lettered A, B, ...) and asks for JSON that only admits those letters
+  (`response_format` with a JSON schema; greedy, with logprobs). The answer replaces the basal one and says
+  `"answered_by": "fallback"`, the `"model"`, `"calibrated": false`, the option probabilities from the endpoint's
+  logprobs renormalised over the options (`null` when it returns none) and the basal answer it replaced
+  (`"basal": {choice, confidence, model}`); the response lists `"fallback": {below, asked, answered}`.
+  - The basal answer stays when the endpoint is down, answers an error, takes longer than `--fallback-timeout`
+    (default 60 s), or returns anything but exactly `{"answer": "<one of the letters>"}`; the request does not fail.
+    `/metrics` counts the calls by result (`basal_router_fallback_total`).
+  - Never sent: multi, act, tool and task questions, noul and score, questions with `coverage`, `max_error` or
+    `evidence`, and requests with media.
+  - `--fallback-extra JSON` is merged into the chat request, for example a model's thinking switch and room for it:
+    `'{"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": true}}'`. `BASAL_FALLBACK_API_KEY`, if set, is
+    sent as a bearer token.
+  - The LLM's answers are not calibrated: no basal threshold or certificate holds for them.
+
+  ```
+  vllm serve google/gemma-4-31B-it --port 8100 --reasoning-parser gemma4     # for example
+  basal-router --replicas http://127.0.0.1:8001 --fallback http://127.0.0.1:8100/v1 \
+      --fallback-model google/gemma-4-31B-it --fallback-below 0.6 --port 8000
+  ```
 - `--route SCRIPT=URL[,URL]`: requests whose state is mostly in that script (latin, cyrillic, greek, arabic, hebrew,
   cjk, other) go to those replicas, for example a model trained for Ukrainian; the rest go to `--replicas`
   (`basal_router_script_total`).
@@ -331,7 +354,8 @@ state cache is read without waiting for its lock; while the engine holds it, the
 left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP
 API. basal-router's own metrics are per replica: readiness, requests in flight, requests routed by state and by load,
 failures; with `--escalate`, answers by the first replica and escalated (with several levels also per level); with
-`--blend`, blended answers by the number of models; with `--route`, requests by script.
+`--blend`, blended answers by the number of models; with `--fallback`, LLM calls by result; with `--route`,
+requests by script.
 
 ## Inference on a JSONL file
 

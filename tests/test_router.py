@@ -2,6 +2,7 @@
 answers during start-up."""
 import asyncio
 import json
+import math
 import multiprocessing
 import os
 import signal
@@ -631,3 +632,196 @@ def test_blend_from_the_command_line(monkeypatch):
                 ["--blend", MID, "--blend-weights", "1", "1", "--escalate", BIG]):
         with pytest.raises(SystemExit, match="basal-router: "):
             R.main(base + bad)
+
+
+# LLM fallback (2.5): --fallback URL --fallback-model NAME --fallback-below T after the last level
+LLM = "http://llm/v1"
+
+
+def llm_reply(letter="B", alts=None, split=False, content=None, model="llm-x"):
+    """A chat completion choosing letter; alts {letter: logprob} for its top logprobs (None: no logprobs); split: the
+    letter inside a '"B' token."""
+    body = {"model": model, "choices": [{"index": 0, "finish_reason": "stop",
+                                         "message": {"role": "assistant",
+                                                     "content": content or json.dumps({"answer": letter})}}]}
+    if alts is not None:
+        lead = ['{"', 'answer', '":', ' "'] if not split else ['{"', 'answer', '":', ' ']
+        mid = letter if not split else '"' + letter
+        toks = [{"token": t, "logprob": -0.01, "top_logprobs": []} for t in lead]
+        toks.append({"token": mid, "logprob": alts[letter],
+                     "top_logprobs": [{"token": (mid[:-1] if split else "") + c, "logprob": v} for c, v in alts.items()]
+                     + [{"token": "zz", "logprob": -1.0}]})
+        toks.append({"token": '"}' if not split else '"}', "logprob": -0.01, "top_logprobs": []})
+        body["choices"][0]["logprobs"] = {"content": toks}
+    return body
+
+
+def fallback_transport(conf, asked, llm=None, **kw):
+    """level_transport's replicas plus an LLM endpoint at LLM: llm(request body) -> a chat completion, an int status
+    or an exception; every chat request is kept in asked["llm"]."""
+    base = level_transport(conf, asked, **kw)
+
+    def handler(req):
+        if req.url.host == "llm":
+            body = json.loads(req.content)
+            asked.setdefault("llm", []).append(body)
+            out = (llm or (lambda b: llm_reply()))(body)
+            if isinstance(out, Exception):
+                raise out
+            return httpx.Response(out, json={"error": "x"}) if isinstance(out, int) else httpx.Response(200, json=out)
+        return base.handle_request(req)
+    return httpx.MockTransport(handler)
+
+
+FB = {"url": LLM, "model": "llm-x", "below": 0.6, "timeout": 5.0, "extra": {}}
+OPTS = {"a": "Approve", "b": "Reject", "c": "Escalate"}
+
+
+def _ch(p):  # a choice answer over a, b, c with top probability p on a
+    rest = (1 - p) / 2
+    return {"type": "choice", "choice": "a", "probabilities": {"a": p, "b": rest, "c": rest}, "confidence": p}
+
+
+def _ask(rt, body):
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        r = c.post("/v1/systemone", json=body)
+        return r, c.get("/metrics").text
+
+
+def test_fallback_takes_only_questions_under_its_threshold():
+    asked = {}
+    conf = {SMALL: {"q1": _ch(0.4), "q2": _ch(0.9)}}
+    rt = R.Router([SMALL], transport=fallback_transport(conf, asked, lambda b: llm_reply("B", {"A": -2.0, "B": -0.2,
+                                                                                              "C": -3.0})),
+                  fallback=FB)
+    q = {"type": "choice", "instructions": "What to do?", "criteria": OPTS}
+    r, m = _ask(rt, {"state": "Invoice 17 is overdue.", "questions": {"q1": q, "q2": q}})
+    out = r.json()
+    a = out["answers"]["q1"]
+    p = [math.exp(-2.0), math.exp(-0.2), math.exp(-3.0)]
+    assert a["choice"] == "b" and a["answered_by"] == "fallback" and a["model"] == "llm-x" and a["calibrated"] is False
+    assert a["probabilities"] == pytest.approx({k: v / sum(p) for k, v in zip("abc", p)}, abs=1e-12)
+    assert a["confidence"] == max(a["probabilities"].values())
+    assert a["basal"] == {"choice": "a", "confidence": 0.4, "model": "model-small"}
+    assert out["answers"]["q2"] == conf[SMALL]["q2"]                                # above the threshold: untouched
+    assert out["fallback"] == {"below": 0.6, "asked": ["q1"], "answered": ["q1"]}
+    (req,) = asked["llm"]
+    user = req["messages"][-1]["content"]
+    assert "Invoice 17 is overdue." in user and "What to do?" in user and "A. a: Approve\nB. b: Reject\nC. c: Escalate" in user
+    assert req["model"] == "llm-x" and req["temperature"] == 0 and req["logprobs"] is True
+    assert req["response_format"]["json_schema"]["schema"]["properties"]["answer"]["enum"] == ["A", "B", "C"]
+    assert 'basal_router_fallback_total{result="answered"} 1' in m
+
+
+def test_fallback_options_follow_option_keys_and_the_letter_inside_a_token():
+    asked = {}
+    conf = {SMALL: {"q": _ch(0.4)}}
+    rt = R.Router([SMALL], transport=fallback_transport(
+        conf, asked, lambda b: llm_reply("C", {"A": -4.0, "C": -0.1}, split=True)), fallback=FB)
+    r, _ = _ask(rt, {"state": {"ticket": "down"}, "questions": {"q": {"criteria": OPTS, "option_keys": "hide"}}})
+    a = r.json()["answers"]["q"]
+    assert a["choice"] == "c" and a["probabilities"]["b"] == 0.0                     # B not among the top logprobs
+    assert a["probabilities"]["c"] == pytest.approx(1 / (1 + math.exp(-3.9)))
+    user = asked["llm"][0]["messages"][-1]["content"]
+    assert '{"ticket": "down"}' in user and "A. Approve\nB. Reject\nC. Escalate" in user
+
+
+def test_fallback_without_logprobs_gives_no_probabilities():
+    conf = {SMALL: {"q": _ch(0.4)}}
+    rt = R.Router([SMALL], transport=fallback_transport(conf, {}, lambda b: llm_reply("A")), fallback=FB)
+    a = _ask(rt, {"state": "s", "questions": {"q": {"criteria": OPTS}}})[0].json()["answers"]["q"]
+    assert a["choice"] == "a" and a["probabilities"] is None and a["confidence"] is None
+    assert a["answered_by"] == "fallback"
+
+
+@pytest.mark.parametrize("llm,result", [
+    (lambda b: httpx.ConnectError("refused"), "error"),
+    (lambda b: httpx.ReadTimeout("slow"), "timeout"),
+    (lambda b: 500, "error"),
+    (lambda b: llm_reply(content="B"), "unparseable"),
+    (lambda b: llm_reply(content='{"answer": "B", "why": "x"}'), "unparseable"),
+    (lambda b: llm_reply(content='{"answer": "D"}'), "not_an_option"),
+    (lambda b: llm_reply(content='{"answer": "AB"}'), "not_an_option"),
+    (lambda b: {"choices": []}, "unparseable"),
+])
+def test_fallback_failure_keeps_the_basal_answer(llm, result):
+    conf = {SMALL: {"q": _ch(0.4)}}
+    rt = R.Router([SMALL], transport=fallback_transport(conf, {}, llm), fallback=FB)
+    r, m = _ask(rt, {"state": "s", "questions": {"q": {"criteria": OPTS}}})
+    assert r.status_code == 200
+    out = r.json()
+    assert out["answers"]["q"] == conf[SMALL]["q"] and out["fallback"]["answered"] == []
+    assert f'basal_router_fallback_total{{result="{result}"}} 1' in m
+
+
+def test_fallback_never_takes_multi_tasks_limits_evidence_media_or_other_types():
+    asked = {}
+    low = _ch(0.3)
+    conf = {SMALL: {"m": {"type": "multi", "selected": ["a"], "probabilities": {"a": 0.4, "b": 0.3}},
+                    "t": {"type": "classify", "label": "a", "scores": {"a": 0.4}, "confidence": 0.4},
+                    "k": low, "v": low, "e": low,
+                    "n": {"type": "noul", "noul": 0.45, "probabilities": {"true": 0.45, "false": 0.55}, "confidence": 0.55},
+                    "s": {"type": "score", "score": 0.5, "probabilities": {"0": 0.5, "1": 0.5}, "confidence": 0.5}}}
+    rt = R.Router([SMALL], transport=fallback_transport(conf, asked), fallback=FB)
+    qs = {"m": {"type": "multi", "criteria": OPTS}, "t": {"type": "classify", "labels": ["a"]},
+          "k": {"criteria": OPTS, "max_error": 0.05}, "v": {"criteria": OPTS, "coverage": 0.9},
+          "e": {"criteria": OPTS, "evidence": True}, "n": {"type": "noul"}, "s": {"type": "score", "criteria": ["0", "1"]}}
+    r, _ = _ask(rt, {"state": "s", "questions": qs})
+    assert "llm" not in asked and r.json()["answers"] == conf[SMALL] and "fallback" not in r.json()
+    conf[SMALL]["q"] = low
+    media = [{"type": "image", "data": "x"}]
+    r, _ = _ask(R.Router([SMALL], transport=fallback_transport(conf, asked), fallback=FB),
+                {"state": "s", "questions": {"q": {"criteria": OPTS}}, "media": media})
+    assert r.status_code == 200 and r.json()["answers"]["q"] == low and "llm" not in asked
+    _ask(R.Router([SMALL], transport=fallback_transport(conf, asked), fallback=FB),
+         {"state": "s", "questions": {"q": {"criteria": OPTS}}})                          # without media it goes
+    assert len(asked["llm"]) == 1
+
+
+def test_fallback_after_a_cascade_takes_only_the_last_level():
+    asked = {}
+    conf = {SMALL: {"q1": _ch(0.85), "q2": _ch(0.5)}, MID: {"q2": _ch(0.6)}, BIG: {"q2": _ch(0.7)}}
+    rt = R.Router([SMALL], transport=fallback_transport(conf, asked, lambda b: llm_reply("C")),
+                  levels=[([MID], 0.8), ([BIG], 0.9)], fallback=dict(FB, below=0.9))
+    out = _ask(rt, {"state": "s", "questions": {"q1": {"criteria": OPTS}, "q2": {"criteria": OPTS}}})[0].json()
+    assert out["answers"]["q1"]["level"] == 1 and out["answers"]["q1"]["choice"] == "a"   # 0.85 < 0.9 but level 1
+    assert out["answers"]["q2"]["answered_by"] == "fallback" and out["answers"]["q2"]["basal"]["model"] == "model-big"
+    assert len(asked["llm"]) == 1 and out["fallback"]["asked"] == ["q2"]
+
+
+def test_fallback_with_nothing_to_ask_answers_as_without_it():
+    conf = {SMALL: {"q": _ch(0.9)}}
+    body = {"state": "s", "questions": {"q": {"criteria": OPTS}}}
+    a = _ask(R.Router([SMALL], transport=fallback_transport(conf, {})), body)[0].content
+    b = _ask(R.Router([SMALL], transport=fallback_transport(conf, {}), fallback=FB), body)[0].content
+    assert a == b
+
+
+def test_fallback_from_the_command_line(monkeypatch):
+    got = []
+    monkeypatch.setattr(R, "Router", lambda urls, **kw: got.append(kw["fallback"]) or type("F", (), {"dead": False})())
+    monkeypatch.setattr(R, "app", lambda *a, **k: None)
+    monkeypatch.setattr(R.signal, "signal", lambda *a: None)
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    base = ["--replicas", SMALL]
+    R.main(base)
+    R.main(base + ["--fallback", LLM, "--fallback-model", "m"])
+    R.main(base + ["--fallback", LLM, "--fallback-model", "m", "--fallback-below", "0.7", "--fallback-timeout", "20",
+                   "--fallback-extra", '{"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": true}}'])
+    assert got == [None, {"url": LLM, "model": "m", "below": 0.5, "timeout": 60.0, "extra": {}},
+                   {"url": LLM, "model": "m", "below": 0.7, "timeout": 20.0,
+                    "extra": {"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": True}}}]
+    for bad in (["--fallback", LLM], ["--fallback-model", "m"], ["--fallback", LLM, "--fallback-model", "m",
+                "--fallback-extra", "[1]"], ["--fallback", LLM, "--fallback-model", "m", "--fallback-below", "0"],
+                ["--fallback", LLM, "--fallback-model", "m", "--blend", MID, "--blend-weights", "1", "1"]):
+        with pytest.raises(SystemExit, match="basal-router: "):
+            R.main(base + bad)
+
+
+def test_fallback_request_merges_extra():
+    msgs = R.fallback_messages("doc", {"instructions": "Q?"}, [("a", "x"), ("b", "y")])
+    body = R.fallback_request("m", msgs, 2, {"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": True}})
+    assert body["max_tokens"] == 4096 and body["chat_template_kwargs"] == {"enable_thinking": True}
+    assert body["response_format"]["json_schema"]["schema"]["properties"]["answer"]["enum"] == ["A", "B"]
