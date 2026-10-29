@@ -58,6 +58,10 @@ Off by default (the replicas' answers then pass through untouched):
 GET /health: 200 when at least one replica is ready, else 503; /metrics: per replica in flight, requests routed by
 state / by load, failures, readiness, answers per cascade level, blended answers, fallback calls by result
 (Prometheus); /v1/models: the first ready replica's.
+
+API keys: a client's Authorization / X-API-Key header is passed on, as it came, to every replica its request reaches
+(--replicas, --escalate, --blend, --route; never to --fallback), so replicas started with --api-keys (the same key file
+on each) check it as if called directly. The router checks no key itself: its /health and /metrics stay open.
 """
 import argparse
 import asyncio
@@ -249,6 +253,15 @@ def fallback_parse(data, n):
         return None, None, "not_an_option"
     entries = ((choice.get("logprobs") or {}).get("content") or []) if isinstance(choice, dict) else []
     return LETTERS.index(ans["answer"]), _letter_probs(entries, ans["answer"], n) if entries else None, "answered"
+
+
+KEY_HEADERS = ("authorization", "x-api-key")  # a client's API key, as basal-serve --api-keys reads it
+
+
+def key_headers(raw):
+    """The client's API key headers among raw ASGI headers, values as bytes, the last of each name (as basal-serve
+    reads them): passed on to the replicas, never to the --fallback LLM. {} without them."""
+    return {k: v for k, v in ((n.decode("latin1").lower(), v) for n, v in raw) if k in KEY_HEADERS}
 
 
 def _h(text):
@@ -559,8 +572,8 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
     from starlette.routing import Route
 
     async def post(request):
-        status, content, ctype = await router.forward(request.url.path, await request.body(),
-                                                      {"content-type": "application/json"})
+        headers = {"content-type": "application/json", **key_headers(request.headers.raw)}
+        status, content, ctype = await router.forward(request.url.path, await request.body(), headers)
         return Response(content, status_code=status, media_type=ctype)
 
     async def health(_):
@@ -568,10 +581,10 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
                 "replicas": len(router.replicas), "in_flight": sum(router.load.values())}
         return JSONResponse(body, status_code=200 if router.ready else 503)
 
-    async def models(_):
+    async def models(request):
         for r in sorted(router.ready):
             try:
-                resp = await router.client.get(r + "/v1/models", timeout=10)
+                resp = await router.client.get(r + "/v1/models", timeout=10, headers=key_headers(request.headers.raw))
                 return Response(resp.content, status_code=resp.status_code, media_type="application/json")
             except Exception:  # noqa: BLE001
                 continue

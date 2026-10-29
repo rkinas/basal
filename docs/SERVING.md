@@ -208,6 +208,8 @@ benchmarking a GPU.
     the ring (`--load-factor`).
   - **Requests without a state** go to the less loaded of two random replicas.
   - **Readiness:** a replica gets requests only while its `/health` answers 200.
+  - **API keys:** a client's key header goes on to the replicas, which check it with `--api-keys`
+    ([API access](#api-access)).
   - **Replicas it starts** (`--gpus`) end with the router: each runs in its own process group, which the router
     ends when it stops (SIGTERM, SIGINT, SIGHUP, an error; SIGKILL after 30 s); on Linux a replica also gets
     SIGTERM when the router is killed. When every replica has exited, the router exits with status 1.
@@ -394,9 +396,13 @@ basal-serve --model Remek/basal-2.0-mini --api-keys ./api-keys.json --cors-origi
 ```
 
 Without `--api-keys` there is no authentication and `GET /v1/keys` is not served: bind `--host 127.0.0.1` or put a
-gateway in front. Known limit: basal-router does not forward API keys yet, so a replica started with `--api-keys`
-answers the router's requests with 401. Check the keys in front of the router, or run the replicas without
-`--api-keys` on a private network; forwarding comes in 2.5.1.
+gateway in front.
+
+basal-router passes a client's `Authorization` / `X-API-Key` header on, as it came, to every replica the request
+reaches (`--replicas`, `--escalate`, `--blend`, `--route`; never to the `--fallback` LLM, which gets
+`BASAL_FALLBACK_API_KEY` if set). Give every replica the same `--api-keys` file (with `--gpus`, after `--`). The router
+checks no key itself: its `GET /health` and `/metrics` stay open (replica URLs and counters, no answers), and the key
+goes to the replicas over plain HTTP unless their URLs are HTTPS, so keep them on loopback or a private network.
 
 ## Inference on a JSONL file
 

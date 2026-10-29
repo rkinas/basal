@@ -127,6 +127,10 @@ is new is opt-in unless a line says otherwise.
   `GET /health`), `--cors-origins` enables browser access from listed origins, and every response carries an
   `x-request-id` header (also without these flags). Contributed by Paweł Kiszczak (@pawelkiszczak),
   [#68](https://github.com/rkinas/basal/pull/68).
+- **basal-router passes API keys on:** a client's `Authorization` / `X-API-Key` header goes, as it came, to every
+  replica its request reaches (never to `--fallback`), so replicas started with `--api-keys` (the same key file on
+  each) check it as when called directly. The router checks no key itself. Requests without a key are sent as before.
+  [SERVING.md](SERVING.md#api-access)
 - **A Python client for every question type** (`basal.client`): methods for `multi`, `act`, `tool`, `classify`,
   `verify`, `compress` and `extract` next to `choice`, `yes_no` and `score`; `decide` with question builders for several
   questions in one request; `AsyncBasal` for asyncio; the server's status codes as `InvalidRequest` (422),
@@ -234,8 +238,6 @@ is new is opt-in unless a line says otherwise.
 - **Known limit:** repeated requests over long states: with `--mode fast` on one H100, basal-omni-1.0-ultra gives
   bit-identical probabilities for the same 24k-32k-token request sent again (one at a time) in 95 of 100 cases, as 2.4.1
   did; basal-omni-1.0-mini in 100 of 100. Ultra's answers on long states are not guaranteed to be bit-stable.
-- **Known limit:** basal-router does not forward API keys yet, so a replica started with `--api-keys` answers the router
-  with 401 ([SERVING.md](SERVING.md#api-access)); forwarding comes in 2.5.1.
 
 # What is new in basal 2.4.1
 
