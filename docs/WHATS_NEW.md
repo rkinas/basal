@@ -21,8 +21,13 @@ is new is opt-in unless a line says otherwise.
   the file as fitted on another model). The same holds with `--url` and `--model`; repo ids and plain directories are
   recorded as before. Contributed by Paweł Kiszczak (@pawelkiszczak), [#71](https://github.com/rkinas/basal/pull/71).
 - **Tests on Apple M5**: the float32 MLX tests set `MLX_ENABLE_TF32=0` (`tests/conftest.py`), since MLX runs float32
-  matmuls in TF32 on an M5's GPU by default; served models are not affected. Contributed by Grzegorz Brzezinka
+  matmuls in TF32 on an M5's GPU by default; served bf16 models are not affected. Contributed by Grzegorz Brzezinka
   (@agentGreg), [#76](https://github.com/rkinas/basal/pull/76).
+- **basal-omni-pico keeps float32 on an Apple M5** (`--mode mlx`): pico's float32 compute (the default; not
+  `--mlx-compute bf16`) sets `MLX_ENABLE_TF32=0` at load unless the variable is already set, so an M5's GPU does not
+  run its matmuls in TF32. Not yet verified on M5 hardware; on an Apple M4 Pro the answers are byte-identical to before
+  (200 prompts, and 2,000 readouts of five questions in two orders over one state).
+  [HARDWARE.md](HARDWARE.md#apple-silicon)
 - **basal-router: several replicas behind one port.** `basal-router --replicas URL ...`, or `--gpus 0,1` to start one
   basal-serve per GPU (stopped with the router, also when the router is killed). Requests over the same state go to the
   same replica (state-hash routing with bounded load), so its state cache keeps working; a replica that answers 503 or

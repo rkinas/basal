@@ -3551,6 +3551,11 @@ class MLXBackend:
         if what and self.state_cache is not None:
             raise ValueError(f"{md}: --state-cache-gb / --prefix-cache on --mode mlx keep attention keys and values only, "
                              "not the recurrent states of Qwen3.5 (Gated DeltaNet) models; serve it without them")
+        if what and compute != "bf16":
+            # Qwen3.5 computes in float32 by default (below; --mlx-compute bf16 keeps bf16, where this changes nothing),
+            # and an M5's GPU runs float32 matmuls in TF32 unless MLX_ENABLE_TF32=0, which MLX reads at its first matmul;
+            # a value already set stays
+            os.environ.setdefault("MLX_ENABLE_TF32", "0")
         import mlx.core as mx
         from mlx_lm.utils import load_model
         self.mx = mx

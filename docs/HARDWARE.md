@@ -260,6 +260,10 @@ basal-omni on a Mac: `--mlx-forward basal` (2.5, opt-in) runs the last 19 of 42 
 Apple M4 Pro basal-omni-1.0-mini-MLX answers one question in two orders in 179 instead of 222 ms
 ([QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon)).
 
+basal-omni-pico on a Mac (`--mode mlx`) computes in float32 from its bf16 weights (unless `--mlx-compute bf16`). MLX
+runs float32 matmuls in TF32 on an M5's GPU by default, so basal-serve sets `MLX_ENABLE_TF32=0` when it loads pico for
+float32 compute, unless the variable is already set (`MLX_ENABLE_TF32=1` keeps TF32). Not yet verified on M5 hardware.
+
 **`mps`, `mlx-q8` and `gguf`** (Apple M4 Pro, 24 GB, basal-1.5-mini, `basal-bench` on the 44 bundled examples, which
 are shorter than the 500-decision sample above; reference: bf16 `eager` on MPS; GB: MLX allocator peak, MPS memory held
 by the Metal driver):
