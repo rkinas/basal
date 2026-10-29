@@ -22,7 +22,8 @@ from pathlib import Path
 import torch
 
 from .engine import default_device
-from .prompt import FORMATS, PREFILL
+from .facts import inject as inject_facts
+from .prompt import FORMATS, PREFILL, RequestError
 from .run import to_request
 from .server import Server, certified, http_status, temperature, to_items
 from .server import parser as serve_parser
@@ -162,10 +163,16 @@ class Explainer:
             timing_ms=dict(tokenize=t_tok * 1000, separate_with_lens=t_sep * 1000, packed=t_packed * 1000))
 
     def explain(self, body):
-        """The page's steps for every question of a request (one entry per label of a multi question)."""
+        """The page's steps for every question of a request (one entry per label of a multi question); with
+        "facts": "auto" the state carries the computed facts, as basal-serve reads it."""
+        if body.get("facts", "off") not in ("off", "auto"):
+            raise RequestError('facts must be "off" or "auto"')
         with self.lock:
             t0 = time.perf_counter()
-            items = to_items(body["state"], body["questions"], self.srv.max_options, force_lang=body.get("lang"))
+            state = body["state"]
+            if body.get("facts") == "auto":
+                state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+            items = to_items(state, body["questions"], self.srv.max_options, force_lang=body.get("lang"))
             qs = [self.explain_branch(q, bi) for q in items for bi in range(len(q["branches"]))]
             return {"model": self.name, "questions": qs, "total_ms": (time.perf_counter() - t0) * 1000}
 

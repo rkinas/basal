@@ -4,6 +4,10 @@ Released 3 November 2026. Default answers to decision requests are byte-identica
 basal-omni-1.0-mini, basal-omni-1.0-max and basal-omni-pico with `--mode fast`, mini and pico with `--mode eager`); what
 is new is opt-in unless a line says otherwise.
 
+- **basal-viz with `"facts": "auto"`:** the explained state carries the computed facts block (dates, gaps, VAT), as
+  basal-serve reads it, so the page explains the prompt the served answer came from and the comparison with
+  basal-serve's probabilities holds for such requests.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#73](https://github.com/rkinas/basal/pull/73).
 - **basal-calibrate on a Hugging Face cache snapshot:** `--model <cache>/models--<org>--<name>/snapshots/<commit>`
   records `fitted_on.model` as the repo id and `fitted_on.revision` as the commit, as basal-serve names the model, so
   the file is applied when that snapshot is served (before, the path was recorded and `--strict-calibration` refused
