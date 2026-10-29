@@ -251,7 +251,9 @@ classify    ...
 ## Which model a file belongs to
 
 The probabilities, and so the temperatures and thresholds, belong to one model. `fitted_on` records the model as given
-to `basal-calibrate` and, for a Hugging Face model, its revision (commit). `basal-serve --calibration FILE` compares
+to `basal-calibrate`, except that a Hugging Face cache snapshot path is recorded as its repository ID in
+`fitted_on.model` and its commit in `fitted_on.revision`. A repository ID likewise records its resolved commit;
+plain local directories keep their path without a revision. `basal-serve --calibration FILE` compares
 them with the served model: on another model, or another revision, it warns at start-up and reports
 `"calibration_warning"` in `GET /v1/models`; with `--strict-calibration` it refuses to start. A local copy of a model
 matches its Hugging Face name by the last part of the path (`/data/basal-omni-1.0-max` = `Remek/basal-omni-1.0-max`).

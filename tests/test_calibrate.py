@@ -220,6 +220,30 @@ def test_calibrate_end_to_end_round_trips_through_the_server(tmp_path, engine, c
         assert ("refused" in ans) == (conf < thr) and ans["calibration"] == "validated"
 
 
+@pytest.mark.parametrize("snapshot", [True, False])
+def test_a_cache_snapshot_is_recorded_as_its_repo_id_and_commit(tmp_path, monkeypatch, capsys, snapshot):
+    """--model <Hugging Face cache snapshot> is named as basal-serve names it (repo id and commit), so the file is
+    served for that snapshot under --strict-calibration; a plain directory keeps its path and has no revision."""
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    md = tmp_path / (f"models--Remek--x/snapshots/{sha}" if snapshot else "plain")
+    md.mkdir(parents=True)
+    (md / "CALIBRATION.json").write_text(json.dumps(SHIPPED), encoding="utf-8")
+    monkeypatch.setattr(server_module, "resolve", lambda *_, **__: md)
+    monkeypatch.setattr(server_module, "EagerBackend", StubBackend)
+    synthetic(tmp_path / "labelled.jsonl")
+    out = tmp_path / "CALIBRATION.custom.json"
+    main([str(tmp_path / "labelled.jsonl"), "--mode", "eager", "--model", str(md), "--out", str(out)])
+    fitted = json.loads(out.read_text(encoding="utf-8"))["fitted_on"]
+    if snapshot:
+        assert (fitted["model"], fitted["revision"]) == ("Remek/x", sha)
+    else:
+        assert fitted["model"] == str(md) and "revision" not in fitted
+    capsys.readouterr()
+    srv = Server(parser().parse_args(["--mode", "eager", "--model", str(md), "--calibration", str(out),
+                                      "--strict-calibration"]))
+    assert srv.cal_mismatch is None and "warning" not in capsys.readouterr().out
+
+
 def test_url_mode_needs_an_uncalibrated_server(capsys):
     entry = lambda temps: models_payload("basal-1.5-mini", "mlx", {}, temps)["models"][0]
     with pytest.raises(SystemExit, match="--no-calibration"):
