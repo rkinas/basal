@@ -92,6 +92,11 @@ is new is opt-in unless a line says otherwise.
 - **basal-omni-pico on a Mac**: `--mode mlx` serves it from its own Hugging Face repository (bf16 weights, computed in
   float32); on 1,700 held-out prompts its answers match CUDA eager float32 (top-1 100%). `--mode mps` stays refused for
   it.
+- **basal-omni-pico on a Mac in bf16** (`--mode mlx --mlx-compute bf16`; opt-in, off by default: faster, but further
+  from float32 than the default float32 compute): Apple M4 Pro, 1,700 held-out single prompts: 0.136 s per prompt
+  against 0.171 s for the GGUF Q8_0 path on the same Mac (1.25x); the same top answer as CUDA eager float32 on 99.41%,
+  1 changed where float32's margin was at least 0.05 (the default: 100%, 0); five questions in two option orders
+  (17,000 readouts): 99.33%, 8 changed (the default: 99.98%, 0). [QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon)
 - **basal-omni-1.1-max images and audio through `--mode vllm --media on`**: the same top answer as the eager media path
   on 97.4% of images and 95.8% of clips (every one where eager's margin is at least 0.2), 2.7x / 2.9x the requests per
   second at 8 in flight; `"detail": "high"` stays on `--mode eager`. [OMNI.md](OMNI.md#vllm---mode-vllm).

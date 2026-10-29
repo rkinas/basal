@@ -41,11 +41,11 @@ class _Tok:
     pad_token_id = 0
 
 
-def mlx_stub(path, quant=None, packed=False, forward="mlx-lm"):
+def mlx_stub(path, quant=None, packed=False, forward="mlx-lm", compute="auto"):
     from concurrent.futures import ThreadPoolExecutor
     be = MLXBackend.__new__(MLXBackend)  # no tokenizer files in the tiny model directory
     be.pool, be.tok, be.max_rows = ThreadPoolExecutor(max_workers=1), _Tok(), 3
-    be.pool.submit(be._load, path, quant, packed, forward).result()
+    be.pool.submit(be._load, path, quant, packed, forward, compute).result()
     assert be.forward.split()[0] == ("mlx-lm" if be.fwd is None else "basal")
     return be
 
@@ -519,6 +519,36 @@ def test_mlx_qwen35_computes_in_float32(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({**cfg, "quantization": {"group_size": 64, "bits": 8}}))
     with pytest.raises(ValueError, match="quantised MLX weights are not checked for Qwen3.5"):
         mlx_stub(tmp_path)
+
+
+def test_mlx_qwen35_bf16_compute_is_opt_in(tmp_path):
+    """--mlx-compute auto (the default) keeps Qwen3.5 in float32; bf16 (opt-in) keeps its bf16 weights, so the readouts
+    are the bf16 forward's: close to the float32 forward, not equal. Other models refuse bf16 (they compute in their
+    weights' dtype already)."""
+    pytest.importorskip("mlx.core")
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    from basal.server import parser
+    assert parser().parse_args([]).mlx_compute == "auto"
+    m = tiny_qwen35(tmp_path, torch.bfloat16).float()
+    assert mlx_stub(tmp_path).compute == "float32"
+    be = mlx_stub(tmp_path, compute="bf16")
+    assert be.compute == "bfloat16"
+    assert mx.bfloat16 in {v.dtype for _, v in tree_flatten(be.model.parameters())}
+    dp = [max(abs(x - y) for x, y in zip(r, g)) for r, g in zip(reference(m, TOKS, LIDS), be.run_shared([(TOKS, LIDS)])[0])]
+    assert 2e-4 < max(dp) < 0.05
+    with pytest.raises(ValueError, match="unknown MLX compute 'fp16'"):
+        mlx_stub(tmp_path, compute="fp16")
+    with pytest.raises(ValueError, match="--mlx-compute bf16 is for Qwen3.5"):
+        tiny_llama(tmp_path / "llama")
+        mlx_stub(tmp_path / "llama", compute="bf16")
+
+
+def test_mlx_compute_needs_mode_mlx():
+    from basal.server import Server, parser
+    with pytest.raises(SystemExit, match="--mlx-compute needs --mode mlx"):
+        Server(parser().parse_args(["--mode", "eager", "--mlx-compute", "bf16"]))
 
 
 def test_mlx_state_cache_refused_for_qwen35_before_loading(tmp_path, monkeypatch):
