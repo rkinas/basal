@@ -37,10 +37,12 @@ benchmarking a GPU.
   state as a full-state checkpoint: the attention layers' keys and values and each Gated DeltaNet layer's recurrent
   state and convolution tail after the state; the same state again runs only its questions. A state that begins with
   a whole cached one (a growing agent trace) continues it from there; one that differs inside the cached tokens runs
-  again (a recurrent state cannot be cut there). Not with them yet: `fp8` / `nvfp4`, `fast-exit`,
-  `mps`, `--batches compact`, `--prefix-cache`, `--template-prefix on`, `--readout-layer on`, `--lean` and
-  `--long-lane` (each refused before loading). `--long-lane` runs for them with `--long-lane-gdn on` (2.5, opt-in, off
-  by default): its bf16 answers are a little further from float32 than `--mode eager`'s. basal-omni-pico on an H100,
+  again (a recurrent state cannot be cut there). Since 2.5 they also run with `--prefix-cache on` and `--batches
+  compact` (opt-in; compact rows also with `--template-prefix on` and `--readout-layer on`), with answers as close to
+  float32 as `--mode eager`'s; `--lean` and `--tree flex` change nothing for them. Not with them yet: `fp8` / `nvfp4`,
+  `fast-exit`, `mps` and `--long-lane` (each refused before loading). `--long-lane` runs for them with
+  `--long-lane-gdn on` (2.5, opt-in, off by default): its bf16 answers are a little further from float32 than
+  `--mode eager`'s. basal-omni-pico on an H100,
   1,700 held-out decisions against eager float32: with five questions per state the same top answer on 99.39% (8,500
   readouts, 52 changed) against eager bf16's 99.51% (42); single questions 99.71%, two option orders 99.65%, both
   99.46%, within 0.1 pt of eager bf16's. No speed was measured for it. `--mode vllm` and `--mode gguf` serve Qwen3.5 models
