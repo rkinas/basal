@@ -298,6 +298,13 @@ def test_overlap_flag():
     assert parser().parse_args(["--mode", "vllm", "--vllm-overlap", "on"]).vllm_overlap == "on"
 
 
+def test_overlap_off_by_default(tmp_path, fake_vllm):
+    """Without --vllm-overlap the backend starts vLLM's LLM and runs one engine call at a time, as before."""
+    (tmp_path / "config.json").write_text(json.dumps(E4B), encoding="utf-8")
+    be = VLLMBackend(tmp_path)
+    assert type(be.llm).__name__ == "LLM" and getattr(be, "inflight", 1) == 1 and hasattr(be.lock, "acquire")
+
+
 def test_unified_audio_counts_as_its_processor():
     from basal.vllm_unified import audio_tokens
     # one soft token per 640 samples (40 ms at 16 kHz), the last one partly padded; the encoder models' count differs

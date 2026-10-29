@@ -221,6 +221,22 @@ calibration test split:
   46.7 vs 16.3 clips) and 25.9 / 23.4 ms per request one at a time (eager 70 / 62 ms). `"detail": "high"` is refused
   for it on `--mode vllm` (the eager answer on 54.8% of images only); use `--mode eager --media on` for it. Ultra
   (images) is not checked yet.
+- **`--vllm-overlap on`** (2.5, opt-in, off by default): the backend drives vLLM's async engine and keeps up to four
+  engine calls in flight, so vLLM's scheduler batches their prompts together (off: one `LLM.generate` call at a time).
+  A little faster, and the answers differ from off's. One RTX PRO 6000 Blackwell Max-Q, `--max-len 12288`, 16
+  clients, against off (each a fresh server):
+
+  | model | workload | questions/s | same top answer | changed where off's margin >= 0.05 |
+  |---|---|---|---|---|
+  | basal-omni-1.0-mini | 2,000 development decisions, one per request | 125.5 -> 151.3 (1.21x) | 99.45% | 3 |
+  | | 600 single questions, ~1.5k-token states | 25.2 -> 26.9 (1.07x) | 98.17% | 3 |
+  | | 120 requests, five questions over 3k-10k tokens | 12.1 -> 12.9 (1.07x) | 99.0% | 2 |
+  | basal-omni-1.0-max | 2,000 development decisions | 44.8 -> 47.6 (1.06x) | 99.65% | 6 |
+  | | 600 single questions | 5.71 -> 5.79 (1.01x) | 99.17% | 2 |
+  | | 120 requests, five questions | 3.25 -> 3.31 (1.02x) | 98.5% | 5 |
+
+  Two runs with off differed from each other about as much (98.17-99.7% the same top answer, 1-6 changes at a margin
+  >= 0.05): vLLM's default preset varies from run to run under load.
 - **Not in 2.3:** FP8 weights quantised at load time (automation at 1% -0.5 to -9.5 points on the three tiers) and an
   FP8 KV cache (on mini -0.36 points [-0.57, -0.15] at 1% with the shipped file; on 12B / 31B it needs Triton attention
   and is slower than 2.2's path). The `-FP8` checkpoints are served as they are.
