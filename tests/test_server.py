@@ -607,3 +607,10 @@ def test_out_of_memory_frees_the_failed_forward():
         with pytest.raises(torch.OutOfMemoryError):
             await fut
     asyncio.run(main())
+
+
+def test_help_renders_every_option():
+    """argparse %-formats help texts: a measured share like "99.4%" must be written "99.4%%" or --help fails (or
+    prints the action's fields)."""
+    text = parser().format_help()
+    assert "option_strings" not in text and "+1.6% at best" in " ".join(text.split())

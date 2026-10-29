@@ -2144,7 +2144,7 @@ def add_engine_args(ap):
     ap.add_argument("--readout-layer", dest="readout_layer", choices=["auto", "on", "off"], default="off",
                     help="CUDA graph engine with compact rows, Llama models: the last decoder layer computes keys, values "
                          "and attention for every token and its o_proj and MLP at the readout positions only (auto: on; off by "
-                         "default: +1.6% at best on the H100, below the v2.0 speed gate)")
+                         "default: +1.6%% at best on the H100, below the v2.0 speed gate)")
     ap.add_argument("--template-prefix", dest="template_prefix", choices=["auto", "on", "off"], default="auto",
                     help="CUDA graph engine with compact rows: the template prefix of the prompts (chat template, system "
                          "prompt, the user header up to the state) is computed once at start-up and every prompt runs "
