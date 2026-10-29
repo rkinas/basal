@@ -111,7 +111,11 @@ is new is opt-in unless a line says otherwise.
   Blackwell Max-Q, 16 clients, basal-omni-1.0-mini and 1.0-max: 1.01-1.07x the questions per second (1.21x for mini on
   2,000 development decisions, one per request), the same top answer as off on 98.17-99.65% of the readouts, 2-6
   changed where off's margin was at least 0.05 (600-2,000 readouts per workload); two runs with off differed about as
-  much. [OMNI.md](OMNI.md#vllm---mode-vllm)
+  much. With `--media on` it batches requests with media too (off: one call per request): basal-omni-1.1-max on one
+  H100 at 8 clients, new images 1.18-1.49x the requests per second; audio clips about the same as off (0.89-1.23x);
+  the same requests again 1.35-1.50x. The same top answer as off on 99.68% of 310 images and 99.65-100% of 285 clips
+  (no change where off's margin was at least 0.05), accuracy -0.32 / 0.00 to -0.35 points.
+  [OMNI.md](OMNI.md#vllm---mode-vllm)
 - Experimental `--deterministic --lanes N` (still behind `BASAL_EXPERIMENTAL_LANES`): now exact, not yet faster.
 - **Ready question sets and agent frameworks**: presets (triage, moderation, compliance) in `basal-run --preset` and
   `Basal.preset`; `guard_input`, `guard_output` and `route_intent` (Python and TypeScript), strict or permissive, whose

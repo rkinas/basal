@@ -2069,7 +2069,10 @@ def add_engine_args(ap):
                          "= one LLM.generate call at a time. on is opt-in: a little faster, and its answers differ from "
                          "off's (RTX PRO 6000 Max-Q, 16 clients, basal-omni-1.0-mini and 1.0-max: 1.01-1.07x the "
                          "questions per second, 1.21x on mini's development set; the same top answer on 98.17-99.65%%, "
-                         "2-6 changed where off's margin is >= 0.05, per 600-2,000 readouts)")
+                         "2-6 changed where off's margin is >= 0.05, per 600-2,000 readouts). With --media on it "
+                         "batches requests with media too (basal-omni-1.1-max, one H100, 8 clients: new images "
+                         "1.18-1.49x the requests per second; audio clips about the same as off (0.89-1.23x); the same "
+                         "top answer as off on 99.65-100%%, accuracy within 0.35 points)")
     ap.add_argument("--max-len", dest="max_len", type=int, default=4096,
                     help="--mode vllm / sglang / tpu: context length in tokens (longer states are refused; raise it for "
                          "long documents)")

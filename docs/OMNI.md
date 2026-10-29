@@ -237,6 +237,17 @@ calibration test split:
 
   Two runs with off differed from each other about as much (98.17-99.7% the same top answer, 1-6 changes at a margin
   >= 0.05): vLLM's default preset varies from run to run under load.
+
+  With `--media on`, requests with media are batched the same way (off: each one is its own call, one at a time).
+  basal-omni-1.1-max, one H100, the media items of the check set above (310 images, 285 clips, detail "default"), 8
+  clients, against off (fresh servers: off three times, on twice):
+  - media new to the server: images 7.6-9.2 vs 6.2-6.5 requests per second (1.18-1.49x; p50 170 vs 420 ms), audio
+    clips 15.1-20.7 vs 16.8-16.9 (0.89-1.23x);
+  - the same requests again (served from vLLM's caches): images 49.2-49.5 vs 33.0-33.7 (1.46-1.50x), audio 44.7-45.1
+    vs 33.3-33.7 (1.33-1.35x);
+  - answers: the same top answer as off on 99.68% of the images and 99.65-100% of the clips (at most one change, at a
+    margin under 0.05), accuracy -0.32 / 0.00 to -0.35 points. With off, the answers are bit-identical between fresh
+    starts and with 1 or 8 clients.
 - **Not in 2.3:** FP8 weights quantised at load time (automation at 1% -0.5 to -9.5 points on the three tiers) and an
   FP8 KV cache (on mini -0.36 points [-0.57, -0.15] at 1% with the shipped file; on 12B / 31B it needs Triton attention
   and is slower than 2.2's path). The `-FP8` checkpoints are served as they are.
