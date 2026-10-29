@@ -23,6 +23,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 HERE = Path(__file__).parent
 RING = 16384  # requests kept (recent rows, the last minute's rates and percentiles; folded into the totals at a read)
+FOLD = 2048  # requests folded into the totals at one read at most (a read's work stays bounded; the rest at the next)
 RECENT = 200  # rows of the recent-requests table
 MEMO_S = 1.0  # GET /ui/state is built at most once per MEMO_S, however many pages poll it
 IDLE_S = 10.0  # telemetry stops sampling this long after the last GET /ui/state
@@ -61,8 +62,12 @@ class Hist:
     def __init__(self):
         self.bins, self.n, self.sum, self.max = {}, 0, 0.0, 0.0
 
-    def add(self, ms):
-        i = int(math.floor(math.log(max(ms, 1e-3)) / self.STEP))
+    @classmethod
+    def bin(cls, ms):
+        return math.floor(math.log(max(ms, 1e-3)) / cls.STEP)
+
+    def add(self, ms, i=None):
+        i = self.bin(ms) if i is None else i
         self.bins[i] = self.bins.get(i, 0) + 1
         self.n, self.sum, self.max = self.n + 1, self.sum + ms, max(self.max, ms)
 
@@ -342,23 +347,26 @@ class UI:
         return with_page
 
     def fold(self):
-        """Requests answered since the last read into the totals since start. A request that left the ring before a
-        read (more than RING requests between two reads) is not in them: "seen" counts the ones that are."""
-        new = list(itertools.takewhile(lambda r: r[0] > self.folded, reversed(self.ring)))
+        """Requests answered since the last read into the totals since start, the oldest first and at most FOLD of
+        them (the rest at the next reads). A request that left the ring before it was folded (more than RING requests
+        between two reads) is not in the totals: "seen" counts the ones that are."""
+        new = list(itertools.takewhile(lambda r: r[0] > self.folded, reversed(self.ring)))[-FOLD:]
         if not new:
             return
         self.folded = new[0][0]
         self.seen += len(new)
+        bin_of, total, endpoints, codes = Hist.bin, self.total, self.endpoints, self.codes
         for _, ep, status, s, *_ in reversed(new):
             ms = s * 1000
-            self.total.add(ms)
-            e = self.endpoints.get(ep)
+            i = bin_of(ms)
+            total.add(ms, i)
+            e = endpoints.get(ep)
             if e is None:
-                e = self.endpoints[ep] = {"requests": 0, "failed": 0, "hist": Hist()}
+                e = endpoints[ep] = {"requests": 0, "failed": 0, "hist": Hist()}
             e["requests"] += 1
             e["failed"] += status >= 400
-            e["hist"].add(ms)
-            self.codes[status] = self.codes.get(status, 0) + 1
+            e["hist"].add(ms, i)
+            codes[status] = codes.get(status, 0) + 1
 
     def state(self, counts):
         """GET /ui/state: the JSON snapshot, built at most once per MEMO_S."""

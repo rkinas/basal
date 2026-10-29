@@ -191,6 +191,27 @@ def test_ring_is_bounded_and_folded_totals_say_what_they_saw(monkeypatch):
     assert len(s["recent"]) == 8
 
 
+def test_a_read_folds_a_bounded_number_of_requests_and_the_next_reads_catch_up(monkeypatch):
+    monkeypatch.setattr(ui_module, "FOLD", 3)
+    _, u, _ = app_of()
+
+    async def handler(_):
+        return types.SimpleNamespace(status_code=200)
+    rec = u.record(handler, "/v1/basal")
+
+    async def burst(n):
+        for _ in range(n):
+            await rec(types.SimpleNamespace(_json=BODY))
+    asyncio.run(burst(10))
+    counts = {"requests": 10, "failed": 0, "seconds": 0.0}
+    seen = []
+    for _ in range(5):
+        fresh(u)
+        seen.append(json.loads(u.state(counts))["traffic"]["seen"])
+    assert seen == [3, 6, 9, 10, 10]
+    assert u.endpoints["/v1/basal"]["requests"] == 10 and u.total.n == 10
+
+
 def test_config_view_redacts_secrets(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "hf_envsecret123")
     keys = keyfile(tmp_path)
