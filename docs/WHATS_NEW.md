@@ -224,15 +224,17 @@ is new is opt-in unless a line says otherwise.
   questions 62.4 -> 48.6 ms (basal-2.0-4.5B: 117 -> 99 ms); every probability bit-identical to 2.3.5.
   `fast-nocompile` keeps the merge op by op. Contributed by Miłosz Kucharski (@Butterski),
   [#44](https://github.com/rkinas/basal/pull/44).
-- **`--compile-scope layer`** (opt-in, `--mode fast`, the Llama-based basal-2.0 models): torch.compile compiles one
-  decoder layer, called for every layer, instead of the whole model, so start-up compiles a layer instead of 32-60.
-  The same transformers layers as the whole-model compile; kernels fuse within a layer only, so probabilities move by
-  bf16 rounding. RTX 4060 Ti, graph warm-up from cold compile caches: basal-2.0-mini 235 -> 95 s, basal-2.0-4.5B 515
-  -> 251 s; five questions at a time as fast, single questions 2-3% slower on mini and as fast on the 4.5B (within
-  run-to-run noise); identity readouts: the same top answer on 416 / 420 (mini) and 418 / 420 (4.5B), the changed ones
-  near-ties (margins under 0.08), mean |dp| 0.005, as far from fp32 as the whole-model compile (mini: 4.7e-3 against
-  4.8e-3). bf16 Llama weights only (FP8 / NVFP4, Gemma 4, Qwen3.5 and --lean are refused). Contributed by Miłosz
-  Kucharski (@Butterski), [#49](https://github.com/rkinas/basal/pull/49).
+- **`--compile-scope layer`** (`--mode fast`, the Llama-based basal-2.0 models; opt-in, off by default: a much shorter
+  start-up, but the answers differ from the whole-model compile's): torch.compile compiles one decoder layer, called
+  for every layer, instead of the whole model, so start-up compiles a layer instead of 32-60. The same transformers
+  layers as the whole-model compile; kernels fuse within a layer only, so probabilities move by bf16 rounding. One
+  H100, basal-2.0-mini, cold compile caches, 840 readouts: start-up 47 s against 228 s; the same top answer as a
+  whole-model cold start on 98.69% (829) and as another on 98.33% (826), the changed ones near-ties (margins up to
+  0.044 against the first, one at 0.058 against the second). Two whole-model cold starts agreed with each other on
+  98.3-98.5% there. RTX 4060 Ti (the contributor's measurement): graph warm-up basal-2.0-mini 235 -> 95 s,
+  basal-2.0-4.5B 515 -> 251 s, single questions 2-3% slower on mini. bf16 Llama weights only (FP8 / NVFP4, Gemma 4,
+  Qwen3.5 and --lean are refused). Contributed by Miłosz Kucharski (@Butterski),
+  [#49](https://github.com/rkinas/basal/pull/49).
 - **State cache on Apple Silicon** (`--mode mlx`, opt-in): `--state-cache-gb N` and `--prefix-cache on` work on the
   Mac as on the CUDA graph engine, with both `--mlx-forward` paths. A request whose state (or template prefix) is
   cached computes only its questions. The probabilities equal the server without the cache bit for bit: MLX picks its

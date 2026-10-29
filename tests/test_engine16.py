@@ -230,6 +230,28 @@ def test_per_layer_compile_refused_where_not_measured(tmp_path):
             GraphBackend(str(tmp_path), compile="layer", **kw)
 
 
+def test_per_layer_compile_off_by_default(tmp_path, monkeypatch):
+    """--compile-scope model is the default: --mode fast hands the graph engine compile=True (the whole model);
+    only --compile-scope layer hands it "layer"."""
+    import json
+
+    import basal.server as server_module
+
+    class Built(Exception):
+        pass
+
+    def backend(md, dtype, quant, compile=False, **kw):
+        raise Built(compile)
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
+    monkeypatch.setattr(server_module, "resolve", lambda *_, **__: tmp_path)
+    monkeypatch.setattr(server_module, "GraphBackend", backend)
+    assert server_module.parser().parse_args([]).compile_scope == "model"
+    for extra, want in (([], True), (["--compile-scope", "layer"], "layer")):
+        with pytest.raises(Built) as e:
+            server_module.Server(server_module.parser().parse_args(["--model", "m", "--mode", "fast"] + extra))
+        assert e.value.args[0] == want
+
+
 def test_cascade_why(monkeypatch):
     """The cascade pass 2 needs CUDA, a model with attention layers only and no --lean; the CPU flash op that the CPU
     cascade needs (cascade_ok) plays no part on CUDA."""

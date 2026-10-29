@@ -2096,7 +2096,10 @@ def add_engine_args(ap):
                     help="CUDA graph engine, Llama models, compiled modes: torch.compile the transformers model as a "
                          "whole (model) or each decoder layer, one compiled layer function for all of them (layer: "
                          "start-up compiles one layer instead of the whole model; kernels fuse within a layer only, "
-                         "so probabilities move by bf16 rounding)")
+                         "so probabilities move by bf16 rounding). layer is opt-in: a shorter start-up, but answers "
+                         "differ from model's (H100, basal-2.0-mini, cold caches: 47 s instead of 228 s, the same top "
+                         "answer on 98.69%% of 840 readouts, none changed where the margin is >= 0.05; two model-scope "
+                         "cold starts agree on 98.3-98.5%%)")
     ap.add_argument("--tree", choices=["auto", "dense", "flex"], default="dense",
                     help="with --lean pass2: the pass-2 trie mask as a dense additive mask (KV heads repeated) or as a "
                          "FlexAttention mask over the KV heads as they are. auto: flex with --lean pass2, else dense")

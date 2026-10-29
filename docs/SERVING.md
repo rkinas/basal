@@ -175,7 +175,9 @@ benchmarking a GPU.
   - `--fp8-accum fast|full`: FP8 GEMM accumulation in the default mode (`--deterministic` always uses `full`).
   - Opt-in, off by default: `--compile-scope layer` (each decoder layer compiled instead of the whole model: about
     half the start-up on basal-2.0, single questions up to 2-3% slower on an RTX 4060 Ti, probabilities within bf16
-    rounding; bf16 Llama models, plain rows), `--lean on|pass2` (one compiled layer function: faster start-up, slower
+    rounding; bf16 Llama models, plain rows; on an H100 basal-2.0-mini started in 47 s instead of 228 s, with the same
+    top answer as a whole-model cold start on 98.69% of 840 readouts, none changed at a margin of 0.05 or more),
+    `--lean on|pass2` (one compiled layer function: faster start-up, slower
     under load), `--tree flex` (a FlexAttention mask for the branches of a request), `--readout-layer on`,
     `--state-cache-gb N` (a state cache across requests; 2.3.1: also for states that begin with a cached one, e.g.
     agent traces, which then compute only their new tokens; 2.5: `--state-cache-bits 8` keeps ~1.7x as many
