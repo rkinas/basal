@@ -137,7 +137,9 @@ benchmarking a GPU.
   `auto` = on):
   - `--batches compact`: single prompts packed back to back into one row (FA3 varlen), graphs per token count, no
     padding to bucket lengths or row counts. On other sm80+ GPUs `--batches compact` runs them through torch's varlen
-    attention (Llama models; `auto` keeps them off there). basal-2.0-mini on an RTX 4060 Ti 16 GB, against
+    attention (Llama models; `auto` keeps them off there), and basal-omni on Blackwell workstation GPUs through flex
+    block masks (2.5; faster, but its answers differ from the default rows':
+    [OMNI.md](OMNI.md#what-the-engine-does-differently-for-gemma-4)). basal-2.0-mini on an RTX 4060 Ti 16 GB, against
     `--batches default`: single questions 66.8 -> 109.4 decisions/s (template prefix on), the same top answer on 58
     of 58 answers; the compact graphs took 2.4 GB more GPU memory there (13.4 -> 15.8 GB, the card full; with room
     they take about 6 GB for mini and 7 GB for the 4.5B, see below), and with the card full

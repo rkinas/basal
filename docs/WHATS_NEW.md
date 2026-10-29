@@ -72,6 +72,13 @@ is new is opt-in unless a line says otherwise.
   `--reread-image` reads an image again at more soft tokens.
 - **Two-way models** (trained to read the state in both directions) in the fast engine, and **isolated options**
   (basal.json `"option_isolation"`) for models trained to read the options as a set.
+- **Compact rows for basal-omni on Blackwell workstation GPUs** (`--batches compact`; opt-in, off by default: faster,
+  but the answers differ from the default rows'): with the flex kernels (sm_120, such as the RTX PRO 6000) compact rows
+  run with a flex block mask per prompt in every layer; before, they needed FlashAttention 3. One RTX PRO 6000
+  Blackwell Max-Q, 16 clients, one question per request, against the default rows: basal-omni-1.0-mini 1.17-1.20x the
+  questions per second, the same top answer on 98.67-99.60% of the readouts and 0-1 changed where the default's margin
+  was at least 0.05; basal-omni-1.0-max 1.21-1.27x, 98.00-99.75%, 2-4 such changes (600-2,000 readouts per workload).
+  Five questions over a long state are not faster. [OMNI.md](OMNI.md#what-the-engine-does-differently-for-gemma-4)
 - **basal-omni-pico in the fast engine with the caches**: the state cache, several questions over one state,
   `--prefix-cache on` and `--batches compact` (with `--readout-layer on`), with answers as close to fp32 as `--mode
   eager`'s (1,700 held-out decisions, H100); compact rows serve 1.11-1.16x the short single questions per second at 16
