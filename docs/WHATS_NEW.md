@@ -1,7 +1,8 @@
 # What is new in basal 2.5
 
-Released 3 November 2026. Every default answer is byte-identical to 2.4.1 (checked on an H100 for basal-omni-1.0-mini,
-basal-omni-1.0-max and basal-omni-pico, `fast` and `eager`); what is new is opt-in unless a line says otherwise.
+Released 3 November 2026. Default answers to decision requests are byte-identical to 2.4.1 (checked on an H100:
+basal-omni-1.0-mini, basal-omni-1.0-max and basal-omni-pico with `--mode fast`, mini and pico with `--mode eager`); what
+is new is opt-in unless a line says otherwise.
 
 - **basal-router: several replicas behind one port.** `basal-router --replicas URL ...`, or `--gpus 0,1` to start one
   basal-serve per GPU (stopped with the router, also when the router is killed). Requests over the same state go to the
@@ -103,8 +104,9 @@ basal-omni-1.0-max and basal-omni-pico, `fast` and `eager`); what is new is opt-
   anything is written. [INTERPOLATION.md](INTERPOLATION.md). Contributed by Dariusz Koryto (@dkoryto),
   [#60](https://github.com/rkinas/basal/pull/60).
 - **API keys, CORS and request IDs for `basal-serve`:** opt-in `--api-keys` protects HTTP and MCP routes (except
-  `GET /health`), `--cors-origins` enables browser access from listed origins, and responses carry request IDs.
-  Contributed by Paweł Kiszczak (@pawelkiszczak), [#68](https://github.com/rkinas/basal/pull/68).
+  `GET /health`), `--cors-origins` enables browser access from listed origins, and every response carries an
+  `x-request-id` header (also without these flags). Contributed by Paweł Kiszczak (@pawelkiszczak),
+  [#68](https://github.com/rkinas/basal/pull/68).
 - **A Python client for every question type** (`basal.client`): methods for `multi`, `act`, `tool`, `classify`,
   `verify`, `compress` and `extract` next to `choice`, `yes_no` and `score`; `decide` with question builders for several
   questions in one request; `AsyncBasal` for asyncio; the server's status codes as `InvalidRequest` (422),

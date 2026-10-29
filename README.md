@@ -35,9 +35,13 @@ answers, and triage with a confidence threshold that sends uncertain cases to a 
 
 ## What is new in basal 2.5
 
-Released 3 November 2026. Every default answer is byte-identical to 2.4.1 (checked on an H100 for basal-omni-1.0-mini,
-basal-omni-1.0-max and basal-omni-pico, `fast` and `eager`); what is new is opt-in.
+Released 3 November 2026. Default answers to decision requests are byte-identical to 2.4.1 (checked on an H100:
+basal-omni-1.0-mini, basal-omni-1.0-max and basal-omni-pico with `--mode fast`, mini and pico with `--mode eager`); what
+is new is opt-in unless a line says otherwise.
 
+- **Changes on the default path**: in a request with task questions, a question named `<task>::<part>` is refused (HTTP
+  422, #59); error bodies gain `code` (and `detail` on 422), `error` keeps its text (#62); `GET /v1/models` lists the
+  certified thresholds and the context (#64); every response carries an `x-request-id` header (#68).
 - **basal-router**: several replicas behind one port, routed by state so that each replica's state cache keeps working;
   `--gpus 0,1` starts one replica per GPU. Cascades from a small to a bigger model (`--escalate`, also several levels,
   such as basal-omni-pico -> mini -> ultra), `--blend` (a weighted mean of several models' probabilities) and an LLM
