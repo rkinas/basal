@@ -83,6 +83,12 @@ is new is opt-in unless a line says otherwise.
   `--prefix-cache on` and `--batches compact` (with `--readout-layer on`), with answers as close to fp32 as `--mode
   eager`'s (1,700 held-out decisions, H100); compact rows serve 1.11-1.16x the short single questions per second at 16
   clients (no speed-up on long states).
+- **`--long-lane` for basal-omni-pico** (`--long-lane-gdn on`; opt-in, off by default: its answers are a little further
+  from float32 than `--mode eager`'s): without the option `--long-lane` stays refused for Qwen3.5 models, and the
+  message names it. One H100, 1,700 held-out decisions against eager float32: with five questions per state the same
+  top answer on 99.39% of 8,500 readouts against eager bf16's 99.51% (0.12 pt fewer); single questions, two option
+  orders and both within 0.1 pt of eager bf16's (99.71%, 99.65%, 99.46%). No speed was measured for it.
+  [SERVING.md](SERVING.md#serving-modes)
 - **basal-omni-pico on a Mac**: `--mode mlx` serves it from its own Hugging Face repository (bf16 weights, computed in
   float32); on 1,700 held-out prompts its answers match CUDA eager float32 (top-1 100%). `--mode mps` stays refused for
   it.

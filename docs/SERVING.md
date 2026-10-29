@@ -39,7 +39,11 @@ benchmarking a GPU.
   a whole cached one (a growing agent trace) continues it from there; one that differs inside the cached tokens runs
   again (a recurrent state cannot be cut there). Not with them yet: `fp8` / `nvfp4`, `fast-exit`,
   `mps`, `--batches compact`, `--prefix-cache`, `--template-prefix on`, `--readout-layer on`, `--lean` and
-  `--long-lane` (each refused before loading). `--mode vllm` and `--mode gguf` serve Qwen3.5 models
+  `--long-lane` (each refused before loading). `--long-lane` runs for them with `--long-lane-gdn on` (2.5, opt-in, off
+  by default): its bf16 answers are a little further from float32 than `--mode eager`'s. basal-omni-pico on an H100,
+  1,700 held-out decisions against eager float32: with five questions per state the same top answer on 99.39% (8,500
+  readouts, 52 changed) against eager bf16's 99.51% (42); single questions 99.71%, two option orders 99.65%, both
+  99.46%, within 0.1 pt of eager bf16's. No speed was measured for it. `--mode vllm` and `--mode gguf` serve Qwen3.5 models
   too. Other models with recurrent-state layers (Qwen3-Next, Mamba and other hybrids) are refused by every
   shared-prefix engine and run `eager` without `--mode`.
 - **`--mode fp8` below compute capability 8.9** (Ampere, e.g. RTX 3090 / A100) stops before loading the model (2.3.2;
