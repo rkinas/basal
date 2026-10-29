@@ -462,6 +462,22 @@ def torch_varlen_available(dtype):
 GEMMA_COMPACT = "Gemma 4 needs --gemma-attn fa3 (Hopper) or flex"
 
 
+def compact_rows(batches, fa3, gemma_kernels, varlen_why, cuda):
+    """--batches -> (the kernel of compact rows: "fa3", "torch varlen" or "flex"; None for rows padded to graph lengths,
+    why compact rows cannot run here or None). fa3: FlashAttention 3 runs here (Gemma 4: in its sliding layers);
+    gemma_kernels: Gemma 4's kernel per layer type (None for other models); varlen_why: torch_varlen_available's answer
+    (other models). auto takes compact rows only where FlashAttention 3 runs; torch's varlen attention (Llama models) and
+    flex block masks per prompt (Gemma 4 with flex in every layer, the Blackwell workstation GPUs) need --batches
+    compact."""
+    gemma_flex = gemma_kernels is not None and set(gemma_kernels.values()) == {"flex"}
+    why = varlen_why if gemma_kernels is None else None if gemma_flex else GEMMA_COMPACT
+    torch_varlen = not fa3 and batches == "compact" and why is None and gemma_kernels is None
+    flex_rows = not fa3 and batches == "compact" and gemma_flex
+    if not (batches in ("compact", "auto") and (fa3 or torch_varlen or flex_rows) and cuda):
+        return None, why
+    return ("torch varlen" if torch_varlen else "flex" if flex_rows else "fa3"), why
+
+
 def compact_refused(why):
     return ("--batches compact needs FlashAttention 3 (--attn fa3 / auto on Hopper; Gemma 4: --gemma-attn fa3) or "
             f"torch's varlen attention ({why})")
@@ -1334,14 +1350,10 @@ class GraphBackend(EagerBackend):
         # Gemma 4 with the flex kernels (Blackwell workstation GPUs), flex block masks per prompt in every layer
         fa3 = self.attn == "fa3" and (self.gemma is None or self.gemma.kernels.get("sliding_attention") == "fa3"
                                       and self.gemma.kernels.get("full_attention") != "math")
-        gemma_flex = self.gemma is not None and set(self.gemma.kernels.values()) == {"flex"}
-        why = (torch_varlen_available(getattr(torch, dtype)) if self.gemma is None
-               else None if gemma_flex else GEMMA_COMPACT)
-        torch_varlen = not fa3 and batches == "compact" and why is None and self.gemma is None
-        flex_rows = not fa3 and batches == "compact" and gemma_flex
-        self.compact = batches in ("compact", "auto") and (fa3 or torch_varlen or flex_rows) and self.dev.type == "cuda"
-        self.compact_kernel = (("torch varlen" if torch_varlen else "flex" if flex_rows else "fa3") if self.compact
-                               else None)  # per backend
+        why = torch_varlen_available(getattr(torch, dtype)) if self.gemma is None else None
+        self.compact_kernel, why = compact_rows(batches, fa3, None if self.gemma is None else self.gemma.kernels, why,
+                                                self.dev.type == "cuda")  # per backend
+        self.compact = self.compact_kernel is not None
         if batches == "compact" and not self.compact:
             raise ValueError(compact_refused(why))
         if self.compact and self.gemma is not None:  # its forward reads out at one row per prompt
