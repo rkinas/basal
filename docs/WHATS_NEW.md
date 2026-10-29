@@ -95,6 +95,12 @@ is new is opt-in unless a line says otherwise.
   preset varies from run to run. `--vllm-preset deterministic` gives reproducible answers, bit-identical to 2.4.1's on
   four models; it is refused for basal-omni-pico before vLLM starts (vLLM has no batch-invariant kernel for its Gated
   DeltaNet layers).
+- **`--vllm-overlap on`** (`--mode vllm`; opt-in, off by default: a little faster, and the answers differ from off's):
+  up to four engine calls in flight through vLLM's async engine, batched together by its scheduler. One RTX PRO 6000
+  Blackwell Max-Q, 16 clients, basal-omni-1.0-mini and 1.0-max: 1.01-1.07x the questions per second (1.21x for mini on
+  2,000 development decisions, one per request), the same top answer as off on 98.17-99.65% of the readouts, 2-6
+  changed where off's margin was at least 0.05 (600-2,000 readouts per workload); two runs with off differed about as
+  much. [OMNI.md](OMNI.md#vllm---mode-vllm)
 - Experimental `--deterministic --lanes N` (still behind `BASAL_EXPERIMENTAL_LANES`): now exact, not yet faster.
 - **Ready question sets and agent frameworks**: presets (triage, moderation, compliance) in `basal-run --preset` and
   `Basal.preset`; `guard_input`, `guard_output` and `route_intent` (Python and TypeScript), strict or permissive, whose

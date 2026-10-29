@@ -1199,7 +1199,8 @@ class Server:
             self.backend = VLLMBackend(md, a.dtype, mem=a.gpu_memory, max_len=a.max_len, max_options=self.max_options,
                                        preset=getattr(a, "vllm_preset", "default"),
                                        fast_prefill=getattr(a, "vllm_fast_prefill", "auto") == "auto",
-                                       media=getattr(a, "media", "off") == "on")
+                                       media=getattr(a, "media", "off") == "on",
+                                       overlap=getattr(a, "vllm_overlap", "off") == "on")
         elif kind == "sglang":
             self.backend = SGLangBackend(md, a.dtype, mem=a.gpu_memory, max_len=a.max_len)
         elif kind == "mlx":
@@ -2042,6 +2043,13 @@ def add_engine_args(ap):
     ap.add_argument("--vllm-fast-prefill", dest="vllm_fast_prefill", choices=["auto", "off"], default="auto",
                     help="--mode vllm: auto = layers that reuse earlier layers' keys and values (Gemma 4 E2B / E4B) "
                          "run at the answer position only during prefill (vLLM's kv_sharing_fast_prefill); off = as 2.2")
+    ap.add_argument("--vllm-overlap", dest="vllm_overlap", choices=["on", "off"], default="off",
+                    help="--mode vllm: on = several engine calls in flight through vLLM's async engine, batched together "
+                         "by its scheduler (the GPU does not wait between one batch's answers and the next batch); off "
+                         "= one LLM.generate call at a time. on is opt-in: a little faster, and its answers differ from "
+                         "off's (RTX PRO 6000 Max-Q, 16 clients, basal-omni-1.0-mini and 1.0-max: 1.01-1.07x the "
+                         "questions per second, 1.21x on mini's development set; the same top answer on 98.17-99.65%%, "
+                         "2-6 changed where off's margin is >= 0.05, per 600-2,000 readouts)")
     ap.add_argument("--max-len", dest="max_len", type=int, default=4096,
                     help="--mode vllm / sglang / tpu: context length in tokens (longer states are refused; raise it for "
                          "long documents)")

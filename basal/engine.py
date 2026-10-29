@@ -3169,6 +3169,48 @@ def vllm_args(cfg, preset="default", media=False, fast_prefill=True):
     return kw, env
 
 
+class _VLLMOverlap:
+    """vLLM's AsyncLLM behind LLM.generate's interface (basal-serve --vllm-overlap on): the prompts of several engine
+    calls at once go to one running engine, whose scheduler batches them together, so the GPU does not wait between
+    one call's readouts and the next call's prompts (with LLM.generate, one call at a time, it idles there). Engine
+    arguments and scheduler limits as LLM's (its defaults: seed 0, no stats log; LLM_CLASS usage context). The engine
+    runs on an asyncio loop of its own thread; generate() blocks the calling thread only."""
+
+    def __init__(self, **kw):
+        import asyncio
+        import itertools
+        from vllm.engine.arg_utils import AsyncEngineArgs
+        from vllm.usage.usage_lib import UsageContext
+        from vllm.v1.engine.async_llm import AsyncLLM
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_forever, name="basal-vllm", daemon=True).start()
+        args = AsyncEngineArgs(**{"seed": 0, "disable_log_stats": True, **kw})
+
+        async def start():
+            return AsyncLLM.from_engine_args(args, usage_context=UsageContext.LLM_CLASS)
+        self.engine = asyncio.run_coroutine_threadsafe(start(), self.loop).result()
+        self.ids = itertools.count()
+
+    def generate(self, reqs, sps, use_tqdm=False):
+        """-> the final RequestOutput of every prompt, in order (as LLM.generate)."""
+        import asyncio
+
+        async def one(r, sp):
+            out = None
+            async for out in self.engine.generate(r, sp, request_id=f"basal-{next(self.ids)}"):
+                pass
+            return out
+
+        async def every():
+            return await asyncio.gather(*(one(r, sp) for r, sp in zip(reqs, sps)))
+        return asyncio.run_coroutine_threadsafe(every(), self.loop).result()
+
+    def collective_rpc(self, method, *args, **kw):
+        """LLM.collective_rpc: a method of every worker (basal/vllm_unified.py's check)."""
+        import asyncio
+        return asyncio.run_coroutine_threadsafe(self.engine.collective_rpc(method, *args, **kw), self.loop).result()
+
+
 class VLLMBackend:
     """vLLM backend: bf16 checkpoints and the ModelOpt FP8 / NVFP4 ports, with the engine settings of a --vllm-preset
     (VLLM_PRESETS, vllm_args). One generated token restricted to the option letters; with
@@ -3182,11 +3224,12 @@ class VLLMBackend:
     CUDA (processed log-probabilities) are exactly the allowed codes."""
 
     LOGPROB_TOKEN_IDS = 128  # longest logprob_token_ids list vLLM accepts
+    OVERLAP_CALLS = 4        # --vllm-overlap on: engine calls the server runs at once
     lock = threading.Lock()  # one vLLM call at a time (text batches and media requests); a class default for tests
     media_kinds, max_audio_s, unified = (), None, False
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, max_options=10, preset="default",
-                 fast_prefill=True, media=False):
+                 fast_prefill=True, media=False, overlap=False):
         cfg_file = Path(model_dir) / "config.json"
         cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
         kw, env = vllm_args(cfg, preset, media=media, fast_prefill=fast_prefill)
@@ -3206,10 +3249,14 @@ class VLLMBackend:
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
         self.preset, self.engine_args, self.lock = preset, kw, threading.Lock()
-        from vllm import LLM
-        self.llm = LLM(**{**dict(model=str(model_dir), dtype=dtype, gpu_memory_utilization=mem, max_model_len=max_len,
-                                 enable_prefix_caching=True, logprobs_mode="processed_logprobs",
-                                 max_logprobs=max(16, max_options)), **kw})
+        kw = {**dict(model=str(model_dir), dtype=dtype, gpu_memory_utilization=mem, max_model_len=max_len,
+                     enable_prefix_caching=True, logprobs_mode="processed_logprobs", max_logprobs=max(16, max_options)),
+              **kw}
+        if overlap:  # several calls in flight, batched by vLLM's scheduler (_VLLMOverlap)
+            self.llm, self.lock, self.inflight = _VLLMOverlap(**kw), nullcontext(), self.OVERLAP_CALLS
+        else:
+            from vllm import LLM
+            self.llm = LLM(**kw)
         if unified:
             vllm_unified.check(self.llm)
         self.context = max_len - 1  # longest prompt: max_model_len holds the one generated token too
