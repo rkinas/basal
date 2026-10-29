@@ -1,5 +1,103 @@
 # What is new in basal 2.5
 
+Released 3 November 2026. Every default answer is byte-identical to 2.4.1 (checked on an H100 for basal-omni-1.0-mini,
+basal-omni-1.0-max and basal-omni-pico, `fast` and `eager`); what is new is opt-in unless a line says otherwise.
+
+- **basal-router: several replicas behind one port.** `basal-router --replicas URL ...`, or `--gpus 0,1` to start one
+  basal-serve per GPU (stopped with the router, also when the router is killed). Requests over the same state go to the
+  same replica (state-hash routing with bounded load), so its state cache keeps working; a replica that answers 503 or
+  not at all gets no requests until it is ready again. On two H100s the router served 1.58x the requests of one GPU
+  (twice the clients); scaling is not linear yet. [SERVING.md](SERVING.md#several-gpus-metrics-and-health-25).
+- **Cascades in basal-router** (`--escalate URL --escalate-below P`): questions whose top probability is under P are
+  asked again of a bigger model, and every answer says which model answered (`answered_by`). Repeat both for ordered
+  levels (for example basal-omni-pico -> mini -> ultra), each with its own threshold; with two or more levels every
+  answer names its level and model, /metrics counts answers per level, and a level that is down leaves the previous
+  answer. On a held-out half, mini -> ultra at 0.95 served about 1.5x the requests of ultra alone on one H100 at the
+  same accuracy (within 0.5 pt); at 16 clients its p95 latency is higher than ultra's. `--route SCRIPT=URL` sends states
+  mostly in one script (such as Cyrillic) to their own replicas. [RESULTS.md](RESULTS.md#cascade-pico-mini-ultra).
+- **`--blend` in basal-router**: the weighted mean of several models' probabilities (`--blend URL ... --blend-weights
+  ...`). 0.6 ultra + 0.2 mini + 0.2 pico scored +0.45 pt above ultra alone on a held-out half (95% interval +0.09 to
+  +0.81). A quality option, not a speed option: every question goes to every model. Blended answers are not calibrated;
+  refit thresholds with basal-calibrate before automating them.
+- **LLM fallback in basal-router** (`--fallback URL --fallback-model NAME --fallback-below T`): after the last level, a
+  choice question whose top probability is still under T goes to a chat model you serve behind an OpenAI-compatible
+  endpoint, which must pick one of the options; its answer (`"answered_by": "fallback"`, `"calibrated": false`) replaces
+  the basal one, and the basal one stays when the endpoint fails or is late. With basal-omni-1.0-ultra and, as an
+  example, Gemma 4 31B-it with thinking at T = 0.8, on a held-out half: +1.40 pt over ultra alone (95% interval +0.90 to
+  +1.89; 8.4% of the questions sent), when no call is cut by the timeout. One call took 54 s at the median and 308 s at
+  p95 (one H100, one request at a time); with the default `--fallback-timeout 60`, 46 of 100 calls kept the basal
+  answer, about three quarters of the gain on that sample (`--fallback-timeout 600` for offline or review use). Fallback
+  answers repeat only with the endpoint settings in [SERVING.md](SERVING.md#several-gpus-metrics-and-health-25)
+  (batch-invariant vLLM, no prefix cache, no chunked prefill).
+- **`GET /metrics` (Prometheus) and start-up states**: basal-serve and basal-router export their counters and gauges;
+  basal-serve answers HTTP 503 `{"status": "starting"}` while the model loads and warms up, and a failed start-up exits
+  instead of hanging. [SERVING.md](SERVING.md#prometheus-metrics).
+- **Prepared start-up** (`basal-prepare`, `--prepared auto`): the kernels tuned for this GPU and engine version are
+  saved once and loaded at start-up, and the answers are byte-identical to a cold start. The model repositories carry
+  `prepared/<key>/` for the H100 (basal-2.0-mini, basal-omni-pico, basal-omni-1.0-mini, basal-omni-1.0-max); `--prepared
+  auto` fetches only the directory for your GPU and versions. First start on an H100 with empty caches:
+  basal-omni-1.0-mini 290 -> 172 s, basal-omni-1.0-max 259 -> 164 s, basal-omni-pico 105 -> 81 s.
+- **basal-omni-pico starts the same every time** on the H100 (default path): fla's kernel configs are pinned, so empty,
+  warm and long-used caches give bit-identical answers.
+- **basal-omni-1.0-ultra on a 48 GB card**: `--quant-load cpu` quantises one layer at a time on the GPU, so ultra in
+  `--mode fp8` or `int8` fits a 48 GB card, and `--graph-memory-gb N` sizes the CUDA graphs for N GiB, so every GPU
+  given the same N answers the same: on an H100 with 32 GB taken, 1,700 of 1,700 answers bit-identical to the unloaded
+  card ([QUANTIZATION.md](QUANTIZATION.md)). Also fixed: with little free GPU memory, a prompt just past the largest
+  compact graph no longer fails (HTTP 500).
+- **Answer sets and abstain** (per question): `"coverage": 0.9` returns the set of options that holds the right one with
+  that probability; with `"max_error"`, a choice, yes/no or score answer gets `"abstain": true` below the certified
+  threshold for its type. [API.md](API.md#using-the-confidence).
+- **Second read** (`--reread T`): answers below T are read again (the state twice) and the two reads combined;
+  `--reread-image` reads an image again at more soft tokens.
+- **Two-way models** (trained to read the state in both directions) in the fast engine, and **isolated options**
+  (basal.json `"option_isolation"`) for models trained to read the options as a set.
+- **basal-omni-pico in the fast engine with the caches**: the state cache, several questions over one state,
+  `--prefix-cache on` and `--batches compact` (with `--readout-layer on`), with answers as close to fp32 as `--mode
+  eager`'s (1,700 held-out decisions, H100); compact rows serve 1.11-1.16x the short single questions per second at 16
+  clients (no speed-up on long states).
+- **basal-omni-pico on a Mac**: `--mode mlx` serves it from its own Hugging Face repository (bf16 weights, computed in
+  float32); on 1,700 held-out prompts its answers match CUDA eager float32 (top-1 100%). `--mode mps` stays refused for
+  it.
+- **basal-omni-1.1-max images and audio through `--mode vllm --media on`**: the same top answer as the eager media path
+  on 97.4% of images and 95.8% of clips (every one where eager's margin is at least 0.2), 2.7x / 2.9x the requests per
+  second at 8 in flight; `"detail": "high"` stays on `--mode eager`. [OMNI.md](OMNI.md#vllm---mode-vllm).
+- **`--mode vllm` against `--mode eager`**: vLLM reads in its own kernels, so its answers are close to eager's, not
+  equal: the same top answer on 98.3% of 361 readouts (basal-omni-1.0-mini), 98.3% (basal-omni-pico), 98.6%
+  (basal-omni-1.0-max) and 97.6% (basal-omni-1.1-max) on an H100; answers may differ on near-ties, and vLLM's default
+  preset varies from run to run. `--vllm-preset deterministic` gives reproducible answers, bit-identical to 2.4.1's on
+  four models; it is refused for basal-omni-pico before vLLM starts (vLLM has no batch-invariant kernel for its Gated
+  DeltaNet layers).
+- Experimental `--deterministic --lanes N` (still behind `BASAL_EXPERIMENTAL_LANES`): now exact, not yet faster.
+- **Ready question sets and agent frameworks**: presets (triage, moderation, compliance) in `basal-run --preset` and
+  `Basal.preset`; `guard_input`, `guard_output` and `route_intent` (Python and TypeScript), strict or permissive, whose
+  default thresholds are hand-picked, not certified (with `max_error` they use the served model's own calibration per
+  question type); thin LangChain, LlamaIndex and CrewAI tools over the HTTP API (`basal.adapters`).
+  [SERVING.md](SERVING.md#agent-frameworks-and-ready-question-sets-25).
+- **TypeScript client** (`clients/typescript`, no runtime dependencies): typed questions and answers, answer sets,
+  abstain, `ask_if` / `depends_on`, images and errors; build it from the repository (not on npm yet).
+- **Other /v1/systemone servers and clients**: the Python client talks to other servers of the same request shape (a
+  bearer key, list criteria, noul answers that carry only `noul`); basal-serve takes `ask_if` / `depends_on`, an
+  `images` alias and `--error-format openai`. [API.md](API.md#requests-from-other-v1systemone-servers-clients).
+- **basal-attach**: serve a chat model that was never trained on basal (Gemma 4, Qwen, ...) as a decision model; it
+  starts uncalibrated and basal-calibrate fits it on your labelled requests.
+  [SERVING.md](SERVING.md#attach-a-model-that-was-not-trained-on-basal).
+- **basal-agree**: any backend against the native engine: top-answer agreement with a 95% interval, |Δp|, paired
+  accuracy, and whether each question gets the same answer alone as in a request.
+- **basal-finetune**: LoRA on your own labelled decisions ([FINETUNE.md](FINETUNE.md); tested on Apple Silicon with
+  basal-omni-pico, other GPUs not yet). **basal-selfcheck** compares your setup with shipped reference answers, and
+  [OLD_GPUS.md](OLD_GPUS.md) runs basal-omni-pico on older GPUs (GTX 10xx, RX 480 / 580, Intel Iris Xe) through
+  llama.cpp's Vulkan backend.
+- **basal as the local backend of your decision code** ([BACKEND.md](BACKEND.md), a one-function example) and a basal
+  skill for coding agents (`skills/basal`).
+- **Accuracy by document length**: [RESULTS.md](RESULTS.md#accuracy-by-document-length) and each model card show
+  accuracy per document-length bucket, with the number of items in each. The calibration report shows the temperatures
+  as served.
+- **The state cache keeps branches**: cached states that share a history are all kept, and a request continues from the
+  longest one it can extend. On branching agent histories (H100) it reused 1.6-1.7x the prefix tokens of the cache
+  before it, with answers as close to the uncached ones. Contributed by Marcin Brzeżański (@marcinbrzezanski),
+  [#56](https://github.com/rkinas/basal/pull/56).
+- **Continuous integration**: every pull request runs ruff and the CPU tests on Linux and macOS. Contributed by Dariusz
+  Koryto (@dkoryto), [#53](https://github.com/rkinas/basal/pull/53).
 - **`basal-interpolate`: linear weight interpolation of two checkpoints** that share a base model (WiSE-FT, model
   soups), streamed tensor by tensor; quantized or mismatched pairs (tensors, config, tokenizer) are refused before
   anything is written. [INTERPOLATION.md](INTERPOLATION.md). Contributed by Dariusz Koryto (@dkoryto),
@@ -111,6 +209,11 @@
   undefined names, merge markers, private keys, TOML / YAML / JSON / JSONL syntax), no Git hook installed. README
   "Development commands". Contributed by Paweł Kiszczak (@pawelkiszczak),
   [#46](https://github.com/rkinas/basal/pull/46).
+- **Known limit:** repeated requests over long states: with `--mode fast` on one H100, basal-omni-1.0-ultra gives
+  bit-identical probabilities for the same 24k-32k-token request sent again (one at a time) in 95 of 100 cases, as 2.4.1
+  did; basal-omni-1.0-mini in 100 of 100. Ultra's answers on long states are not guaranteed to be bit-stable.
+- **Known limit:** basal-router does not forward API keys yet, so a replica started with `--api-keys` answers the router
+  with 401 ([SERVING.md](SERVING.md#api-access)); forwarding comes in 2.5.1.
 
 # What is new in basal 2.4.1
 

@@ -7,7 +7,7 @@ question. They are trained on text; with `--media on` the server also takes imag
 ## Serve
 
 ```bash
-uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-omni-1.0-max --mode eager --media on --port 8000    # or Remek/basal-omni-1.0-mini
 ```
 
@@ -149,6 +149,12 @@ The vLLM path of 2.2 is unchanged by default (vLLM 0.31.0). Added in 2.3, each m
 `--mode eager` bf16 on dev v2 (10,606 decisions, 32 in flight) and with the calibration file the mode loads on the
 calibration test split:
 
+- **How close to eager (2.5 check, H100, 27 Oct 2026, the default preset):** `--mode vllm` reads in vLLM's own kernels,
+  so its answers are close to `--mode eager`'s, not equal. Of 361 readouts per model, the same top answer on 98.3%
+  (basal-omni-1.0-mini), 98.3% (basal-omni-pico), 98.6% (basal-omni-1.0-max) and 97.6% (basal-omni-1.1-max); answers can
+  differ on near-ties, and the default preset can vary from run to run. With `--vllm-preset deterministic` (below) the
+  answers are reproducible and bit-identical to 2.4.1's on these models but basal-omni-pico, for which basal-serve
+  refuses that preset before vLLM starts (vLLM has no batch-invariant kernel for its Gated DeltaNet layers).
 - **KV-sharing fast prefill** (`--vllm-fast-prefill auto`, the default; `off` restores 2.2): Gemma 4 E2B / E4B (mini)
   run their last 18 of 42 layers, which reuse earlier layers' keys and values, at the answer position only during
   prefill (vLLM's `kv_sharing_fast_prefill`). The generated token, the only one basal reads, is computed the same way.
