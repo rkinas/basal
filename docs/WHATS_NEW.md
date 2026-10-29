@@ -4,6 +4,13 @@ Released 3 November 2026. Default answers to decision requests are byte-identica
 basal-omni-1.0-mini, basal-omni-1.0-max and basal-omni-pico with `--mode fast`, mini and pico with `--mode eager`); what
 is new is opt-in unless a line says otherwise.
 
+- **basal-viz reads Gemma 4 basal-omni text decisions:** the logit lens runs over basal-omni's text decoder with the
+  output head's bias and the final logit softcap, so every layer's code distribution ends at the probabilities the
+  eager engine serves. Requests with media are refused with a message (basal-viz explains text only). Gemma 4
+  inspection is limited to 2,048 tokens per rendered prompt; concurrent HTTP inspections are serialized together
+  with their served comparisons so layer hooks cannot capture another request's activations.
+  [SERVING.md](SERVING.md#see-how-a-decision-is-made)
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#75](https://github.com/rkinas/basal/pull/75).
 - **basal-viz with `"facts": "auto"`:** the explained state carries the computed facts block (dates, gaps, VAT), as
   basal-serve reads it, so the page explains the prompt the served answer came from and the comparison with
   basal-serve's probabilities holds for such requests.
