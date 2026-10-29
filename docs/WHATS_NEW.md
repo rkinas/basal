@@ -4,6 +4,9 @@ Released 3 November 2026. Default answers to decision requests are byte-identica
 basal-omni-1.0-mini, basal-omni-1.0-max and basal-omni-pico with `--mode fast`, mini and pico with `--mode eager`); what
 is new is opt-in unless a line says otherwise.
 
+- **Tests on Apple M5**: the float32 MLX tests set `MLX_ENABLE_TF32=0` (`tests/conftest.py`), since MLX runs float32
+  matmuls in TF32 on an M5's GPU by default; served models are not affected. Contributed by Grzegorz Brzezinka
+  (@agentGreg), [#76](https://github.com/rkinas/basal/pull/76).
 - **basal-router: several replicas behind one port.** `basal-router --replicas URL ...`, or `--gpus 0,1` to start one
   basal-serve per GPU (stopped with the router, also when the router is killed). Requests over the same state go to the
   same replica (state-hash routing with bounded load), so its state cache keeps working; a replica that answers 503 or
