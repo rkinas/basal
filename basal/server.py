@@ -1087,6 +1087,8 @@ class Server:
         if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4",
                                                                                                         "int8")):
             raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
+        if getattr(a, "long_lane_gdn", "off") == "on" and getattr(a, "long_lane", "off") != "on":
+            raise SystemExit("--long-lane-gdn on needs --long-lane on")
         if getattr(a, "graph_memory_gb", None) is not None:
             if kind != "graph":
                 raise SystemExit("--graph-memory-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
@@ -1123,9 +1125,12 @@ class Server:
                                   getattr(a, "prefix_cache", "off") == "on", getattr(a, "batches", "default"),
                                   lean_arg(getattr(a, "lean", "off")), getattr(a, "tree", "dense"),
                                   getattr(a, "readout_layer", "off"), getattr(a, "template_prefix", "off"))
-                # --long-lane on Qwen3.5: bf16 answers 0.12 pt further from fp32 than eager's (five questions per state)
-                if not why and getattr(a, "long_lane", "off") == "on":
-                    why = "--long-lane is not available for Qwen3.5 (Gated DeltaNet) models in this version"
+                # --long-lane on Qwen3.5: bf16 answers 0.12 pt further from fp32 than eager's (five questions per state),
+                # so only with --long-lane-gdn on
+                if not why and getattr(a, "long_lane", "off") == "on" and getattr(a, "long_lane_gdn", "off") != "on":
+                    why = ("--long-lane is not available for Qwen3.5 (Gated DeltaNet) models in this version by "
+                           "default; --long-lane-gdn on serves it anyway (its bf16 answers to five questions per state "
+                           "agree with float32 0.12 pt less often than --mode eager's)")
                 if not why and getattr(a, "lanes", 1) > 1:
                     why = "--lanes is not available for Qwen3.5 (Gated DeltaNet) models"
                 if why:
@@ -2176,6 +2181,13 @@ def add_engine_args(ap):
                     help="CUDA graph engine: requests whose longest prompt has more than --long-tokens tokens run in a "
                          "lane of their own, one at a time and one decoder layer at a time, giving the GPU to the "
                          "batches of short requests (whose answers then do not wait for a long document)")
+    ap.add_argument("--long-lane-gdn", dest="long_lane_gdn", choices=["on", "off"], default="off",
+                    help="--long-lane with a Qwen3.5 (Gated DeltaNet) model such as basal-omni-pico: on = serve the "
+                         "long lane (opt-in), off = refuse it. Its bf16 answers are a little further from float32 than "
+                         "--mode eager's (H100, 1,700 held-out decisions, five questions per state: the same top "
+                         "answer as float32 on 99.39%% against eager bf16's 99.51%%; single questions 99.71%%, two option "
+                         "orders 99.65%%, both 99.46%%, within 0.1 pt of eager bf16's); no speed measured. No effect on other "
+                         "models")
     ap.add_argument("--long-tokens", dest="long_tokens", type=int, default=2048,
                     help="--long-lane: the prompt length (tokens) above which a request is long")
     ap.add_argument("--long-share", dest="long_share", type=float, default=0.5,
