@@ -125,6 +125,40 @@ def test_gemma_flex_refused_before_loading(tmp_path, monkeypatch):
         engine_module.GraphBackend(str(tmp_path), gemma_attn="flex")
 
 
+@pytest.mark.parametrize("gemma_attn, refused", [("flex", False), ("math", True), ("auto", False)])
+def test_gemma_compact_rows_need_fa3_or_flex(tmp_path, monkeypatch, gemma_attn, refused):
+    """--batches compact for basal-omni without FlashAttention 3: with the flex kernels (sm_120's auto) it loads; with
+    the math kernel it is refused before anything is loaded."""
+    import basal.engine as engine_module
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "gemma4"}), encoding="utf-8")
+
+    def loaded(*_):
+        raise RuntimeError("loading")
+    monkeypatch.setattr("basal.engine.AutoTokenizer.from_pretrained", loaded)
+    monkeypatch.setattr("basal.engine.set_attention", lambda *_, **__: "fa2")
+    monkeypatch.setattr(engine_module, "attention_available", lambda impl: None)
+    monkeypatch.setattr(engine_module, "gemma_fast_kernels", lambda: "flex")
+    with pytest.raises(ValueError if refused else RuntimeError, match="fa3 \\(Hopper\\) or flex" if refused else "loading"):
+        engine_module.GraphBackend(str(tmp_path), gemma_attn=gemma_attn, batches="compact", compile=True)
+
+
+def test_gemma_flex_compact_rows_are_off_by_default():
+    """Compact rows with the flex kernels are opt-in: --batches auto (the default) keeps basal-omni's padded rows on
+    them, only --batches compact packs them. FlashAttention 3 takes compact rows under auto, and other models need
+    --batches compact for torch's varlen attention, as before."""
+    from basal.engine import GEMMA_COMPACT, compact_rows
+    flex = {"sliding_attention": "flex", "full_attention": "flex"}
+    assert parser().parse_args(["--model", "m"]).batches == "auto"
+    assert compact_rows("auto", False, flex, None, True) == (None, None)
+    assert compact_rows("compact", False, flex, None, True) == ("flex", None)
+    assert compact_rows("compact", False, flex, None, False) == (None, None)
+    assert compact_rows("auto", True, {"sliding_attention": "fa3", "full_attention": "flex"}, None, True)[0] == "fa3"
+    assert compact_rows("compact", False, {"sliding_attention": "math", "full_attention": "math"}, None, True) == \
+        (None, GEMMA_COMPACT)
+    assert compact_rows("auto", False, None, None, True) == (None, None)
+    assert compact_rows("compact", False, None, None, True) == ("torch varlen", None)
+
+
 def test_default_mode_requires_both_mlx_packages_on_mps(monkeypatch):
     monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)

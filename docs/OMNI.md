@@ -101,9 +101,25 @@ basal-serve --model Remek/basal-omni-1.0-max --mode eager --media on --port 8000
     compact rows (`--batches auto`: prompts back to back in one row, no padding). `math`: the kernel of `--mode
     eager`, uncompiled. Also `flex` (FlexAttention everywhere) and `fa3+math`. On Blackwell workstation GPUs
     (sm_120) `auto` is `flex`, compiled, with merged projections and smaller tiles for their 99 KB of shared memory
-    per block (no compact rows: those need FlashAttention 3). On an RTX PRO 6000 vLLM is faster for single
+    per block (no compact rows by default: below). On an RTX PRO 6000 vLLM is faster for single
     basal-omni-1.0-max questions (8.9 against 5.0 decisions per second), `fast` for five questions over a long state
     (5.3 against 4.9 per second). Elsewhere `auto` is `math`.
+  - **Compact rows with the flex kernels** (`--batches compact` on Blackwell workstation GPUs; 2.5, opt-in, off by
+    default): a flex block mask per prompt in every layer (a query block visits only the key blocks from its prompt's
+    start, and its window, on). Faster, but the answers differ from the default rows'. One RTX PRO 6000 Blackwell
+    Max-Q, 16 clients, against the default rows of `--mode fast` (each a fresh server):
+
+    | model | workload | questions/s | same top answer | changed where the default's margin >= 0.05 |
+    |---|---|---|---|---|
+    | basal-omni-1.0-mini | 2,000 development decisions, one per request | 126.6 -> 152.3 (1.20x) | 99.60% | 1 |
+    | | 600 single questions, ~1.5k-token states | 22.8 -> 26.6 (1.17x) | 98.67% | 0 |
+    | | 120 requests, five questions over 3k-10k tokens | 21.2 -> 21.3 (1.00x) | 100% (580 of 600 bit-identical) | 0 |
+    | basal-omni-1.0-max | 2,000 development decisions | 31.0 -> 39.5 (1.27x) | 99.75% | 2 |
+    | | 600 single questions | 5.09 -> 6.14 (1.21x) | 98.00% | 4 |
+    | | 120 requests, five questions | 5.33 -> 5.32 (1.00x) | 100% (580 of 600 bit-identical) | 0 |
+
+    Requests with several questions do not use compact rows. For comparison, two runs of the default rows agreed on
+    99.85-100% (mini) and 99.8-100% (max) of the same readouts, with 0-2 changes at a margin >= 0.05.
   - Text only: `--media on` needs `--mode eager`; the image and audio towers are not loaded. Each captured CUDA graph
     keeps its own cuBLAS workspace, so the engine sets `CUBLAS_WORKSPACE_CONFIG=:4096:2` for Gemma 4 unless you set it
     (1.1-max ran out of GPU memory in warm-up with the default; the smaller workspace did not change its forward

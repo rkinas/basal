@@ -2086,10 +2086,14 @@ def add_engine_args(ap):
                          "values")
     ap.add_argument("--batches", choices=["auto", "compact", "default", "fine"], default="auto",
                     help="CUDA graph engine: compact = single prompts packed back to back into one row (FlashAttention "
-                         "3 varlen on Hopper; elsewhere, sm80+, torch's varlen attention, Llama models), no padding to "
+                         "3 varlen on Hopper; elsewhere, sm80+, torch's varlen attention, Llama models; basal-omni with "
+                         "the flex kernels: flex block masks per prompt), no padding to "
                          "graph lengths and row counts; default = rows padded to graph lengths; fine = more row "
                          "counts (less padding of short batches, longer start-up); auto = compact where FlashAttention "
-                         "3 runs, else default")
+                         "3 runs, else default. basal-omni's flex compact rows (Blackwell workstation GPUs) are opt-in: "
+                         "faster, but answers differ from the default rows (RTX PRO 6000 Max-Q, 16 clients, single "
+                         "questions: 1.17-1.20x on basal-omni-1.0-mini, 1.21-1.27x on 1.0-max; the same top answer on "
+                         "98.0-99.75%%, up to 4 changed where the default's margin is >= 0.05, per 600-2,000 readouts)")
     ap.add_argument("--readout-layer", dest="readout_layer", choices=["auto", "on", "off"], default="off",
                     help="CUDA graph engine with compact rows, Llama models: the last decoder layer computes keys, values "
                          "and attention for every token and its o_proj and MLP at the readout positions only (auto: on; off by "
