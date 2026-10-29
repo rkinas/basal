@@ -196,7 +196,8 @@ is new is opt-in unless a line says otherwise.
   5 s longer at the first start on a machine, about the same once Triton's disk cache holds the copies. Details in
   [STRIX_HALO.md](benchmarks/STRIX_HALO.md#what---mode-strix-does). Contributed by Michał Kardyś (@kardysm),
   [#51](https://github.com/rkinas/basal/pull/51); the stall was first seen by @piotrkowski in
-  [#21](https://github.com/rkinas/basal/pull/21).
+  [#21](https://github.com/rkinas/basal/pull/21). `--mode strix` stays community-maintained, not yet verified on our
+  hardware ([HARDWARE.md](HARDWARE.md#amd-strix-halo-experimental-community-maintained)).
 - **Starts after a reboot reuse the compiled code** (`--mode fast`): torch.compile's cache moves from Inductor's default
   `/tmp/torchinductor_<user>`, which a reboot empties on most systems, to `~/.cache/basal/torchinductor`
   (`TORCHINDUCTOR_CACHE_DIR` still takes precedence), as `--mode tpu` keeps JAX's in `~/.cache/basal/jax`. RTX 4060 Ti,
