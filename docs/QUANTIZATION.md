@@ -137,6 +137,19 @@ layers are: basal-omni at its readout rows, little for Llama (one layer of 32). 
 was fitted on the default path, so check `--mlx-forward basal` against it before relying on the calibrated
 thresholds; on basal-omni the probabilities move more (8-bit matmuls of a few rows round differently).
 
+basal-omni-pico (Qwen3.5, Gated DeltaNet) runs `--mode mlx` from its own repository's bf16 weights, computed in
+float32 (2.5). `--mlx-compute bf16` (opt-in, off by default) keeps the weights in bf16 and computes in bf16: faster,
+but further from float32. Apple M4 Pro, 1,700 held-out decisions, against CUDA eager float32:
+
+| | `--mlx-compute auto` (float32, the default) | `--mlx-compute bf16` |
+|---|---|---|
+| single prompts: same top answer / changed where float32's margin >= 0.05 | 100.00% / 0 | 99.41% / 1 |
+| five questions in two option orders (17,000 readouts) | 99.98% / 0 | 99.33% / 8 |
+
+`--mlx-compute bf16` read the 1,700 single prompts in 0.136 s each on a 48 GB M4 Pro, 1.25x the GGUF Q8_0 path's
+0.171 s on the same Mac. For comparison, CUDA's own bf16 path (eager) agrees with float32 on 99.48% of the 17,000
+readouts, with 3 changed at a margin >= 0.05.
+
 - `-MLX-8bit`: affine 8-bit decoder weights (group 64, a bf16 scale and bias per group);
 - `-MLX-fp4`: MLX `nvfp4` decoder weights (4-bit floating point E2M1, group 16, FP8 scales);
 - in both, the token embeddings and the output head stay in bf16, because the decision is read from the output head's
