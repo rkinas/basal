@@ -2067,7 +2067,10 @@ def add_engine_args(ap):
                     help="CUDA graph engine, basal-omni (Gemma 4): the kernel of the 512-wide global layers on plain "
                          "rows (single prompts and the state of a multi-question request): flex (FlexAttention, as "
                          "before) or triton (basal's causal kernel for 512-wide heads, faster on long states; Hopper); "
-                         "pass 2 and compact rows keep flex")
+                         "pass 2 and compact rows keep flex. triton is opt-in: faster, but answers differ from flex "
+                         "(H100, five questions over 24k-32k-token states, 4 clients: basal-omni-1.0-mini 1.10x, the "
+                         "same top answer on 99.67%%, none changed where flex's margin is >= 0.05; 1.1-max 1.16x, "
+                         "98.33%%, 4 of 600 changed; 1.0-ultra 1.03x, 99.0%%, 2 of 600)")
     ap.add_argument("--merge", choices=["auto", "on", "off"], default="auto",
                     help="CUDA graph engine: one q/k/v and one gate/up GEMM per layer (bf16: the same products; FP8 "
                          "checkpoints: the merged weights re-quantised per tensor). auto: on for bf16 weights, off for "

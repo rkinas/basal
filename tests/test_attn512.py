@@ -36,6 +36,15 @@ def test_global_layers_of_plain_rows_take_the_kernel():
     assert torch.allclose(g._run(g.kernels, ids, pos), ref, atol=1e-10)
 
 
+def test_off_by_default():
+    """--global-attn flex is the default: the global layers of plain rows keep FlexAttention's block mask."""
+    g = Gemma4Graph(tiny("31b"))
+    assert g.global_attn == "flex"
+    g.kernels = {S_: "math", G_: "flex"}
+    m_all, _ = g._masks(g.kernels, 13, torch.arange(13)[None].expand(2, 13), None, None, None, {})
+    assert not isinstance(m_all[G_], tuple)
+
+
 def test_refused_where_it_cannot_run(monkeypatch):
     m = tiny("e4b")
     with pytest.raises(ValueError, match="--global-attn triton: needs a CUDA GPU"):
