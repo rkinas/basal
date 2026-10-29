@@ -551,6 +551,24 @@ def test_mlx_compute_needs_mode_mlx():
         Server(parser().parse_args(["--mode", "eager", "--mlx-compute", "bf16"]))
 
 
+def test_mlx_float32_compute_turns_tf32_off_unless_set(tmp_path, monkeypatch):
+    """Qwen3.5's float32 compute sets MLX_ENABLE_TF32=0 at load (an M5's GPU would run its matmuls in TF32), unless the
+    variable is already set; bf16 compute (bf16 models, --mlx-compute bf16) leaves it alone."""
+    import os
+    pytest.importorskip("mlx.core")
+    tiny_qwen35(tmp_path / "q", torch.bfloat16)
+    tiny_llama(tmp_path / "l")
+    monkeypatch.delenv("MLX_ENABLE_TF32", raising=False)
+    mlx_stub(tmp_path / "l")
+    mlx_stub(tmp_path / "q", compute="bf16")
+    assert "MLX_ENABLE_TF32" not in os.environ
+    mlx_stub(tmp_path / "q")
+    assert os.environ["MLX_ENABLE_TF32"] == "0"
+    monkeypatch.setenv("MLX_ENABLE_TF32", "1")
+    mlx_stub(tmp_path / "q")
+    assert os.environ["MLX_ENABLE_TF32"] == "1"
+
+
 def test_mlx_state_cache_refused_for_qwen35_before_loading(tmp_path, monkeypatch):
     """The MLX state cache holds attention keys and values only: --state-cache-gb / --prefix-cache are refused for a
     Qwen3.5 model before mlx is imported."""
