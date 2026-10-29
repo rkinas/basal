@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<title>basal-serve</title>
+<style>
+@font-face{font-family:'DM Sans';font-style:normal;font-display:swap;font-weight:100 1000;src:url(ui/fonts/dm-sans-latin.woff2) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:'DM Sans';font-style:normal;font-display:swap;font-weight:100 1000;src:url(ui/fonts/dm-sans-latin-ext.woff2) format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:'Space Grotesk';font-style:normal;font-display:swap;font-weight:300 700;src:url(ui/fonts/space-grotesk-latin.woff2) format('woff2');unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:'Space Grotesk';font-style:normal;font-display:swap;font-weight:300 700;src:url(ui/fonts/space-grotesk-latin-ext.woff2) format('woff2');unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+:root{
+  --bg:#0b0f16;--top:#0e131b;--panel:#111720;--panel-2:#0f1721;--line:#242d38;--line-2:#2b3441;--row:#1d2731;
+  --text:#e7eaf0;--soft:#b9c4d2;--muted:#7d899b;--dim:#5f6d80;
+  --green:#b0ed93;--green-bg:#202c24;--green-line:#3c5038;--purple:#a892ee;--purple-bg:#272b45;--purple-line:#3a3f5b;
+  --amber:#e8c07a;--amber-bg:#352e21;--red:#ec9a87;--red-bg:#3d2b28;--blue:#9dc6dd;--blue-bg:#1e3545;
+  --mono:'SFMono-Regular',ui-monospace,Menlo,Consolas,'Liberation Mono',monospace;
+  --head:'Space Grotesk','DM Sans',system-ui,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{background:var(--bg);scroll-behavior:smooth;scroll-padding-top:84px}
+body{margin:0;background:var(--bg);color:var(--text);font:400 13px/1.5 'DM Sans',system-ui,sans-serif;font-synthesis:none;
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;overflow-x:hidden}
+h1,h2,h3,p{margin:0}
+h2,h3{font-weight:550}
+a{color:inherit;text-decoration:none}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none;-webkit-tap-highlight-color:transparent}
+button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+::selection{color:#0b1510;background:var(--green)}
+::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-thumb{background:#354150;border-radius:5px}
+.mono,code{font-family:var(--mono)}
+svg{flex-shrink:0}
+.ic{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+
+/* top bar */
+.topbar{position:sticky;top:0;z-index:5;height:68px;padding:0 32px;border-bottom:1px solid var(--line);display:flex;
+  align-items:center;justify-content:space-between;gap:22px;background:rgba(14,19,27,.94);backdrop-filter:blur(8px)}
+.brand{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.brand-mark{color:#bbf7a3;width:34px;height:34px;background:var(--green-bg);display:grid;place-items:center;
+  border:1px solid var(--green-line);border-radius:9px}
+.brand-mark .ic{width:18px;height:18px}
+.brand-name{font:700 25px/1 var(--head);letter-spacing:-1.1px}
+.brand-name b{color:var(--green);font-weight:700}
+.brand-divider{height:22px;width:1px;background:#313944;margin:0 6px}
+.brand-caption{color:#758296;font-size:8px;letter-spacing:1.7px;line-height:1.6;text-transform:uppercase}
+.topbar nav{display:flex;align-items:center;gap:6px;height:100%;min-width:0}
+.topbar nav a{display:flex;align-items:center;gap:8px;color:#8c98a9;padding:9px 13px;border-radius:6px;font-weight:500;
+  white-space:nowrap;transition:background .18s,color .18s}
+.topbar nav a:hover{color:#e5e9ef;background:#19202b}
+.topbar nav a.active{color:var(--green);background:var(--green-bg)}
+.header-right{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.conn{display:flex;align-items:center;gap:8px;font-size:11px;color:#9aa6b5;white-space:nowrap;padding:7px 10px;
+  border:1px solid var(--line);border-radius:6px;background:#10161e}
+.conn i{width:6px;height:6px;border-radius:50%;background:#8593a4}
+.conn.live i{background:var(--green);box-shadow:0 0 9px #a9e89566;animation:pulse 2s ease-in-out infinite}
+.conn.offline i{background:var(--amber)}
+.conn.locked i{background:var(--purple)}
+@keyframes pulse{50%{opacity:.45}}
+.btn{border-radius:7px;padding:8px 12px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;
+  gap:8px;white-space:nowrap;font-size:12px;background:#161e28;color:#c3cdd9;border:1px solid #2e3946;
+  transition:background .18s,border-color .18s,color .18s}
+.btn:hover{border-color:#6a7b70;background:#1e2a30}
+.btn.primary{background:var(--green);color:#0d1710;border-color:var(--green)}
+.btn.primary:hover{background:#c4f7ab;box-shadow:0 0 18px #abeb8f19}
+
+/* page */
+main{max-width:1370px;margin:0 auto;padding:0 32px 36px}
+.hero{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:40px;align-items:end;padding:34px 0 26px}
+.eyebrow{display:flex;align-items:center;gap:8px;font:600 9px/1.6 'DM Sans',sans-serif;letter-spacing:1.6px;
+  color:#8d9caa;text-transform:uppercase}
+.eyebrow::before{content:'';width:6px;height:6px;background:var(--green);border-radius:1px}
+.hero h1{font:700 clamp(32px,3.6vw,50px)/1.1 var(--head);letter-spacing:-1.8px;margin:16px 0 14px;overflow-wrap:anywhere}
+.hero h1 .accent{color:var(--purple)}
+.hero h1 .accent.warn{color:var(--amber)}
+.lede{color:#aab5c3;font-size:14px;line-height:1.75;max-width:640px}
+.tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.tag{font:10px var(--mono);letter-spacing:.4px;color:#a9b6c3;padding:5px 8px;border:1px solid var(--line-2);border-radius:5px;
+  background:#121922;white-space:nowrap}
+.tag.green{color:var(--green);border-color:var(--green-line);background:var(--green-bg)}
+.tag.purple{color:#c9bdf5;border-color:var(--purple-line);background:var(--purple-bg)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;min-width:0}
+.session{padding:4px 0}
+.session dl{display:grid;grid-template-columns:auto minmax(0,1fr);margin:0}
+.session dt,.session dd{margin:0;padding:10px 18px;border-bottom:1px solid var(--row);font-size:12px}
+.session dt{color:var(--muted)}
+.session dd{color:var(--soft);text-align:right;font-family:var(--mono);font-size:11px;overflow-wrap:anywhere}
+.session dl>:nth-last-child(-n+2){border-bottom:0}
+.kicker{display:flex;align-items:center;gap:7px;font:10px/1.7 var(--mono);letter-spacing:1px;color:var(--green);
+  text-transform:uppercase}
+.kicker.purple{color:var(--purple)}
+
+.metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:16px;margin:0 0 18px}
+.metric{position:relative;padding:16px 18px 18px;overflow:hidden}
+.metric-label{display:flex;align-items:center;gap:8px;color:#8796a6;font-size:9px;letter-spacing:1px;font-weight:600;
+  text-transform:uppercase;white-space:nowrap}
+.metric-label .ic{color:#8ea68c;width:14px;height:14px}
+.metric-label .extra{margin-left:auto;font:9px var(--mono);letter-spacing:.3px;color:#607b6b;text-transform:none}
+.metric-value{font:400 30px/1.1 var(--head);letter-spacing:-.8px;margin:12px 0 6px;color:#e9eedf;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.metric-value small{font:14px var(--mono);letter-spacing:-.5px;margin-left:7px;color:#5f7a6d}
+.metric-detail{font-size:11px;color:#7a8b9a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.metric-detail b{color:var(--soft);font-weight:500}
+.metric-detail .bad{color:var(--red)}
+.progress{position:absolute;left:0;right:0;bottom:0;height:2px;background:#22302a}
+.progress span{display:block;height:100%;width:0;background:var(--green);transition:width .5s}
+
+.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-bottom:18px}
+.grid-tel{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:18px;margin-bottom:18px}
+.section-header{padding:15px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;
+  border-bottom:1px solid var(--line);min-height:56px}
+.section-header h2{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600;color:#dfe5ec}
+.section-header h2 .ic{color:var(--muted)}
+.section-header .note{font:9px var(--mono);letter-spacing:.8px;color:#6c7b8d;text-transform:uppercase;white-space:nowrap}
+.count{font:9px var(--mono);color:#91a48f;background:#243229;min-width:20px;text-align:center;border:1px solid #354432;
+  border-radius:4px;padding:2px 5px}
+.body{padding:16px 18px 18px}
+
+/* charts */
+.chart{position:relative;height:150px;margin-top:4px}
+.chart svg{position:absolute;top:0;bottom:0;left:0;right:52px;width:calc(100% - 52px);height:100%;overflow:visible}
+.chart .y{position:absolute;right:0;width:46px;font:9px var(--mono);color:#5f6e80;transform:translateY(-50%);white-space:nowrap}
+.chart-foot{display:flex;justify-content:space-between;font:9px var(--mono);color:#5f6e80;margin:8px 52px 0 0;letter-spacing:.4px}
+.legend{display:flex;gap:14px;font-size:11px;color:#8b98a8}
+.legend i{display:inline-block;width:10px;height:2px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.empty{display:grid;place-items:center;height:100%;color:#5f6e80;font-size:12px;text-align:center}
+
+/* tables */
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{border-collapse:collapse;width:100%;font-size:11px;text-align:left;white-space:nowrap}
+th{padding:10px 18px;font-weight:500;font-size:9px;letter-spacing:.8px;text-transform:uppercase;color:#6a7f91;
+  background:var(--panel-2);border-bottom:1px solid var(--line)}
+td{padding:10px 18px;border-bottom:1px solid var(--row);color:#a8b6c1}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:#161f29}
+td.num,th.num{text-align:right;font-family:var(--mono)}
+th.num{font-family:inherit}
+td.ep{color:#cfd8e1;font-family:var(--mono);font-size:11px}
+td.t{font-family:var(--mono);color:#6e8698;font-size:10px}
+.badge{display:inline-flex;align-items:center;gap:5px;font:10px var(--mono);border-radius:4px;padding:3px 7px;
+  color:#b4d296;background:#253523}
+.badge::before{content:'';width:4px;height:4px;border-radius:50%;background:currentColor}
+.badge.warn{color:var(--amber);background:var(--amber-bg)}
+.badge.err{color:var(--red);background:var(--red-bg)}
+.codes{display:flex;flex-wrap:wrap;gap:8px;padding:14px 18px;border-top:1px solid var(--line)}
+.codes .label{font:9px var(--mono);letter-spacing:.8px;color:#6a7f91;text-transform:uppercase;align-self:center;margin-right:4px}
+
+/* bars and stats */
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--row);border-radius:8px;overflow:hidden;
+  border:1px solid var(--row)}
+.stat{background:var(--panel);padding:12px 14px;min-width:0}
+.stat span{display:block;font-size:9px;letter-spacing:.9px;color:#7a8a9b;text-transform:uppercase;font-weight:600}
+.stat b{display:block;font:400 20px/1.3 var(--head);letter-spacing:-.4px;color:#e3e9e0;margin-top:4px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.stat b small{font:11px var(--mono);color:#617a6d;margin-left:5px}
+.meter{margin:14px 0 2px}
+.meter-top{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:#8b98a8;margin-bottom:7px}
+.meter-top b{font:11px var(--mono);color:var(--soft);font-weight:400}
+.bar{height:6px;border-radius:6px;background:#1b242e;overflow:hidden}
+.bar span{display:block;height:100%;width:0;border-radius:6px;background:var(--green);transition:width .5s}
+.bar.purple span{background:var(--purple)}
+.bar.amber span{background:var(--amber)}
+.notice{border:1px dashed #394555;border-radius:8px;padding:12px 14px;color:#93a1b1;font-size:12px;line-height:1.6;
+  background:#0f151d}
+.notice code{color:var(--green);font-size:11px}
+.gpus{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
+.gpu{border:1px solid var(--line-2);border-radius:9px;padding:14px 16px;background:#10161f}
+.gpu-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.gpu-head strong{font-size:12px;font-weight:600;color:#d7dee6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gpu-facts{display:flex;gap:14px;margin-top:12px;font:11px var(--mono);color:#8796a6;flex-wrap:wrap}
+.gpu-facts b{color:var(--soft);font-weight:400}
+.spark{height:34px;margin-top:12px}
+.spark svg{width:100%;height:100%;display:block}
+
+/* configuration */
+.config{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr)}
+.facts{border-right:1px solid var(--line);padding:6px 0}
+.facts dl{display:grid;grid-template-columns:minmax(120px,auto) minmax(0,1fr);margin:0}
+.facts dt,.facts dd{margin:0;padding:8px 18px;border-bottom:1px solid var(--row);font-size:12px}
+.facts dt{color:var(--muted)}
+.facts dd{color:var(--soft);font:11px/1.6 var(--mono);overflow-wrap:anywhere}
+.facts dl>:nth-last-child(-n+2){border-bottom:0}
+.opts-tools{display:flex;gap:10px;align-items:center;padding:12px 18px;border-bottom:1px solid var(--line)}
+.opts-tools input[type=search]{flex:1;min-width:0;padding:8px 11px;background:#0d131c;border:1px solid #2b3542;border-radius:7px;
+  color:#dce2e9;font-size:12px}
+.opts-tools input[type=search]:focus{border-color:#91b980;outline:none}
+.toggle{display:flex;align-items:center;gap:7px;font-size:11px;color:#9aa6b5;white-space:nowrap;cursor:pointer}
+.toggle input{accent-color:var(--green)}
+.opts-col{display:flex;flex-direction:column;min-width:0;contain:size}
+.opts{flex:1 1 0;min-height:0;overflow:auto}
+.opts th{position:sticky;top:0;z-index:1}
+.opts td{padding:8px 18px}
+.opts td.k{font-family:var(--mono);color:#c7d1db;font-size:11px}
+.opts td.v{font-family:var(--mono);font-size:11px;white-space:normal;overflow-wrap:anywhere;min-width:120px}
+.opts tr.changed td.k::before{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--green);
+  margin:0 8px 1px -13px}
+.opts tr.changed td.v{color:var(--green)}
+
+.req-tools{display:flex;gap:8px;align-items:center}
+.chip{font-size:11px;padding:5px 10px;border-radius:6px;color:#8c98a9;border:1px solid transparent}
+.chip:hover{color:#e5e9ef;background:#19202b}
+.chip.on{color:var(--green);background:var(--green-bg);border-color:var(--green-line)}
+.table-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid var(--line);
+  padding:11px 18px;color:#6a7f91;font-size:11px}
+.text-btn{font-size:11px;font-weight:500;color:#9aa8b6}
+.text-btn:hover{color:var(--green)}
+footer{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:#5f6e80;font-size:11px;padding:22px 0 0;
+  border-top:1px solid var(--line);margin-top:26px}
+footer a{color:#8796a6;border-bottom:1px solid #2c3743}
+footer a:hover{color:var(--green)}
+.section{margin-bottom:18px}
+.reset-chip{display:none;align-items:center;gap:6px;font:10px var(--mono);color:#c9bdf5;background:var(--purple-bg);
+  border:1px solid var(--purple-line);border-radius:5px;padding:4px 8px}
+.reset-chip.on{display:inline-flex}
+.reset-chip button{color:#c9bdf5;font-size:12px;line-height:1;padding:0 0 0 4px}
+
+/* key form */
+.login{position:fixed;inset:0;z-index:10;display:grid;place-items:center;padding:20px;background:rgba(8,11,16,.86);backdrop-filter:blur(6px)}
+.login[hidden]{display:none}
+.login form{width:min(440px,100%);padding:28px;border-radius:12px;border:1px solid var(--line-2);background:var(--panel);
+  box-shadow:0 30px 80px #0008}
+.login h2{font:700 26px/1.15 var(--head);letter-spacing:-.8px;margin:14px 0 10px}
+.login p{color:#9aa6b5;font-size:12px;line-height:1.7;margin-bottom:18px}
+.login input{width:100%;padding:11px 12px;background:#0d131c;border:1px solid #2b3542;border-radius:7px;color:#dce2e9;
+  font-family:var(--mono);font-size:12px}
+.login input:focus{border-color:#91b980;outline:none}
+.login .row{display:flex;gap:10px;margin-top:12px}
+.login .row .btn{flex:1;padding:11px 14px}
+.login .err{color:var(--red);font-size:12px;min-height:18px;margin-top:10px}
+
+@media (max-width:1180px){
+  .metrics{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .topbar nav a span{display:none}
+  .config{grid-template-columns:1fr}.facts{border-right:0;border-bottom:1px solid var(--line)}
+  .opts-col{contain:none}.opts{flex:none;max-height:520px}
+}
+@media (max-width:900px){
+  .hero{grid-template-columns:1fr;gap:22px;align-items:start}
+  .grid-2,.grid-tel{grid-template-columns:1fr}
+}
+@media (max-width:760px){
+  html{scroll-padding-top:120px}
+  .topbar{height:auto;padding:12px 16px 0;flex-wrap:wrap;gap:12px}
+  .brand-divider,.brand-caption{display:none}
+  .topbar nav{order:3;width:calc(100% + 32px);margin:0 -16px;padding:0 12px 10px;overflow-x:auto;height:auto;scrollbar-width:none}
+  .topbar nav::-webkit-scrollbar{display:none}
+  .topbar nav a span{display:inline}
+  .header-right{gap:8px}
+  .header-right .btn{padding:7px 10px}
+  .header-right .btn .lbl{display:none}
+  main{padding:0 16px 28px}
+  .hero{padding:24px 0 20px}
+  .hero h1{letter-spacing:-1.2px}
+  .lede{font-size:13px}
+  .metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .metric{padding:14px 14px 16px}
+  .metric-value{font-size:25px}
+  .metric-label .extra{display:none}
+  .metric:last-child{grid-column:1/-1}
+  .grid-2,.grid-tel{gap:12px}
+  .section-header{padding:13px 14px;flex-wrap:wrap;row-gap:6px}
+  .section-header .note{white-space:normal}
+  .body{padding:14px}
+  th,td{padding:9px 14px}
+  .opts td{padding:8px 14px}
+  .facts dt,.facts dd{padding:8px 14px}
+  .facts dl{grid-template-columns:minmax(110px,auto) minmax(0,1fr)}
+  .opts-tools,.codes{padding:12px 14px}
+  .opts-tools{flex-wrap:wrap}
+  .session dt,.session dd{padding:9px 14px}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="2.3"/><circle cx="18.5" cy="5.5" r="2.3"/><circle cx="18.5" cy="18.5" r="2.3"/><path d="M7.7 11 16.3 6.6M7.7 13l8.6 4.4"/></svg></span>
+    <span class="brand-name">basal<b>.</b></span>
+    <span class="brand-divider"></span>
+    <span class="brand-caption">Inference<br>engine</span>
+  </div>
+  <nav aria-label="Sections">
+    <a href="#overview" class="active"><svg class="ic" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg><span>Overview</span></a>
+    <a href="#traffic"><svg class="ic" viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 5-8 4 5"/></svg><span>Traffic</span></a>
+    <a href="#telemetry"><svg class="ic" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg><span>Telemetry</span></a>
+    <a href="#configuration"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span>Configuration</span></a>
+    <a href="#requests"><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Requests</span></a>
+  </nav>
+  <div class="header-right">
+    <div class="conn" id="conn" role="status"><i></i><span id="conn-text">Connecting</span></div>
+    <button class="btn" id="pause" type="button" title="Stop polling this server"><svg class="ic" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg><span class="lbl">Pause</span></button>
+    <button class="btn" id="reset" type="button" title="Count from now in this view (the server's stats are not changed)"><svg class="ic" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4h4"/></svg><span class="lbl">Reset view</span></button>
+  </div>
+</header>
+
+<main>
+  <section class="hero" id="overview" aria-label="Status">
+    <div>
+      <div class="eyebrow"><span>Inference engine</span><span aria-hidden="true">·</span><span id="since">stats since start</span></div>
+      <h1><span id="model">basal-serve</span><br><span class="accent" id="headline">Connecting…</span></h1>
+      <p class="lede" id="lede">Live status of this server. Stats start at zero with every start and stay in its memory.</p>
+      <div class="tags" id="tags"></div>
+    </div>
+    <div class="panel session">
+      <dl id="session"></dl>
+    </div>
+  </section>
+
+  <div class="metrics" role="list">
+    <div class="panel metric" role="listitem">
+      <div class="metric-label"><svg class="ic" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Requests<span class="extra" id="m-req-scope">since start</span></div>
+      <div class="metric-value" id="m-req">—</div>
+      <div class="metric-detail" id="m-req-d">&nbsp;</div>
+      <div class="progress"><span id="m-req-p"></span></div>
+    </div>
+    <div class="panel metric" role="listitem">
+      <div class="metric-label"><svg class="ic" viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 5-8 4 5"/></svg>Throughput<span class="extra">last 10 s</span></div>
+      <div class="metric-value" id="m-rate">—</div>
+      <div class="metric-detail" id="m-rate-d">&nbsp;</div>
+    </div>
+    <div class="panel metric" role="listitem">
+      <div class="metric-label"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9.5 2.5h5"/></svg>Latency p50<span class="extra" id="m-lat-scope">since start</span></div>
+      <div class="metric-value" id="m-lat">—</div>
+      <div class="metric-detail" id="m-lat-d">&nbsp;</div>
+    </div>
+    <div class="panel metric" role="listitem">
+      <div class="metric-label"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/></svg>In flight<span class="extra">now</span></div>
+      <div class="metric-value" id="m-fl">—</div>
+      <div class="metric-detail" id="m-fl-d">&nbsp;</div>
+    </div>
+    <div class="panel metric" role="listitem">
+      <div class="metric-label"><svg class="ic" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>GPU<span class="extra" id="m-gpu-x"></span></div>
+      <div class="metric-value" id="m-gpu">—</div>
+      <div class="metric-detail" id="m-gpu-d">&nbsp;</div>
+      <div class="progress"><span id="m-gpu-p"></span></div>
+    </div>
+  </div>
+
+  <div id="traffic" class="grid-2">
+    <section class="panel">
+      <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 5-8 4 5"/></svg>Throughput</h2><span class="note">requests / s · each poll</span></div>
+      <div class="body"><div class="chart" id="c-rate"></div><div class="chart-foot"><span id="c-rate-from">—</span><span>now</span></div></div>
+    </section>
+    <section class="panel">
+      <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9.5 2.5h5"/></svg>Latency</h2>
+        <div class="legend"><span><i style="background:var(--green)"></i>p50</span><span><i style="background:var(--purple)"></i>p95</span><span class="note">ms · last 10 s</span></div></div>
+      <div class="body"><div class="chart" id="c-lat"></div><div class="chart-foot"><span id="c-lat-from">—</span><span>now</span></div></div>
+    </section>
+  </div>
+
+  <div class="grid-2">
+    <section class="panel">
+      <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>Endpoints</h2><span class="note" id="ep-note">since start</span></div>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Endpoint</th><th class="num">Requests</th><th class="num">Failed</th><th class="num">p50 ms</th><th class="num">p95 ms</th><th class="num">Mean ms</th></tr></thead>
+        <tbody id="endpoints"><tr><td colspan="6" class="empty-row">No decision requests yet.</td></tr></tbody>
+      </table></div>
+      <div class="codes" id="codes"><span class="label">Status codes</span><span class="muted">none yet</span></div>
+    </section>
+    <section class="panel">
+      <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>State cache</h2><span class="note" id="cache-note">—</span></div>
+      <div class="body" id="cache"></div>
+    </section>
+  </div>
+
+  <div id="telemetry" class="grid-tel">
+    <section class="panel">
+      <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>GPUs</h2><span class="note" id="gpu-note">NVML · 1 s</span></div>
+      <div class="body" id="gpus"><div class="notice">Reading telemetry…</div></div>
+    </section>
+    <section class="panel">
+      <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>Host</h2><span class="note">psutil · 1 s</span></div>
+      <div class="body" id="host"><div class="notice">Reading telemetry…</div></div>
+    </section>
+  </div>
+
+  <section class="panel section" id="configuration">
+    <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>Configuration</h2><span class="note">as parsed at start-up · secrets redacted</span></div>
+    <div class="config">
+      <div class="facts"><dl id="facts"></dl></div>
+      <div class="opts-col">
+        <div class="opts-tools">
+          <input type="search" id="opt-filter" placeholder="Filter options" aria-label="Filter options" autocomplete="off" spellcheck="false">
+          <label class="toggle"><input type="checkbox" id="opt-changed"> Changed only</label>
+          <span class="count" id="opt-count">0</span>
+        </div>
+        <div class="opts"><table><thead><tr><th>Option</th><th>Value</th></tr></thead><tbody id="options"></tbody></table></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel section" id="requests">
+    <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Recent requests <span class="count" id="req-count">0</span></h2>
+      <div class="req-tools"><button class="chip on" type="button" data-f="all">All</button><button class="chip" type="button" data-f="err">Errors</button></div></div>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Time</th><th>Endpoint</th><th>Status</th><th class="num">Latency ms</th><th class="num">Questions</th><th class="num">Options</th></tr></thead>
+      <tbody id="recent"><tr><td colspan="6">No decision requests yet.</td></tr></tbody>
+    </table></div>
+    <div class="table-foot"><span>Metadata only: the request's text is never kept.</span><button class="text-btn" type="button" id="more">Show all</button></div>
+  </section>
+
+  <footer>
+    <span id="foot-version">basal-serve</span>
+    <span>Fonts: DM Sans (<a href="ui/fonts/OFL-DMSans.txt">OFL</a>) and Space Grotesk (<a href="ui/fonts/OFL-SpaceGrotesk.txt">OFL</a>)</span>
+  </footer>
+</main>
+
+<div class="login" id="login" hidden>
+  <form id="login-form" autocomplete="off">
+    <div class="kicker purple"><svg class="ic" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>API key required</div>
+    <h2>Connect to this server</h2>
+    <p>This basal-serve was started with <code>--api-keys</code>. The key is kept in this tab only and sent only to this server, with each read of its state.</p>
+    <label for="key" class="toggle" style="margin-bottom:8px">API key</label>
+    <input id="key" type="password" spellcheck="false" autocomplete="off" required>
+    <div class="row"><button class="btn primary" type="submit">Connect</button></div>
+    <div class="err" id="login-err" role="alert"></div>
+  </form>
+</div>
+<noscript><p style="padding:20px">This page needs JavaScript to read the server's state.</p></noscript>
+
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const STORE = 'basal-ui-key', POINTS = 300;
+  const S = {key: '', paused: false, hist: [], prev: null, session: null, base: null, cfgSession: null, cfg: null,
+             showAll: false, errorsOnly: false, timer: 0, last: null};
+  try { S.key = sessionStorage.getItem(STORE) || ''; } catch (e) { /* storage blocked: ask each time */ }
+
+  const esc = v => String(v).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[c]);
+  const nf = new Intl.NumberFormat('en-US');
+  const int = n => n == null ? '—' : nf.format(Math.round(n));
+  const dec = (v, d) => v == null ? '—' : v < 10 ? v.toFixed(d == null ? 2 : d) : v < 100 ? v.toFixed(1) : nf.format(Math.round(v));
+  const pct = v => v == null ? '—' : Math.round(v) + '%';
+  const gib = b => b == null ? '—' : b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + ' GiB' : (b / 2 ** 20).toFixed(0) + ' MiB';
+  const pad = n => String(n).padStart(2, '0');
+  const clock = t => { const d = new Date(t * 1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+  const clockMs = t => clock(t) + '.' + String(Math.floor((t % 1) * 1000)).padStart(3, '0');
+  const dur = s => {
+    if (s == null) return '—';
+    s = Math.floor(s);
+    const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+    return d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : m ? `${m} min ${s % 60} s` : `${s} s`;
+  };
+  const flag = k => '--' + k.replace(/_/g, '-');
+  const val = v => v == null ? 'none' : typeof v === 'boolean' ? (v ? 'on' : 'off') : Array.isArray(v) ? v.join(' ') : String(v);
+  const width = (el, f) => { el.style.width = Math.max(0, Math.min(100, f * 100)).toFixed(1) + '%'; };
+  const set = (id, text) => { const el = $(id); if (el.textContent !== text) el.textContent = text; };
+  const setHTML = (id, html) => { const el = $(id); if (el.innerHTML !== html) el.innerHTML = html; };
+  const badge = c => `<span class="badge${c >= 500 ? ' err' : c >= 400 ? ' warn' : ''}">${esc(c)}</span>`;
+
+  function conn(kind, text) { $('conn').className = 'conn ' + kind; set('conn-text', text); }
+  function later(ms) { clearTimeout(S.timer); if (!S.paused) S.timer = setTimeout(poll, ms || 1000); }
+
+  async function poll() {
+    let r;
+    try {
+      r = await fetch('ui/state', {cache: 'no-store', headers: S.key ? {Authorization: 'Bearer ' + S.key} : {}});
+    } catch (e) { conn('offline', 'Unreachable'); return later(2000); }
+    if (r.status === 401) { conn('locked', 'Key needed'); return login(S.key ? 'This key was not accepted.' : ''); }
+    if (r.status === 503) { conn('offline', 'Starting'); return later(3000); }
+    if (!r.ok) { conn('offline', 'HTTP ' + r.status); return later(2000); }
+    let s;
+    try { s = await r.json(); } catch (e) { conn('offline', 'Bad reply'); return later(2000); }
+    if (!S.paused) conn('live', 'Live');
+    ingest(s);
+    render(s);
+    later(1000);
+  }
+
+  function login(msg) {
+    clearTimeout(S.timer);
+    $('login').hidden = false;
+    set('login-err', msg || '');
+    $('key').value = '';
+    $('key').focus();
+  }
+  $('login-form').addEventListener('submit', e => {
+    e.preventDefault();
+    S.key = $('key').value.trim();
+    try { sessionStorage.setItem(STORE, S.key); } catch (err) { /* kept for this page only */ }
+    $('login').hidden = true;
+    conn('', 'Connecting');
+    poll();
+  });
+
+  function ingest(s) {
+    if (S.session !== s.ready_at) { S.session = s.ready_at; S.hist = []; S.prev = null; S.base = null; resetChip(); }
+    const p = S.prev;
+    if (p && s.now > p.now) {
+      const dt = s.now - p.now;
+      const gpus = s.telemetry.gpus || [];
+      const util = gpus.length ? gpus.reduce((a, g) => a + (g.util || 0), 0) / gpus.length : null;
+      S.hist.push({t: s.now, rate: Math.max(0, s.traffic.requests - p.traffic.requests) / dt,
+                   p50: s.traffic.w10.p50, p95: s.traffic.w10.p95, util, gpus: gpus.map(g => g.util)});
+      if (S.hist.length > POINTS) S.hist.shift();
+    }
+    if (!p || s.now > p.now) S.prev = s;
+    S.last = s;
+  }
+
+  function render(s) {
+    const st = s.status, tr = s.traffic, b = S.base;
+    document.title = `${st.model} · basal-serve`;
+    set('model', st.model);
+    const busy = st.running + st.queued;
+    const head = $('headline');
+    head.textContent = `${busy ? 'Serving' : 'Ready'} · ${st.mode}`;
+    head.className = 'accent';
+    set('since', b ? `view since ${clock(b.t)} · stats since ${clock(s.ready_at)}` : `stats since ${clock(s.ready_at)}`);
+    set('lede', `basal ${st.version} serving ${st.source}${st.revision ? ' @ ' + String(st.revision).slice(0, 12) : ''}. ` +
+        `Up ${dur(s.uptime)}; the numbers below start at zero with each start and live only in this server's memory.`);
+    const tags = [['green', st.state], ['', 'mode ' + st.mode], ['', 'basal ' + st.version]];
+    if (st.think && st.think !== 'off') tags.push(['purple', 'think ' + st.think]);
+    tags.push(st.auth ? ['purple', 'API keys on'] : ['', 'no API keys']);
+    setHTML('tags', tags.map(([c, t]) => `<span class="tag ${c}">${esc(t)}</span>`).join(''));
+    const facts = Object.fromEntries((s.config.facts || []));
+    const sess = [['Started', clock(s.started)], ['Ready', `${clock(s.ready_at)} (after ${dur(s.ready_at - s.started)})`],
+                  ['Uptime', dur(s.uptime)], ['Engine', facts.engine || '—'], ['Device', facts.device || '—'],
+                  ['Calibration', facts.calibration || '—']];
+    setHTML('session', sess.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join(''));
+    set('foot-version', `basal ${st.version} · polling ui/state every second · ${tr.ring.toLocaleString('en-US')} requests kept in memory`);
+
+    // cards
+    const req = tr.requests - (b ? b.requests : 0), failed = tr.failed - (b ? b.failed : 0);
+    set('m-req-scope', b ? 'since reset' : 'since start');
+    $('m-req').innerHTML = `${int(req)}`;
+    $('m-req-d').innerHTML = `<span${failed ? ' class="bad"' : ''}>${int(failed)} failed</span> · ${req ? ((1 - failed / req) * 100).toFixed(failed ? 2 : 0) : '100'}% ok`;
+    width($('m-req-p'), req ? 1 - failed / req : 0);
+    $('m-rate').innerHTML = `${dec(tr.rate10)}<small>req/s</small>`;
+    $('m-rate-d').innerHTML = `<b>${dec(tr.rate60)}</b> last min · <b>${dec(tr.requests / Math.max(s.uptime, 1e-9))}</b> since start`;
+    const L = b ? tr.w60 : tr.latency;
+    set('m-lat-scope', b ? 'last minute' : 'since start');
+    $('m-lat').innerHTML = L.p50 == null ? '—' : `${dec(L.p50)}<small>ms</small>`;
+    $('m-lat-d').innerHTML = L.p50 == null ? 'no requests yet' : `p95 <b>${dec(L.p95)}</b> · p99 <b>${dec(L.p99)}</b> ms`;
+    $('m-fl').innerHTML = `${int(st.running)}<small>running</small>`;
+    $('m-fl-d').innerHTML = `<b>${int(st.queued)}</b> queued for the engine`;
+    const gpus = s.telemetry.gpus || [];
+    if (gpus.length) {
+      const util = gpus.reduce((a, g) => a + (g.util || 0), 0) / gpus.length;
+      const used = gpus.reduce((a, g) => a + (g.mem_used || 0), 0), total = gpus.reduce((a, g) => a + (g.mem_total || 0), 0);
+      $('m-gpu').innerHTML = `${Math.round(util)}<small>% util</small>`;
+      $('m-gpu-d').innerHTML = `<b>${gib(used)}</b> of ${gib(total)}`;
+      set('m-gpu-x', gpus.length > 1 ? `${gpus.length} GPUs` : '');
+      width($('m-gpu-p'), util / 100);
+    } else {
+      $('m-gpu').innerHTML = '—';
+      set('m-gpu-d', s.telemetry.at ? 'no GPU telemetry' : 'reading…');
+      width($('m-gpu-p'), 0);
+    }
+
+    // charts
+    const h = S.hist;
+    const from = `−${dur(Math.max(h.length > 1 ? h[h.length - 1].t - h[0].t : 0, 60))}`;
+    set('c-rate-from', from); set('c-lat-from', from);
+    bars($('c-rate'), h.map(p => p.rate));
+    lines($('c-lat'), [[h.map(p => p.p95), 'var(--purple)'], [h.map(p => p.p50), 'var(--green)']], 'ms');
+
+    // endpoints and codes
+    set('ep-note', b ? 'counts since reset · ms since start' : 'since start');
+    const eps = tr.endpoints || [];
+    setHTML('endpoints', eps.length ? eps.map(e => {
+      const be = b && b.eps[e.endpoint] || {requests: 0, failed: 0};
+      const f = e.failed - be.failed;
+      return `<tr><td class="ep">${esc(e.endpoint)}</td><td class="num">${int(e.requests - be.requests)}</td>` +
+             `<td class="num">${f ? `<span class="badge err">${int(f)}</span>` : '0'}</td><td class="num">${dec(e.p50)}</td>` +
+             `<td class="num">${dec(e.p95)}</td><td class="num">${dec(e.mean)}</td></tr>`;
+    }).join('') : '<tr><td colspan="6">No decision requests yet.</td></tr>');
+    const codes = Object.entries(tr.codes || {}).map(([c, n]) => [c, n - (b && b.codes[c] || 0)]).filter(([, n]) => n > 0);
+    setHTML('codes', '<span class="label">Status codes</span>' + (codes.length ? codes.map(([c, n]) =>
+      `${badge(c)}<span class="mono" style="font-size:11px;color:#8b98a8;margin:0 8px 0 -2px;align-self:center">× ${int(n)}</span>`).join('')
+      : '<span style="color:#5f6e80;font-size:11px;align-self:center">none yet</span>'));
+    if (tr.seen < tr.requests - busy) set('ep-note', `${int(tr.seen)} of ${int(tr.requests)} requests seen`);
+
+    renderCache(s.cache);
+    renderGpus(s.telemetry);
+    renderHost(s.telemetry);
+    if (S.cfgSession !== s.ready_at) { S.cfgSession = s.ready_at; S.cfg = s.config; renderFacts(); renderOptions(); }
+    renderRecent(s.recent || []);
+  }
+
+  function nice(v) {
+    if (!(v > 0)) return 1;
+    const e = 10 ** Math.floor(Math.log10(v)), f = v / e;
+    return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e;
+  }
+  function grid(top, unit) {
+    return [0, .5, 1].map(f => `<span class="y" style="top:${(1 - f) * 100}%">${esc(dec(top * f, top < 5 ? 1 : 0))}${f === 1 && unit ? ' ' + unit : ''}</span>`).join('');
+  }
+  const W = 600, H = 150;
+  function bars(el, vals) {
+    if (vals.length < 2) { el.innerHTML = '<div class="empty">Collecting… the chart fills as this page polls.</div>'; return; }
+    const top = nice(Math.max(...vals) * 1.1), n = Math.max(vals.length, 60), bw = W / n;
+    let d = '';
+    vals.forEach((v, i) => {
+      const x = W - (vals.length - i) * bw, hh = Math.max(v > 0 ? 1.5 : 0, v / top * H);
+      if (hh > 0) d += `M${(x + bw * .15).toFixed(2)} ${H}V${(H - hh).toFixed(2)}H${(x + bw * .85).toFixed(2)}V${H}Z`;
+    });
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">` + rules() +
+      `<path d="${d}" fill="var(--green)" opacity=".85"/></svg>` + grid(top, '/s');
+  }
+  function rules() {
+    return [0, .5, 1].map(f => `<line x1="0" x2="${W}" y1="${(H * f).toFixed(1)}" y2="${(H * f).toFixed(1)}" stroke="#202a35" stroke-width="1" vector-effect="non-scaling-stroke"${f < 1 ? ' stroke-dasharray="3 4"' : ''}/>`).join('');
+  }
+  function lines(el, series, unit) {
+    const all = series.flatMap(([v]) => v.filter(x => x != null));
+    if (all.length < 2) { el.innerHTML = '<div class="empty">Collecting… the chart fills as requests arrive.</div>'; return; }
+    const top = nice(Math.max(...all) * 1.1), n = Math.max(series[0][0].length, 60), step = W / (n - 1);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">` + rules();
+    series.forEach(([v, color], k) => {
+      let d = '', pen = false;
+      v.forEach((y, i) => {
+        if (y == null) { pen = false; return; }
+        const x = W - (v.length - 1 - i) * step, yy = H - Math.min(y / top, 1) * H;
+        d += `${pen ? 'L' : 'M'}${x.toFixed(2)} ${yy.toFixed(2)}`; pen = true;
+      });
+      if (k === series.length - 1 && d) {
+        const pts = v.map((y, i) => [W - (v.length - 1 - i) * step, y]).filter(([, y]) => y != null);
+        svg += `<path d="${d}L${pts[pts.length - 1][0].toFixed(2)} ${H}L${pts[0][0].toFixed(2)} ${H}Z" fill="${color}" opacity=".08"/>`;
+      }
+      svg += `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+    });
+    el.innerHTML = svg + '</svg>' + grid(top, unit);
+  }
+  function spark(vals, color) {
+    const v = vals.slice(-90);
+    if (v.filter(x => x != null).length < 2) return '';
+    const w = 300, h = 34, step = w / (Math.max(v.length, 30) - 1);
+    let d = '', pen = false;
+    v.forEach((y, i) => {
+      if (y == null) { pen = false; return; }
+      d += `${pen ? 'L' : 'M'}${(w - (v.length - 1 - i) * step).toFixed(1)} ${(h - y / 100 * (h - 2) - 1).toFixed(1)}`; pen = true;
+    });
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><path d="${d}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+  }
+  const meter = (label, value, frac, cls) => `<div class="meter"><div class="meter-top"><span>${esc(label)}</span><b>${esc(value)}</b></div>` +
+    `<div class="bar ${cls || ''}"><span style="width:${(Math.max(0, Math.min(1, frac || 0)) * 100).toFixed(1)}%"></span></div></div>`;
+  const stat = (label, value, unit) => `<div class="stat"><span>${esc(label)}</span><b>${esc(value)}${unit ? `<small>${esc(unit)}</small>` : ''}</b></div>`;
+
+  function renderCache(c) {
+    if (!c) {
+      set('cache-note', 'off');
+      setHTML('cache', '<div class="notice">No state cache on this server. Start it with <code>--state-cache-gb N</code> to keep computed states across requests over the same text; its entries, hits and evictions show here.</div>');
+      return;
+    }
+    const looks = c.hits + c.misses;
+    set('cache-note', `${int(c.entries)} states`);
+    setHTML('cache', `<div class="stats">${stat('Hit rate', looks ? (c.hits / looks * 100).toFixed(1) : '—', looks ? '%' : '')}` +
+      `${stat('Entries', int(c.entries))}${stat('Hits', int(c.hits))}${stat('Misses', int(c.misses))}` +
+      `${stat('Prefix hits', int(c.prefix_hits))}${stat('Evictions', int(c.evictions))}</div>` +
+      meter('Memory', `${gib(c.used_bytes)} of ${gib(c.budget_bytes)}`, c.used_bytes / c.budget_bytes, 'purple'));
+  }
+
+  function renderGpus(t) {
+    const gpus = t.gpus || [];
+    if (!gpus.length) {
+      set('gpu-note', t.at ? 'not available' : 'starting');
+      setHTML('gpus', `<div class="notice">${esc(t.gpu_note || (t.at ? 'No GPU found by NVML.' : 'Reading telemetry…'))}</div>`);
+      return;
+    }
+    set('gpu-note', `NVML · ${clock(t.at)}`);
+    setHTML('gpus', '<div class="gpus">' + gpus.map((g, i) => {
+      const mem = g.mem_total ? g.mem_used / g.mem_total : 0, pw = g.power_limit ? g.power / g.power_limit : 0;
+      return `<div class="gpu"><div class="gpu-head"><strong>${esc(g.name || 'GPU')}</strong><span class="tag">cuda:${esc(g.index)}</span></div>` +
+        meter('Utilisation', pct(g.util), (g.util || 0) / 100) +
+        meter('Memory', `${gib(g.mem_used)} of ${gib(g.mem_total)}${g.mem_own ? ` · this server ${gib(g.mem_own)}` : ''}`, mem, 'purple') +
+        meter('Power', g.power == null ? '—' : `${Math.round(g.power)} of ${Math.round(g.power_limit || 0)} W`, pw, pw > .9 ? 'amber' : '') +
+        `<div class="gpu-facts"><span>temp <b>${g.temp == null ? '—' : g.temp + ' °C'}</b></span><span>mem bus <b>${pct(g.mem_util)}</b></span>` +
+        `<span>SM <b>${g.sm_clock == null ? '—' : int(g.sm_clock) + ' MHz'}</b></span></div>` +
+        `<div class="spark">${spark(S.hist.map(p => p.gpus[i]), 'var(--green)')}</div></div>`;
+    }).join('') + '</div>');
+  }
+
+  function renderHost(t) {
+    const h = t.host || {};
+    let html = '';
+    if (h.cpu != null) html += meter('CPU', `${pct(h.cpu)} of ${h.cpus} cores`, h.cpu / 100);
+    if (h.ram_total) html += meter('Memory', `${gib(h.ram_used)} of ${gib(h.ram_total)}`, h.ram_used / h.ram_total, 'purple');
+    html += '<div class="stats" style="margin-top:16px">' +
+      stat('Load', h.load ? h.load.map(x => x.toFixed(2)).join(' ') : '—') + stat('Cores', h.cpus == null ? '—' : String(h.cpus)) +
+      (h.cpu != null ? stat('Server RSS', gib(h.rss)) + stat('Server CPU', pct(h.proc_cpu)) + stat('Threads', int(h.threads)) +
+       stat('Sampled', clock(t.at)) : '') + '</div>';
+    if (t.host_note) html += `<div class="notice" style="margin-top:14px">${esc(t.host_note)}</div>`;
+    setHTML('host', t.at ? html : '<div class="notice">Reading telemetry…</div>');
+  }
+
+  function renderFacts() {
+    setHTML('facts', (S.cfg.facts || []).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(val(v))}</dd>`).join(''));
+  }
+  function renderOptions() {
+    if (!S.cfg) return;
+    const q = $('opt-filter').value.trim().toLowerCase(), only = $('opt-changed').checked;
+    const rows = (S.cfg.options || []).filter(([k, v, ch]) => (!only || ch) && (!q || flag(k).includes(q) || val(v).toLowerCase().includes(q)));
+    set('opt-count', String(rows.length));
+    setHTML('options', rows.length ? rows.map(([k, v, ch]) => `<tr class="${ch ? 'changed' : ''}"><td class="k">${esc(flag(k))}</td><td class="v">${esc(val(v))}</td></tr>`).join('')
+      : '<tr><td colspan="2">No option matches.</td></tr>');
+  }
+  $('opt-filter').addEventListener('input', renderOptions);
+  $('opt-changed').addEventListener('change', renderOptions);
+
+  function renderRecent(rows) {
+    if (S.errorsOnly) rows = rows.filter(r => r[2] >= 400);
+    set('req-count', String(rows.length));
+    const shown = S.showAll ? rows : rows.slice(0, 25);
+    $('more').hidden = rows.length <= 25;
+    set('more', S.showAll ? 'Show 25' : `Show all ${rows.length}`);
+    setHTML('recent', shown.length ? shown.map(r => `<tr><td class="t">${clockMs(r[0])}</td><td class="ep">${esc(r[1])}</td>` +
+      `<td>${badge(r[2])}</td><td class="num">${dec(r[3])}</td><td class="num">${r[4] == null ? '—' : int(r[4])}</td>` +
+      `<td class="num">${r[5] == null ? '—' : int(r[5])}</td></tr>`).join('')
+      : `<tr><td colspan="6">${S.errorsOnly ? 'No failed requests among the recent ones.' : 'No decision requests yet.'}</td></tr>`);
+  }
+  $('more').addEventListener('click', () => { S.showAll = !S.showAll; if (S.last) renderRecent(S.last.recent || []); });
+  document.querySelectorAll('.req-tools .chip').forEach(b => b.addEventListener('click', () => {
+    S.errorsOnly = b.dataset.f === 'err';
+    document.querySelectorAll('.req-tools .chip').forEach(x => x.classList.toggle('on', x === b));
+    if (S.last) renderRecent(S.last.recent || []);
+  }));
+
+  function resetChip() { $('reset').classList.toggle('primary', !!S.base); }
+  $('reset').addEventListener('click', () => {
+    const s = S.last;
+    if (!s) return;
+    if (S.base) { S.base = null; } else {
+      S.base = {t: s.now, requests: s.traffic.requests, failed: s.traffic.failed, codes: {...s.traffic.codes},
+                eps: Object.fromEntries((s.traffic.endpoints || []).map(e => [e.endpoint, {requests: e.requests, failed: e.failed}]))};
+      S.hist = [];
+    }
+    $('reset').querySelector('.lbl').textContent = S.base ? 'Since start' : 'Reset view';
+    resetChip();
+    render(s);
+  });
+  $('pause').addEventListener('click', () => {
+    S.paused = !S.paused;
+    $('pause').querySelector('.lbl').textContent = S.paused ? 'Resume' : 'Pause';
+    $('pause').querySelector('svg').innerHTML = S.paused ? '<path d="M7 5l12 7-12 7z"/>' : '<path d="M9 5v14M15 5v14"/>';
+    if (S.paused) { clearTimeout(S.timer); conn('', 'Paused'); } else { conn('', 'Connecting'); poll(); }
+  });
+
+  if ('IntersectionObserver' in window) {
+    const links = [...document.querySelectorAll('.topbar nav a')];
+    const io = new IntersectionObserver(es => es.forEach(e => {
+      if (e.isIntersecting) links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + e.target.id));
+    }), {rootMargin: '-30% 0px -60% 0px'});
+    ['overview', 'traffic', 'telemetry', 'configuration', 'requests'].forEach(id => io.observe($(id)));
+  }
+  poll();
+})();
+</script>
+</body>
+</html>

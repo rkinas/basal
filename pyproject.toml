@@ -63,7 +63,8 @@ basal-interpolate = "basal.interpolate:main"
 packages = ["basal"]
 
 [tool.setuptools.package-data]
-basal = ["examples/*.jsonl", "examples/*.json", "examples/*.py", "viz.html", "fla_configs.json"]
+basal = ["examples/*.jsonl", "examples/*.json", "examples/*.py", "viz.html", "fla_configs.json", "ui.html", "fonts/*.woff2",
+         "fonts/*.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]  # tests import shared stubs from tests.test_server

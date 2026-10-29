@@ -1268,6 +1268,7 @@ class Server:
                                                                 a.no_calibration, getattr(a, "vllm_preset", None),
                                                                 self.layout)
         check_calibration(self.cal, self.fmt, cal)
+        self.cal_file = cal  # --ui on: named in the configuration view
         self.cal_mismatch = calibration_mismatch(self.cal, a.model, md) if a.calibration and not a.no_calibration \
             else None  # a file of your own (--calibration); the files in the model directory belong to it
         if self.cal_mismatch:
@@ -2249,6 +2250,11 @@ def parser():
                     help="also serve MCP (streamable HTTP) at /mcp for agents: tools decide and decide_many over the "
                          "same queue (needs basal[mcp]; without --api-keys no authentication, like the HTTP API: bind "
                          "--host 127.0.0.1 for agents on this machine; with --api-keys /mcp needs a key too)")
+    ap.add_argument("--ui", choices=["off", "on"], default="off",
+                    help="also serve a live page of this server at /ui: status, traffic since start, state cache, GPU "
+                         "and host telemetry, configuration and the recent requests (their metadata, never their "
+                         "text), polled from /ui/state; each request adds one append to an in-memory ring. With "
+                         "--api-keys the page asks for a key; without, it is open to whoever reaches the port")
     from .think import add_think_args  # --think off|auto (experimental; off = this server unchanged)
     add_think_args(ap)
     return ap
@@ -2312,11 +2318,11 @@ def error_body(e, error_format="basal"):
     return body, status
 
 
-def http_app(srv, mode, mcp=None, error_format="basal"):
+def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     """The app of basal-serve: POST /v1/systemone and /v1/basal, POST /v1/decisions (OpenAI's Decisions API), GET
     /v1/models, /health and /metrics; mcp: (routes,
     lifespan) of --mcp on. A failed request answers error_body with http_status: 422 invalid request, 503 out of GPU memory, 500
-    any other server error."""
+    any other server error. ui: the basal.ui.UI of --ui on (its decision routes recorded, and GET /ui/state)."""
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
@@ -2436,10 +2442,10 @@ def http_app(srv, mode, mcp=None, error_format="basal"):
         for task in tasks:
             task.cancel()
 
-    return Starlette(routes=[Route("/v1/systemone", systemone, methods=["POST"]),
-                             Route("/v1/basal", systemone, methods=["POST"]),
-                             Route("/v1/decisions", decisions, methods=["POST"]), Route("/v1/models", models),
-                             Route("/health", health), Route("/metrics", metrics), *mcp_routes], lifespan=lifespan)
+    routes = [Route("/v1/systemone", systemone, methods=["POST"]), Route("/v1/basal", systemone, methods=["POST"]),
+              Route("/v1/decisions", decisions, methods=["POST"]), Route("/v1/models", models),
+              Route("/health", health), Route("/metrics", metrics), *mcp_routes]
+    return Starlette(routes=ui.routes(routes, counts) if ui is not None else routes, lifespan=lifespan)
 
 
 def main():
@@ -2487,9 +2493,16 @@ def main():
         from .mcp_server import http
         mcp = http(srv, a.host)
         print(f"basal: MCP (streamable HTTP) at http://{a.host}:{a.port}/mcp", flush=True)
+    ui = None
+    if a.ui == "on":  # basal/ui.py: the page at /ui, its state at /ui/state
+        from .ui import UI
+        ui = UI(srv, a, a.mode, vars(parser().parse_args([])), t0)
+        print(f"basal: web UI at http://{a.host}:{a.port}/ui" + (" (/ui/state needs an API key)" if a.api_keys else
+              " (open to whoever reaches this port; --api-keys to require a key)"), flush=True)
     from .auth import ApiKeys, protect, request_ids
     origins = [origin.strip() for origin in a.cors_origins.split(",") if origin.strip()]
-    app = request_ids(protect(http_app(srv, a.mode, mcp, a.error_format), ApiKeys(a.api_keys) if a.api_keys else None, origins))
+    app = protect(http_app(srv, a.mode, mcp, a.error_format, ui), ApiKeys(a.api_keys) if a.api_keys else None, origins)
+    app = request_ids(ui.page(app) if ui is not None else app)
     try:  # uvloop + httptools when available (uvicorn[standard]); plain asyncio otherwise
         import httptools  # noqa: F401
         import uvloop  # noqa: F401
