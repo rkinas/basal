@@ -58,7 +58,8 @@ is new is opt-in unless a line says otherwise.
   auto` fetches only the directory for your GPU and versions. First start on an H100 with empty caches:
   basal-omni-1.0-mini 290 -> 172 s, basal-omni-1.0-max 259 -> 164 s, basal-omni-pico 105 -> 81 s.
 - **basal-omni-pico starts the same every time** on the H100 (default path): fla's kernel configs are pinned, so empty,
-  warm and long-used caches give bit-identical answers.
+  warm and long-used caches give bit-identical answers. 2.4.1's pico fast answers could differ between starts (kernel
+  autotuning); 2.5's do not.
 - **basal-omni-1.0-ultra on a 48 GB card**: `--quant-load cpu` quantises one layer at a time on the GPU, so ultra in
   `--mode fp8` or `int8` fits a 48 GB card, and `--graph-memory-gb N` sizes the CUDA graphs for N GiB, so every GPU
   given the same N answers the same: on an H100 with 32 GB taken, 1,700 of 1,700 answers bit-identical to the unloaded
