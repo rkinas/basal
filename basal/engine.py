@@ -3485,7 +3485,8 @@ class MLXBackend:
     (not bit for bit). Other architectures keep mlx-lm's forward.
 
     Qwen3.5 (2.5; Gated DeltaNet and attention layers, basal-omni-pico) runs mlx-lm's forward with its Metal kernel of
-    the gated delta rule, in float32 from bf16 weights (not quantised): the prefix of a group keeps each Gated DeltaNet
+    the gated delta rule, in float32 from bf16 weights (not quantised; compute="bf16", --mlx-compute bf16, keeps them
+    in bf16: faster, further from float32): the prefix of a group keeps each Gated DeltaNet
     layer's convolution and recurrent states beside the attention layers' keys and values, and every suffix row
     continues them (as the CUDA graph engine carries the state into each branch); a right-padded row reads its last real
     token, which the padding after it cannot reach. No packed rows and no --mlx-forward basal for it (mlx-lm's forward). Other recurrent models (Mamba,
@@ -3523,9 +3524,10 @@ class MLXBackend:
     prefix = False
 
     FORWARDS = ("mlx-lm", "basal")
+    COMPUTES = ("auto", "bf16")
 
     def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm", state_cache_gb=0,
-                 prefix=False):
+                 prefix=False, compute="auto"):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
@@ -3535,9 +3537,9 @@ class MLXBackend:
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
         self.max_rows = max_rows or self.MAX_ROWS
-        self.pool.submit(self._load, Path(model_dir), quant, packed, forward).result()
+        self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute).result()
 
-    def _load(self, md, quant=None, packed=False, forward="mlx-lm"):
+    def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto"):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
         load time from bf16 weights (the embeddings and the LM head stay bf16); the -MLX-8bit exports need no quant.
         forward: "mlx-lm" or "basal" (basal/mlx_forward.py where the architecture allows)."""
@@ -3557,6 +3559,11 @@ class MLXBackend:
             raise ValueError(f"unknown MLX quantisation {quant!r} (q8)")
         if forward not in self.FORWARDS:
             raise ValueError(f"unknown MLX forward {forward!r} ({', '.join(self.FORWARDS)})")
+        if compute not in self.COMPUTES:
+            raise ValueError(f"unknown MLX compute {compute!r} ({', '.join(self.COMPUTES)})")
+        if compute == "bf16" and not what:
+            raise ValueError(f"{md}: --mlx-compute bf16 is for Qwen3.5 (Gated DeltaNet) models, which compute in "
+                             "float32 by default; other models compute in their weights' dtype")
         if what and (quant or cfg.get("quantization")):
             raise ValueError(f"{md}: quantised MLX weights are not checked for Qwen3.5 (Gated DeltaNet) models; serve "
                              "its bf16 weights with --mode mlx")
@@ -3569,9 +3576,11 @@ class MLXBackend:
             self._exact_norms(md)
             # Qwen3.5 computes in float32, its bf16 weights upcast here: with bf16 activations the 0.8B pico's readouts
             # moved with the rounding (17,000 held-out readouts against CUDA eager fp32: top-1 99.33%, 8 flips at a margin
-            # >= 0.05; CUDA's own bf16 path 99.48%, 3)
-            self.model.set_dtype(mx.float32)
-            mx.eval(self.model.parameters())
+            # >= 0.05; CUDA's own bf16 path 99.48%, 3); --mlx-compute bf16 (opt-in) keeps bf16
+            if compute != "bf16":
+                self.model.set_dtype(mx.float32)
+                mx.eval(self.model.parameters())
+        self.compute = "bfloat16" if compute == "bf16" else "float32" if what else None
         if quant:
             if self.quantization:
                 raise ValueError(f"{md} is already quantised ({self.quantization}); use it without --quant")

@@ -1113,6 +1113,8 @@ class Server:
             raise SystemExit("--mlx-packed needs --mode mlx (or mlx-q8)")
         if getattr(a, "mlx_forward", "mlx-lm") != "mlx-lm" and kind != "mlx":
             raise SystemExit("--mlx-forward needs --mode mlx (or mlx-q8)")
+        if getattr(a, "mlx_compute", "auto") != "auto" and kind != "mlx":
+            raise SystemExit("--mlx-compute needs --mode mlx")
         if kind == "mps" and a.device == "cuda":
             raise SystemExit("--mode mps runs on Apple Silicon or the CPU (--device mps / cpu); on CUDA: --mode fast")
         if kind in ("graph", "exit"):  # before the weights are downloaded (mps: MPSBackend, when it shares prefixes)
@@ -1214,6 +1216,7 @@ class Server:
         elif kind == "mlx":
             self.backend = MLXBackend(md, quant=quant, packed=getattr(a, "mlx_packed", False),
                                       forward=getattr(a, "mlx_forward", "mlx-lm"),
+                                      compute=getattr(a, "mlx_compute", "auto"),
                                       state_cache_gb=getattr(a, "state_cache_gb", 0),
                                       prefix=getattr(a, "prefix_cache", "off") == "on")
         elif kind == "mps":
@@ -1996,6 +1999,13 @@ def add_engine_args(ap):
                          "over mlx-lm's layers for Llama and Gemma 4: the last layers at the readout rows only, merged "
                          "projections checked bit for bit at load; the probabilities equal mlx-lm's up to float "
                          "rounding, not bit for bit. Other architectures always use mlx-lm's")
+    ap.add_argument("--mlx-compute", dest="mlx_compute", choices=["auto", "bf16"], default="auto",
+                    help="--mode mlx, Qwen3.5 (Gated DeltaNet) models such as basal-omni-pico: auto (default) = "
+                         "float32 compute from the bf16 weights; bf16 (opt-in) = compute in bf16: faster, but further "
+                         "from float32 (Apple M4 Pro, 1,700 held-out single prompts: 0.136 s per prompt against 0.171 "
+                         "s for the GGUF Q8_0 path, 1.25x; the same top answer as CUDA eager float32 on 99.41%%, 1 "
+                         "changed where its margin is >= 0.05; 17,000 readouts of five questions in two option orders: "
+                         "99.33%%, 8 changed). Other models compute in their weights' dtype")
     ap.add_argument("--device", default=None, choices=["cuda", "mps", "cpu"],
                     help="device for --mode eager (default: BASAL_DEVICE, else cuda, else Apple Silicon mps, else cpu) "
                          "and --mode mps (mps or cpu; default: mps on Apple Silicon, else cpu: a request's state "
@@ -2460,7 +2470,8 @@ def main():
     fwd = getattr(srv.backend, "forward", None)  # MLX: basal's forward (what it merged) or mlx-lm's
     info = (f" attention {attn}" if attn else "") + (f" compact rows {rows}" if rows else "") \
         + (" template prefix" if rows and getattr(srv.backend, "template", None) else "") \
-        + (f" forward {fwd}" if isinstance(fwd, str) else "")
+        + (f" forward {fwd}" if isinstance(fwd, str) else "") \
+        + (" compute bfloat16" if getattr(srv.backend, "compute", None) == "bfloat16" else "")
     # everything built so far (weights, graphs, compiled code) lives as long as the server: out of the garbage
     # collector's sight, so a full collection no longer walks it (up to 1.4 s each at the end of start-up on 4.5B, and
     # a 2.9 s stall of one request under nsys, 20 Oct)
