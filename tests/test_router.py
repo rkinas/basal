@@ -1,6 +1,7 @@
 """basal-router (2.5): state-hash routing with bounded load over ready replicas; the server's /metrics and its 503
 answers during start-up."""
 import asyncio
+import hashlib
 import json
 import math
 import multiprocessing
@@ -900,3 +901,102 @@ def test_fallback_request_merges_extra():
     assert body["temperature"] == 0 and body["seed"] == 0
     assert R.fallback_request("m", msgs, 2, {"max_tokens": 100})["max_tokens"] == 100  # extra is merged last
     assert body["response_format"]["json_schema"]["schema"]["properties"]["answer"]["enum"] == ["A", "B"]
+
+
+# API keys (2.5): a client's key passed on to replicas started with --api-keys (basal.auth.protect, as basal-serve)
+KEY = "bsl_router-test"
+
+
+class Hosts(httpx.AsyncBaseTransport):
+    """Each host its own ASGI app (a stub replica, the LLM endpoint)."""
+
+    def __init__(self, apps):
+        self.apps = {h: httpx.ASGITransport(app=a) for h, a in apps.items()}
+
+    async def handle_async_request(self, request):
+        return await self.apps[request.url.host].handle_async_request(request)
+
+
+def key_replica(name, conf, seen, keys=None):
+    """A stub replica behind basal.auth.protect (keys: its --api-keys, an ApiKeys; None: open): every question gets
+    top probability conf; the headers of every request it serves go to seen[name]."""
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    from basal.auth import protect
+
+    async def health(_):
+        return JSONResponse({"status": "ok"})
+
+    async def decide(request):
+        seen.setdefault(name, []).append(dict(request.headers))
+        qs = (await request.json())["questions"]
+        return JSONResponse({"model": name, "answers": {q: {"type": "choice", "choice": "a",
+                                                            "probabilities": {"a": conf, "b": 1 - conf}} for q in qs}})
+
+    async def models(request):
+        seen.setdefault(name, []).append(dict(request.headers))
+        return JSONResponse({"object": "list", "data": [{"id": name}]})
+
+    async def chat(request):
+        seen.setdefault(name, []).append(dict(request.headers))
+        return JSONResponse(llm_reply("A"))
+
+    return protect(Starlette(routes=[Route("/health", health), Route("/v1/systemone", decide, methods=["POST"]),
+                                     Route("/v1/basal", decide, methods=["POST"]), Route("/v1/models", models),
+                                     Route("/v1/chat/completions", chat, methods=["POST"])]), keys)
+
+
+def test_key_headers_are_the_last_authorization_and_x_api_key():
+    raw = [(b"Authorization", b"Bearer a"), (b"x-api-key", b"k1"), (b"x-api-key", b"k2"), (b"x-request-id", b"r"),
+           (b"content-type", b"text/plain")]
+    assert R.key_headers(raw) == {"authorization": b"Bearer a", "x-api-key": b"k2"}
+    assert R.key_headers([(b"content-type", b"application/json")]) == {}
+
+
+def test_router_passes_api_keys_on_to_replicas_with_api_keys(tmp_path):
+    """Replicas with --api-keys (one key file): the client's key reaches the first replica, the escalation replica and
+    /v1/models, and never the --fallback LLM; without a key or with a wrong one the replica's 401 comes back, and the
+    replica stays ready."""
+    from basal.auth import ApiKeys
+    path = tmp_path / "keys.json"
+    path.write_text(json.dumps({"keys": [{"name": "client", "sha256": hashlib.sha256(KEY.encode()).hexdigest()}]}))
+    keys, seen = ApiKeys(path), {}
+    small, big = "http://small", "http://big"
+    rt = R.Router([small], escalate=[big], below=0.8, fallback=dict(FB, below=0.95),
+                  transport=Hosts({"small": key_replica("small", 0.6, seen, keys),
+                                   "big": key_replica("big", 0.9, seen, keys), "llm": key_replica("llm", 0, seen)}))
+    body = {"state": "Doc", "questions": {"q": {"type": "choice", "criteria": {"a": "Yes", "b": "No"}}}}
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        for headers in ({}, {"Authorization": "Bearer bsl_wrong"}, {"X-API-Key": "zażółć".encode()}):
+            r = c.post("/v1/systemone", json=body, headers=headers)
+            assert r.status_code == 401 and r.json() == {"error": "missing or invalid API key", "code": "UNAUTHORIZED"}
+        assert rt.ready == {small, big} and "big" not in seen and "llm" not in seen
+        for headers in ({"Authorization": f"Bearer {KEY}"}, {"X-API-Key": KEY}):
+            r = c.post("/v1/systemone", json=body, headers=headers)
+            assert r.status_code == 200 and r.json()["answers"]["q"]["answered_by"] == "fallback"
+            assert r.json()["cascade"] == {"below": 0.8, "escalated": ["q"]}
+            name, value = next(iter(headers.items()))
+            assert [h[name.lower()] for h in (seen["small"][-1], seen["big"][-1])] == [value, value]
+        assert c.get("/v1/models").status_code == 401
+        assert c.get("/v1/models", headers={"X-API-Key": KEY}).json() == {"object": "list", "data": [{"id": "big"}]}
+    assert len(seen["llm"]) == 2 and not any({"authorization", "x-api-key"} & set(h) for h in seen["llm"])
+    assert keys.usage()[0]["last_used"] is not None
+
+
+def test_router_without_api_keys_sends_no_key():
+    """Open replicas (no --api-keys): a request without a key reaches them with no key header, as before; one with a
+    key is answered too (an open replica ignores it)."""
+    seen = {}
+    rt = R.Router(["http://r0"], transport=Hosts({"r0": key_replica("r0", 0.9, seen)}))
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        r = c.post("/v1/systemone", json={"state": "Doc", "questions": {"q": {}}})
+        assert r.status_code == 200 and r.json()["model"] == "r0"
+        assert c.get("/v1/models").status_code == 200
+        assert c.post("/v1/basal", json={"questions": {"q": {}}}, headers={"X-API-Key": KEY}).status_code == 200
+    first, models, keyed = seen["r0"]
+    assert first["content-type"] == "application/json"
+    assert not {"authorization", "x-api-key"} & (set(first) | set(models)) and keyed["x-api-key"] == KEY
