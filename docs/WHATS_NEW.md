@@ -243,6 +243,13 @@ is new is opt-in unless a line says otherwise.
   undefined names, merge markers, private keys, TOML / YAML / JSON / JSONL syntax), no Git hook installed. README
   "Development commands". Contributed by Paweł Kiszczak (@pawelkiszczak),
   [#46](https://github.com/rkinas/basal/pull/46).
+- **A Triton kernel for basal-omni's 512-wide global layers** (`--global-attn triton`, Hopper; opt-in, off by default:
+  faster on long states, but the answers differ from the default FlexAttention path's): single prompts and the states
+  of multi-question requests run basal's own causal kernel in the global layers. One H100, five questions over 24k-32k-
+  token states at 4 clients, against the default: basal-omni-1.0-mini 1.10x the questions per second, the same top
+  answer on 99.67% of 600 readouts, none changed where the default's margin was at least 0.05; basal-omni-1.1-max
+  1.16x, 98.33%, 4 changed; basal-omni-1.0-ultra 1.03x, 99.0%, 2 changed (15k-17k tokens: 1.07-1.10x).
+  [OMNI.md](OMNI.md#what-the-engine-does-differently-for-gemma-4)
 - **Known limit:** repeated requests over long states: with `--mode fast` on one H100, basal-omni-1.0-ultra gives
   bit-identical probabilities for the same 24k-32k-token request sent again (one at a time) in 95 of 100 cases, as 2.4.1
   did; basal-omni-1.0-mini in 100 of 100. Ultra's answers on long states are not guaranteed to be bit-stable.

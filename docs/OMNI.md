@@ -126,6 +126,21 @@ basal-serve --model Remek/basal-omni-1.0-max --mode eager --media on --port 8000
     time). On 31B the graph grid shrinks to fit (key / value buffers within 15% of the free memory). A state beyond the
     largest graph keeps only the last window of the sliding layers' keys and values (a question never reads further
     back), also in the state cache: a fifth of the memory per token on 31B.
+  - **A Triton kernel for the global layers** (`--global-attn triton`; 2.5, opt-in, off by default; Hopper): the
+    512-wide global layers of plain rows (single prompts and the state of a multi-question request) run basal's own
+    causal kernel for 512-wide heads instead of FlexAttention's 32 x 32 tiles; pass 2, compact rows and the readout
+    rows keep flex. Faster on long states, but the answers differ from flex's (the two kernels' outputs differ by up to
+    one bf16 step per layer, which moves near-ties on long states). One H100, `--mode fast`, against `--global-attn flex` (each a fresh server), 120
+    synthetic states of 24k-32k tokens with five questions each (600 readouts) at 4 clients, and 60 states of 15k-17k
+    tokens (300 readouts):
+
+    | model | 24k-32k: questions/s | same top answer | changed where flex's margin >= 0.05 | 15k-17k: speed, same top answer, changed |
+    |---|---|---|---|---|
+    | basal-omni-1.0-mini | 7.85 -> 8.62 (1.10x) | 99.67% | 0 | 1.07x, 99.0%, 0 |
+    | basal-omni-1.1-max | 2.22 -> 2.57 (1.16x) | 98.33% | 4 | 1.10x, 99.3%, 1 |
+    | basal-omni-1.0-ultra | 0.73 -> 0.75 (1.03x) | 99.0% | 2 | 1.10x, 99.0%, 0 |
+
+    Not measured on shorter states, other GPUs or with `--deterministic`.
   - `--mode fp8` / `nvfp4` (quantisation at load time) are refused for basal-omni: torchao FP8 on 1.1-max missed the
     port gate (0.9892 at margin >= 0.2 on 2-10 options, bar 0.9893). Serve an `-FP8` checkpoint instead.
 

@@ -1092,6 +1092,8 @@ class Server:
                 raise SystemExit(f"--graph-memory-gb {a.graph_memory_gb:g}: give a size in GiB above 0")
         if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
             raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
+        if getattr(a, "global_attn", "flex") != "flex" and kind != "graph":
+            raise SystemExit("--global-attn needs the CUDA graph engine (--mode fast, fast-nocompile, fp8, nvfp4)")
         if kind == "vllm" and VLLM_PRESETS.get(getattr(a, "vllm_preset", "default")):
             what = _recurrent(a.model, a.revision)  # before vLLM starts: its batch-invariant mode raises in the engine core
             if what:
@@ -1229,6 +1231,7 @@ class Server:
                                         readout_layer=getattr(a, "readout_layer", "off"),
                                         template=getattr(a, "template_prefix", "off"),
                                         gemma_attn=getattr(a, "gemma_attn", "auto"),
+                                        global_attn=getattr(a, "global_attn", "flex"),
                                         fp8_scaling=getattr(a, "fp8_scaling", "auto"),
                                         fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
                                         quant_load=getattr(a, "quant_load", "gpu"),
@@ -2060,6 +2063,14 @@ def add_engine_args(ap):
                          "Hopper), fa3+math (FlashAttention 3 in the sliding layers, math in the global ones). auto: "
                          "fa3 in --mode fast where FlashAttention 3 runs (with merged projections and compact rows), "
                          "flex on Blackwell workstation GPUs (sm_120), else math")
+    ap.add_argument("--global-attn", dest="global_attn", choices=["flex", "triton"], default="flex",
+                    help="CUDA graph engine, basal-omni (Gemma 4): the kernel of the 512-wide global layers on plain "
+                         "rows (single prompts and the state of a multi-question request): flex (FlexAttention, as "
+                         "before) or triton (basal's causal kernel for 512-wide heads, faster on long states; Hopper); "
+                         "pass 2 and compact rows keep flex. triton is opt-in: faster, but answers differ from flex "
+                         "(H100, five questions over 24k-32k-token states, 4 clients: basal-omni-1.0-mini 1.10x, the "
+                         "same top answer on 99.67%%, none changed where flex's margin is >= 0.05; 1.1-max 1.16x, "
+                         "98.33%%, 4 of 600 changed; 1.0-ultra 1.03x, 99.0%%, 2 of 600)")
     ap.add_argument("--merge", choices=["auto", "on", "off"], default="auto",
                     help="CUDA graph engine: one q/k/v and one gate/up GEMM per layer (bf16: the same products; FP8 "
                          "checkpoints: the merged weights re-quantised per tensor). auto: on for bf16 weights, off for "

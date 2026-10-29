@@ -36,6 +36,8 @@ from collections import namedtuple
 import torch
 import torch.nn.functional as F
 
+from . import attn512
+
 
 def text_model(model):
     """The decoder of a Gemma 4 model: Gemma4(Unified)ForConditionalGeneration -> model.language_model,
@@ -193,9 +195,10 @@ class Gemma4Graph:
     SCORES = 2 ** 26
     BLOCK = 128   # "flex": block size of the block masks
     SMEM = None   # shared memory per block of the GPU (flex's tiles, _flex)
+    global_attn = "flex"  # the kernel of the global layers' plain rows (--global-attn)
 
     def __init__(self, model, kernels="math", compile=False, merge=False, fp8=None, fp8_bf16_layers=0, nvfp4_amax=None,
-                 nvfp4_scope="all", stream=None):
+                 nvfp4_scope="all", stream=None, global_attn="flex"):
         lm = self.lm = text_model(model)
         cfg = self.cfg = lm.config
         n = cfg.num_hidden_layers
@@ -230,6 +233,21 @@ class Gemma4Graph:
         if kernels.get("full_attention") == "fa3":
             raise ValueError("fa3 runs the sliding-window layers only (FlashAttention 3 takes heads up to 256 wide)")
         self.flex = any(k != "math" for k in kernels.values())  # fa3 is flex where a mask is needed
+        # --global-attn triton: the global layers' plain rows (single prompts, the roots of pass 1) through
+        # basal/attn512.py instead of flex; pass 2, compact rows and the readout rows keep flex
+        if global_attn not in ("flex", "triton"):
+            raise ValueError(f"unknown --global-attn {global_attn!r} (flex or triton)")
+        if global_attn == "triton":
+            dims = {layer.self_attn.head_dim for t, layer in zip(self.types, self.layers) if t == "full_attention"}
+            why = attn512.available()
+            if not why and dims != {512}:
+                why = f"the global layers' heads are {sorted(dims)} wide, not 512"
+            if not why and kernels.get("full_attention") != "flex":
+                why = "the global layers run the math kernel here (--gemma-attn math / fa3+math, eager, two-way rows)"
+            if why:
+                raise ValueError(f"--global-attn triton: {why}")
+            attn512.prepare()
+        self.global_attn = global_attn
         self.qkv, self.gu = {}, {}  # merged projections per layer: (linear, output sizes)
         if stream is None:
             self.merged = self._merge() if merge else 0
@@ -526,9 +544,11 @@ class Gemma4Graph:
 
     @staticmethod
     def _attend(q, k, v, m):
-        """Attention with the kernel the mask is for: a boolean mask (math), a block mask (flex), ("fa3", window) or
-        ("fa3v", window, cu) (compact rows)."""
+        """Attention with the kernel the mask is for: a boolean mask (math), a block mask (flex), ("fa3", window),
+        ("fa3v", window, cu) (compact rows) or ("t512",) (plain causal rows of 512-wide heads, basal/attn512.py)."""
         if isinstance(m, tuple):
+            if m[0] == "t512":
+                return attn512.attention(q, k, v, 1.0).transpose(1, 2).reshape(q.shape[0], q.shape[2], -1)
             if m[0] == "fa3v":
                 return Gemma4Graph._fa3_varlen(q, k, v, m[1], m[2])
             return Gemma4Graph._fa3(q, k, v, m[1])
@@ -734,7 +754,12 @@ class Gemma4Graph:
                 m_all = self._plain_masks(L, pos, dev, twl)
                 m_ro = self._plain_masks(L, ro, dev, twl) if ro is not None else {}
             for t in flex:
-                m_all[t] = ("fa3", self._window(t)) if kernels[t] == "fa3" else self._plain_block(L, t, dev)
+                if kernels[t] == "fa3":
+                    m_all[t] = ("fa3", self._window(t))
+                elif self.global_attn == "triton" and self._window(t) is None:
+                    m_all[t] = ("t512",)
+                else:
+                    m_all[t] = self._plain_block(L, t, dev)
                 if ro is not None:
                     m_ro[t] = self._rows_block(pads["ro"], ro.shape[1], L, t)
             return m_all, m_ro
