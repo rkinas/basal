@@ -10,8 +10,10 @@ is new is opt-in unless a line says otherwise.
   hit with `--state-cache-gb`. [NAVIGATE.md](NAVIGATE.md)
 - **`basal-navigate`: retrieval by navigating a document tree (experimental):** topics, pages and passages judged level
   by level with `rank` questions, no index; a tree builder for Markdown, HTML, text and JSONL documents, optional
-  k-means topics (`basal[navigate]`), budgets, pinned pages and extra candidates from your own retriever.
-  [NAVIGATE.md](NAVIGATE.md#basal-navigate)
+  k-means topics (`basal[navigate]`), budgets, pinned pages and extra candidates from your own retriever. Measured
+  with basal-omni-1.0-max on one H100 against a dense 8B embedder: MultiDoc2Dial R@1 44.27 vs 34.70, ConditionalQA
+  Hit@1 63.47 vs 44.28; the final choice helped on the first and lowered Hit@1 by 1.48 on the second (`top` 0 turns
+  it off); 24-64 s per query (median, 8 concurrent clients). [NAVIGATE.md](NAVIGATE.md#measured-results)
 - **basal-viz reads Gemma 4 basal-omni text decisions:** the logit lens runs over basal-omni's text decoder with the
   output head's bias and the final logit softcap, so every layer's code distribution ends at the probabilities the
   eager engine serves. Requests with media are refused with a message (basal-viz explains text only). Gemma 4
