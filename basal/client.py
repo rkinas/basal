@@ -101,6 +101,13 @@ def tool(tools, question=None, **opts):
     return {"type": "tool", "tools": tools, **({"instructions": question} if question else {}), **opts}
 
 
+def rank(question, candidates, **opts):
+    """question: names the candidate with {candidate}; candidates: {key: text}, [text] or [{"key", "text", "group"}],
+    any number; opts: top, chunk, label, list_title, choice_instructions, choice_context, order, prior, limit
+    (basal/rank.py, experimental). A large ranking takes many engine calls: give the client a timeout to match."""
+    return {"type": "rank", "instructions": question, "candidates": candidates, **opts}
+
+
 def classify(labels, **opts):
     """labels: {name: rubric}, a list of names or of {"name", "rubric"}; opts: none, multi_label, ..."""
     return {"type": "classify", "labels": labels, **opts}
@@ -154,6 +161,9 @@ class _Client:
 
     def tool(self, state, tools, question=None, **opts):
         return self._one(state, tool(tools, question, **opts))
+
+    def rank(self, state, question, candidates, **opts):
+        return self._one(state, rank(question, candidates, **opts))
 
     def classify(self, state, labels, **opts):
         return self._one(state, classify(labels, **opts))

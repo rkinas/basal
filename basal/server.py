@@ -7,7 +7,7 @@
                        also the shape of vLLM's structured-diffusion example: "ask_if" / "depends_on" on a question (a
                        skipped question is answered null) and "images" for image media
   POST /v1/basal       same as /v1/systemone; also the experimental task types classify, verify, compress, extract
-                       (basal/tasks.py)
+                       (basal/tasks.py) and rank (any number of candidates, basal/rank.py; on /v1/systemone too)
   POST /v1/decisions   OpenAI's Decisions API (predicate / choice / score), decided as /v1/systemone (basal/decisions.py)
   GET  /v1/models
   GET  /health
@@ -53,7 +53,7 @@ from .evidence import Evidence
 from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
-from . import tasks
+from . import rank, tasks
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, lang_of, letter_ids, max_options,
                      media_messages, model_format, model_layout, model_option_isolation, model_two_way, option_tokens,
                      reads_request, render)
@@ -1729,6 +1729,8 @@ class Server:
         return {j: (b2[2], o) for j, b2, o in zip(redo, again, o2)}, n_tok
 
     async def decide(self, body):
+        if any(rank.is_rank(q) for q in body["questions"].values()):  # ranking beyond 255 options (basal/rank.py)
+            return await rank.decide(self, body)
         t0 = time.perf_counter()
         orig, plans = body, None
         if any(tasks.is_task(q) for q in body["questions"].values()):  # classify / verify / compress / extract
