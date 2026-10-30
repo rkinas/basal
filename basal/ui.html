@@ -217,6 +217,29 @@ footer a:hover{color:var(--green)}
 .reset-chip.on{display:inline-flex}
 .reset-chip button{color:#c9bdf5;font-size:12px;line-height:1;padding:0 0 0 4px}
 
+/* request panel (--ui full) */
+#recent tr.open{cursor:pointer}
+#recent tr.open:hover td.ep,#recent tr.open:focus-visible td.ep{color:var(--green)}
+#recent tr.open:focus-visible{outline:1px solid var(--green-line);outline-offset:-1px}
+#recent tr.sel{background:#18222c}
+.drawer-bg{position:fixed;inset:0;z-index:8;background:rgba(8,11,16,.55)}
+.drawer{position:fixed;top:0;right:0;bottom:0;z-index:9;width:min(660px,100%);background:var(--panel);
+  border-left:1px solid var(--line-2);display:flex;flex-direction:column;box-shadow:-30px 0 80px #0007}
+.drawer[hidden],.drawer-bg[hidden]{display:none}
+.drawer-head{padding:18px 20px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:14px;
+  align-items:flex-start}
+.drawer-head h3{font:600 20px/1.25 var(--head);letter-spacing:-.4px;margin:8px 0 8px;overflow-wrap:anywhere}
+.drawer-meta{display:flex;flex-wrap:wrap;gap:10px;align-items:center;font:11px var(--mono);color:#8b98a8}
+.drawer-body{overflow:auto;padding:4px 20px 26px;flex:1;overscroll-behavior:contain}
+.drawer-sec{margin-top:18px}
+.drawer-sec .row{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--line);border-radius:8px;
+  font:11.5px/1.65 var(--mono);color:#aeb9c5;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
+.json .k{color:#c9bdf5}.json .s{color:var(--green)}.json .n{color:var(--amber)}.json .b{color:var(--blue)}.json .z{color:#7d899b}
+.close{width:32px;height:32px;display:grid;place-items:center;flex-shrink:0;border-radius:7px;border:1px solid #2e3946;
+  background:#161e28;color:#c3cdd9}
+.close:hover{border-color:#6a7b70;background:#1e2a30}
+
 /* key form */
 .login{position:fixed;inset:0;z-index:10;display:grid;place-items:center;padding:20px;background:rgba(8,11,16,.86);backdrop-filter:blur(6px)}
 .login[hidden]{display:none}
@@ -400,7 +423,7 @@ footer a:hover{color:var(--green)}
       <thead><tr><th>Time</th><th>Endpoint</th><th>Status</th><th class="num">Latency ms</th><th class="num">Questions</th><th class="num">Options</th></tr></thead>
       <tbody id="recent"><tr><td colspan="6">No decision requests yet.</td></tr></tbody>
     </table></div>
-    <div class="table-foot"><span>Metadata only: the request's text is never kept.</span><button class="text-btn" type="button" id="more">Show all</button></div>
+    <div class="table-foot"><span id="req-foot">Metadata only: the request's text is never kept.</span><button class="text-btn" type="button" id="more">Show all</button></div>
   </section>
 
   <footer>
@@ -408,6 +431,15 @@ footer a:hover{color:var(--green)}
     <span>Fonts: DM Sans (<a href="ui/fonts/OFL-DMSans.txt">OFL</a>) and Space Grotesk (<a href="ui/fonts/OFL-SpaceGrotesk.txt">OFL</a>)</span>
   </footer>
 </main>
+
+<div class="drawer-bg" id="drawer-bg" hidden></div>
+<aside class="drawer" id="drawer" hidden role="dialog" aria-modal="true" aria-labelledby="d-title">
+  <div class="drawer-head">
+    <div><div class="kicker" id="d-kicker">Request</div><h3 id="d-title">—</h3><div class="drawer-meta" id="d-meta"></div></div>
+    <button class="close" id="d-close" type="button" aria-label="Close"><svg class="ic" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <div class="drawer-body" id="d-body"></div>
+</aside>
 
 <div class="login" id="login" hidden>
   <form id="login-form" autocomplete="off">
@@ -427,7 +459,7 @@ footer a:hover{color:var(--green)}
   'use strict';
   const $ = id => document.getElementById(id);
   const STORE = 'basal-ui-key', POINTS = 300;
-  const S = {key: '', paused: false, hist: [], prev: null, session: null, base: null, cfgSession: null, cfg: null,
+  const S = {openId: null, detail: null, key: '', paused: false, hist: [], prev: null, session: null, base: null, cfgSession: null, cfg: null,
              showAll: false, errorsOnly: false, timer: 0, last: null};
   try { S.key = sessionStorage.getItem(STORE) || ''; } catch (e) { /* storage blocked: ask each time */ }
 
@@ -708,12 +740,83 @@ footer a:hover{color:var(--green)}
     const shown = S.showAll ? rows : rows.slice(0, 25);
     $('more').hidden = rows.length <= 25;
     set('more', S.showAll ? 'Show 25' : `Show all ${rows.length}`);
-    setHTML('recent', shown.length ? shown.map(r => `<tr><td class="t">${clockMs(r[0])}</td><td class="ep">${esc(r[1])}</td>` +
+    const full = S.last && S.last.status.ui === 'full';
+    set('req-foot', full ? 'Click a row for its request and answer (--ui full keeps the last 200 in this server\'s memory).'
+      : 'Metadata only: the request\'s text is never kept.');
+    setHTML('recent', shown.length ? shown.map(r => `<tr${full && r[6] != null ? ` class="open${r[6] === S.openId ? ' sel' : ''}" data-id="${esc(r[6])}" tabindex="0"` : ''}><td class="t">${clockMs(r[0])}</td><td class="ep">${esc(r[1])}</td>` +
       `<td>${badge(r[2])}</td><td class="num">${dec(r[3])}</td><td class="num">${r[4] == null ? '—' : int(r[4])}</td>` +
       `<td class="num">${r[5] == null ? '—' : int(r[5])}</td></tr>`).join('')
       : `<tr><td colspan="6">${S.errorsOnly ? 'No failed requests among the recent ones.' : 'No decision requests yet.'}</td></tr>`);
   }
   $('more').addEventListener('click', () => { S.showAll = !S.showAll; if (S.last) renderRecent(S.last.recent || []); });
+
+  // --ui full: a request and its answer, fetched when a row is opened
+  function trunc(v) {
+    if (typeof v === 'string' && v.length > 4000) return v.slice(0, 4000) + `… [${nf.format(v.length)} characters]`;
+    if (Array.isArray(v)) return v.map(trunc);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, trunc(x)]));
+    return v;
+  }
+  function hl(v) {
+    const s = JSON.stringify(trunc(v), null, 2) ?? 'null';
+    const re = /("(?:\\.|[^"\\])*")(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+    let out = '', last = 0, m;
+    while ((m = re.exec(s))) {
+      const t = m[0];
+      out += esc(s.slice(last, m.index)) + (m[1] ? (m[2] ? `<span class="k">${esc(m[1])}</span>${esc(m[2])}` : `<span class="s">${esc(t)}</span>`)
+        : t === 'null' ? '<span class="z">null</span>' : t === 'true' || t === 'false' ? `<span class="b">${t}</span>` : `<span class="n">${t}</span>`);
+      last = re.lastIndex;
+    }
+    return out + esc(s.slice(last));
+  }
+  function section(title, id, v) {
+    return `<div class="drawer-sec"><div class="row"><span class="kicker${title === 'Error' ? '' : ' purple'}" style="${title === 'Error' ? 'color:var(--red)' : ''}">${esc(title)}</span>` +
+      `<button class="text-btn" type="button" data-copy="${id}">Copy JSON</button></div><pre class="json">${hl(v)}</pre></div>`;
+  }
+  function closeReq() {
+    $('drawer').hidden = $('drawer-bg').hidden = true;
+    S.openId = null; S.detail = null;
+    if (S.last) renderRecent(S.last.recent || []);
+  }
+  async function openReq(id) {
+    S.openId = id; S.detail = null;
+    $('drawer').hidden = $('drawer-bg').hidden = false;
+    set('d-kicker', `Request #${id}`); set('d-title', 'Loading…'); setHTML('d-meta', ''); setHTML('d-body', '');
+    if (S.last) renderRecent(S.last.recent || []);
+    $('d-close').focus();
+    let r;
+    try { r = await fetch(`ui/request/${encodeURIComponent(id)}`, {cache: 'no-store', headers: S.key ? {Authorization: 'Bearer ' + S.key} : {}}); }
+    catch (e) { set('d-title', 'The server did not answer.'); return; }
+    if (S.openId !== id) return;
+    if (r.status === 401) { closeReq(); return login('This key was not accepted.'); }
+    if (r.status === 404) {
+      set('d-title', 'No longer kept');
+      setHTML('d-body', '<div class="notice" style="margin-top:18px">--ui full keeps the last 200 requests; this one has been replaced by newer ones.</div>');
+      return;
+    }
+    if (!r.ok) { set('d-title', 'HTTP ' + r.status); return; }
+    const d = await r.json();
+    S.detail = d;
+    set('d-title', d.endpoint);
+    setHTML('d-meta', `${badge(d.status)}<span>${dec(d.ms)} ms</span><span>${clockMs(d.time)}</span>` +
+      (d.questions != null ? `<span>${int(d.questions)} question${d.questions === 1 ? '' : 's'} · ${int(d.options)} options</span>` : ''));
+    setHTML('d-body', section('Request', 'request', d.request) + section(d.status >= 400 ? 'Error' : 'Answer', 'answer', d.answer));
+  }
+  $('recent').addEventListener('click', e => { const tr = e.target.closest('tr[data-id]'); if (tr) openReq(Number(tr.dataset.id)); });
+  $('recent').addEventListener('keydown', e => {
+    const tr = e.target.closest('tr[data-id]');
+    if (tr && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openReq(Number(tr.dataset.id)); }
+  });
+  $('d-close').addEventListener('click', closeReq);
+  $('drawer-bg').addEventListener('click', closeReq);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('drawer').hidden) closeReq(); });
+  $('d-body').addEventListener('click', e => {
+    const b = e.target.closest('[data-copy]');
+    if (!b || !S.detail) return;
+    const text = JSON.stringify(S.detail[b.dataset.copy], null, 2);
+    const done = () => { b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy JSON'; }, 1200); };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, () => { b.textContent = 'Copy failed'; });
+  });
   document.querySelectorAll('.req-tools .chip').forEach(b => b.addEventListener('click', () => {
     S.errorsOnly = b.dataset.f === 'err';
     document.querySelectorAll('.req-tools .chip').forEach(x => x.classList.toggle('on', x === b));

@@ -8,8 +8,13 @@ start, percentiles, rates, telemetry, configuration) is computed when GET /ui/st
 however many pages poll it, and lives in memory only: every start begins at zero. GPU telemetry (NVML, from
 nvidia-ml-py) and host telemetry (psutil) are read when installed, once a second in a side thread that runs only while a
 page polled in the last 10 seconds; never a torch.cuda call. With --ui off (the default) none of this module is
-imported and basal-serve handles requests as without it."""
+imported and basal-serve handles requests as without it.
+
+--ui full also keeps references to the last RECENT requests' parsed bodies and their answers (the bytes already sent),
+no copy and no serialisation on the request path; GET /ui/request/<id> serialises one of them when the page asks
+(behind the same key check as /ui/state). They live in memory only, like everything here."""
 import bisect
+import itertools
 import json
 import math
 import os
@@ -289,10 +294,12 @@ class UI:
     """The state behind the page of one basal-serve process. Built when the server is ready (start-up work such as
     reading package versions is done here, not at a request); http_app takes its routes, main its page."""
 
-    def __init__(self, srv, a, mode, defaults=None, started=None):
+    def __init__(self, srv, a, mode, defaults=None, started=None, full=False):
         from . import __version__
         self.srv, self.a, self.mode, self.version = srv, a, mode, __version__
-        self.ring = deque(maxlen=RING)  # (end perf_counter, endpoint, status, seconds, questions, options)
+        self.ring = deque(maxlen=RING)  # (end perf_counter, endpoint, status, seconds, questions, options[, id])
+        # --ui full: (id, parsed body (or its bytes when it was not JSON), answer bytes, ring row) of the last RECENT
+        self.bodies, self.ids = (deque(maxlen=RECENT), itertools.count(1)) if full else (None, None)
         self.wall0, self.perf0 = time.time(), time.perf_counter()
         self.started = started or self.wall0
         self.memo, self.memo_at = None, -math.inf
@@ -306,8 +313,9 @@ class UI:
 
     def record(self, handler, endpoint):
         """handler with its request's metadata appended to the ring once it is answered: all the work --ui on adds to
-        a request. The body was parsed by the handler (Starlette keeps it on the request); its text is not kept."""
-        ring, clock = self.ring, time.perf_counter
+        a request. The body was parsed by the handler (Starlette keeps it on the request); its text is not kept. --ui
+        full: also a reference to that body and to the answer's bytes (no copy), under a request id."""
+        ring, clock, bodies, ids = self.ring, time.perf_counter, self.bodies, self.ids
 
         async def recorded(request):
             t = clock()
@@ -315,20 +323,57 @@ class UI:
             t1 = clock()
             ring.append((t1, endpoint, response.status_code, t1 - t, *size(getattr(request, "_json", None))))
             return response
-        recorded.__name__ = f"recorded_{handler.__name__}"
-        return recorded
+
+        async def recorded_full(request):
+            t = clock()
+            response = await handler(request)
+            t1 = clock()
+            body, rid = getattr(request, "_json", None), next(ids)
+            row = (t1, endpoint, response.status_code, t1 - t, *size(body), rid)
+            ring.append(row)
+            bodies.append((rid, body if body is not None else getattr(request, "_body", None),
+                           getattr(response, "body", None), row))
+            return response
+        out = recorded if bodies is None else recorded_full
+        out.__name__ = f"recorded_{handler.__name__}"
+        return out
 
     def routes(self, routes, counts):
         """http_app's routes with the decision routes recorded, and GET /ui/state. counts: http_app's totals (the
         ones GET /metrics reports)."""
-        from starlette.responses import Response
+        from starlette.responses import JSONResponse, Response
         from starlette.routing import Route
 
         async def state(_):
             return Response(self.state(counts), media_type="application/json", headers={"Cache-Control": "no-store"})
+
+        async def one(request):
+            data = self.request_json(request.path_params["rid"])
+            if data is None:
+                return JSONResponse({"error": f"not kept: --ui full keeps the last {RECENT} requests",
+                                     "code": "NOT_FOUND"}, status_code=404)
+            return Response(data, media_type="application/json", headers={"Cache-Control": "no-store"})
         out = [Route(r.path, self.record(r.endpoint, r.path), methods=sorted(r.methods))
                if isinstance(r, Route) and r.path in DECISIONS else r for r in routes]
-        return out + [Route("/ui/state", state)]
+        return out + [Route("/ui/state", state)] + ([Route("/ui/request/{rid:int}", one)] if self.bodies is not None else [])
+
+    def request_json(self, rid):
+        """GET /ui/request/<id> (--ui full): the request's metadata, its body as parsed (a body that was not JSON as
+        text) and the answer it got (the bytes sent, as JSON), or None when it is no longer kept."""
+        kept = next((b for b in self.bodies if b[0] == rid), None)
+        if kept is None:
+            return None
+        _, body, answer, row = kept
+        if isinstance(body, (bytes, bytearray)):
+            body = body.decode("utf-8", "replace")
+        meta = {"id": rid, "time": round(self.wall0 + row[0] - self.perf0, 3), "endpoint": row[1], "status": row[2],
+                "ms": _ms(row[3]), "questions": row[4], "options": row[5]}
+        try:
+            answer = answer if answer is not None and json.loads(answer) is not None else b"null"
+        except ValueError:
+            answer = json.dumps(answer.decode("utf-8", "replace")).encode()
+        return (json.dumps(meta)[:-1] + ', "request": ' + json.dumps(body, ensure_ascii=False) + ', "answer": ').encode() \
+            + answer + b"}"
 
     def page(self, app):
         """app with GET /ui (the page) and its fonts in front of it, open (the page asks for the key when GET
@@ -394,6 +439,7 @@ class UI:
             "status": {"state": "ready", "model": srv.name, "source": a.model, "revision": revision(srv, a),
                        "mode": self.mode, "version": self.version, "think": getattr(a, "think", "off"),
                        "running": load["running"], "queued": load["queued"],
+                       "ui": "full" if self.bodies is not None else "on",
                        "auth": bool(getattr(a, "api_keys", None))},
             "traffic": {
                 "requests": counts["requests"], "failed": counts["failed"], "seconds": round(counts["seconds"], 6),
@@ -411,8 +457,8 @@ class UI:
             "cache": self.cache,
             "telemetry": self.telemetry.sample,
             "config": self.config,
-            "recent": [[round(self.wall0 + r[0] - self.perf0, 3), r[1], r[2], _ms(r[3]), r[4], r[5]]
-                       for r in reversed(rows[-RECENT:])],
+            "recent": [[round(self.wall0 + r[0] - self.perf0, 3), r[1], r[2], _ms(r[3]), *r[4:]]
+                       for r in reversed(rows[-RECENT:])],  # (--ui full: and the request id)
         }
         self.memo, self.memo_at = json.dumps(d, separators=(",", ":")).encode(), now
         return self.memo

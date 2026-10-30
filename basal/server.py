@@ -2250,11 +2250,13 @@ def parser():
                     help="also serve MCP (streamable HTTP) at /mcp for agents: tools decide and decide_many over the "
                          "same queue (needs basal[mcp]; without --api-keys no authentication, like the HTTP API: bind "
                          "--host 127.0.0.1 for agents on this machine; with --api-keys /mcp needs a key too)")
-    ap.add_argument("--ui", choices=["off", "on"], default="off",
+    ap.add_argument("--ui", choices=["off", "on", "full"], default="off",
                     help="also serve a live page of this server at /ui: status, traffic since start, state cache, GPU "
                          "and host telemetry, configuration and the recent requests (their metadata, never their "
-                         "text), polled from /ui/state; each request adds one append to an in-memory ring. With "
-                         "--api-keys the page asks for a key; without, it is open to whoever reaches the port")
+                         "text), polled from /ui/state; each request adds one append to an in-memory ring. full: the "
+                         "page also shows the last 200 requests and their answers (kept in memory, visible to whoever "
+                         "can open the page). With --api-keys the page asks for a key; without, it is open to whoever "
+                         "reaches the port")
     from .think import add_think_args  # --think off|auto (experimental; off = this server unchanged)
     add_think_args(ap)
     return ap
@@ -2494,11 +2496,12 @@ def main():
         mcp = http(srv, a.host)
         print(f"basal: MCP (streamable HTTP) at http://{a.host}:{a.port}/mcp", flush=True)
     ui = None
-    if a.ui == "on":  # basal/ui.py: the page at /ui, its state at /ui/state
+    if a.ui != "off":  # basal/ui.py: the page at /ui, its state at /ui/state
         from .ui import UI
-        ui = UI(srv, a, a.mode, vars(parser().parse_args([])), t0)
+        ui = UI(srv, a, a.mode, vars(parser().parse_args([])), t0, full=a.ui == "full")
         print(f"basal: web UI at http://{a.host}:{a.port}/ui" + (" (/ui/state needs an API key)" if a.api_keys else
-              " (open to whoever reaches this port; --api-keys to require a key)"), flush=True)
+              " (open to whoever reaches this port; --api-keys to require a key)")
+              + ("; --ui full keeps the last 200 requests' text in memory for it" if a.ui == "full" else ""), flush=True)
     from .auth import ApiKeys, protect, request_ids
     origins = [origin.strip() for origin in a.cors_origins.split(",") if origin.strip()]
     app = protect(http_app(srv, a.mode, mcp, a.error_format, ui), ApiKeys(a.api_keys) if a.api_keys else None, origins)

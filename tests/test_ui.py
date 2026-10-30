@@ -28,11 +28,11 @@ ROUTES = ["/v1/systemone", "/v1/basal", "/v1/decisions", "/v1/models", "/health"
 SECRET = "bsl_ui-test-secret"
 
 
-def app_of(args=(), keys=None, ui=True):
+def app_of(args=(), keys=None, ui=True, full=False):
     """(stub server, UI or None, the ASGI app as basal-serve's main builds it)."""
-    a = parser().parse_args([*(["--ui", "on"] if ui else []), *args])
+    a = parser().parse_args([*(["--ui", "full" if full else "on"] if ui else []), *args])
     srv = AppServer(Engine())
-    u = UI(srv, a, "fast", vars(parser().parse_args([]))) if ui else None
+    u = UI(srv, a, "fast", vars(parser().parse_args([])), full=full) if ui else None
     app = protect(http_app(srv, "fast", ui=u), ApiKeys(keys) if keys else None, ())
     return srv, u, request_ids(u.page(app) if u is not None else app)
 
@@ -334,4 +334,62 @@ def test_page_ships_offline_and_fits_the_budget():
 
 def test_help_mentions_the_ui():
     text = " ".join(parser().format_help().split())
-    assert "--ui {off,on}" in text and "never their text" in text
+    assert "--ui {off,on,full}" in text and "never their text" in text and "last 200 requests" in text
+
+
+def test_on_never_keeps_or_serves_request_bodies():
+    srv, u, app = app_of()
+
+    async def go(c):
+        assert (await c.post("/v1/systemone", json=BODY)).status_code == 200
+        fresh(u)
+        return (await c.get("/ui/request/1")).status_code, (await c.get("/ui/state")).json()
+    status, s = asyncio.run(on(srv, app, go))
+    assert status == 404 and u.bodies is None and s["status"]["ui"] == "on"
+    assert all(len(row) == 6 for row in s["recent"]) and all(len(r) == 6 for r in u.ring)
+    assert all("request/" not in getattr(r, "path", "") for r in http_app(srv, "fast", ui=u).routes)
+
+
+def test_full_shows_the_last_requests_and_their_answers(tmp_path):
+    keys = keyfile(tmp_path)
+    srv, u, app = app_of(["--api-keys", str(keys)], keys=keys, full=True)
+    auth = {"Authorization": f"Bearer {SECRET}"}
+    decision = {"input": "Invoice 1240 PLN.", "questions": [{"type": "predicate", "instructions": "Paid?"}]}
+
+    async def go(c):
+        ok = await c.post("/v1/systemone", json=BODY, headers=auth)
+        dec = await c.post("/v1/decisions", json=decision, headers=auth)
+        bad = await c.post("/v1/systemone", content=b"{not json", headers=auth)
+        fresh(u)
+        state = (await c.get("/ui/state", headers=auth)).json()
+        views = [await c.get(f"/ui/request/{i}", headers=auth) for i in (1, 2, 3, 4)]
+        no_key = await c.get("/ui/request/1")
+        return ok, dec, bad, state, views, no_key
+    ok, dec, bad, state, views, no_key = asyncio.run(on(srv, app, go))
+    assert state["status"]["ui"] == "full" and [row[6] for row in state["recent"]] == [3, 2, 1]
+    one, two, three, four = views
+    assert one.status_code == 200 and one.json()["request"] == BODY and one.json()["answer"] == ok.json()
+    assert one.json()["endpoint"] == "/v1/systemone" and one.json()["status"] == 200 and one.json()["questions"] == 1
+    assert two.json()["request"] == decision and two.json()["answer"] == dec.json() and two.json()["endpoint"] == \
+        "/v1/decisions"
+    assert three.json()["request"] == "{not json" and three.json()["status"] == 422 and three.json()["answer"] == \
+        bad.json()
+    assert four.status_code == 404 and no_key.status_code == 401
+
+
+def test_full_keeps_200_requests(monkeypatch):
+    _, u, _ = app_of(full=True)
+    assert u.bodies.maxlen == 200
+
+    async def handler(_):
+        return types.SimpleNamespace(status_code=200, body=b'{"answers": {}}')
+    rec = u.record(handler, "/v1/systemone")
+
+    async def burst(n):
+        for i in range(n):
+            await rec(types.SimpleNamespace(_json={"state": f"text {i}", "questions": {}}))
+    asyncio.run(burst(205))
+    assert len(u.bodies) == 200 and u.request_json(5) is None
+    kept = json.loads(u.request_json(6))
+    assert kept["request"] == {"state": "text 5", "questions": {}} and kept["answer"] == {"answers": {}}
+    assert json.loads(u.request_json(205))["request"]["state"] == "text 204"
