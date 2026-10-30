@@ -31,8 +31,9 @@ def _clean(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def parse_markdown(text):
-    """(title or None, [(heading path, passage text)]): ATX headings; paragraphs, list items and table rows."""
+def parse_markdown(text, keep_h1=False):
+    """(title or None, [(heading path, passage text)]): ATX headings; paragraphs, list items and table rows. The first
+    level-1 heading is the title, unless keep_h1 (the title is given elsewhere): then it is a heading like the others."""
     title, path, out, buf, fence = None, [], [], [], None
 
     def flush():
@@ -56,7 +57,7 @@ def parse_markdown(text):
         if m:
             flush()
             level, h = len(m.group(1)), _clean(m.group(2))
-            if level == 1 and title is None and not out:
+            if level == 1 and title is None and not out and not keep_h1:
                 title = h
                 continue
             path = [x for x in path if x[0] < level] + [(level, h)]
@@ -77,8 +78,9 @@ class _HTML(html.parser.HTMLParser):
     UNITS = {"p", "li", "tr", "dt", "dd", "pre", "blockquote", "caption", "figcaption"}
     SKIP = {"script", "style", "noscript", "template"}
 
-    def __init__(self):
+    def __init__(self, keep_h1=False):
         super().__init__(convert_charrefs=True)
+        self.keep_h1 = keep_h1
         self.title, self.path, self.out, self.buf, self.where, self.skip, self.cells = None, [], [], [], None, 0, []
 
     def flush(self):
@@ -93,7 +95,7 @@ class _HTML(html.parser.HTMLParser):
             self.title = t
         elif t and self.where and self.where[0] == "h" and self.where[1:].isdigit():
             level = int(self.where[1:])
-            if level == 1 and not self.out and self.title in (None, t):  # the page title (also given by <title>)
+            if level == 1 and not self.out and self.title in (None, t) and not self.keep_h1:  # the title (or <title>)
                 self.title = t
             else:
                 self.path = [x for x in self.path if x[0] < level] + [(level, t)]
@@ -124,16 +126,17 @@ class _HTML(html.parser.HTMLParser):
             self.buf.append(data)
 
 
-def parse_html(text):
-    """(title or None, [(heading path, passage text)]): h1-h6 headings; text outside the unit tags is left out."""
-    p = _HTML()
+def parse_html(text, keep_h1=False):
+    """(title or None, [(heading path, passage text)]): h1-h6 headings; text outside the unit tags is left out. The
+    <title> or the first h1 is the title; with keep_h1 (the title is given elsewhere) every h1 is a heading."""
+    p = _HTML(keep_h1)
     p.feed(text)
     p.close()
     p.flush()
     return p.title, p.out
 
 
-def parse_text(text):
+def parse_text(text, keep_h1=False):
     return None, [((), _clean(b)) for b in re.split(r"\n[ \t]*\n", text) if b.strip()]
 
 
@@ -207,7 +210,7 @@ def build(inputs, split_long=0, group_dirs=False, clusters=0, max_children=0, ma
     pages, nodes = [], []
     parse = {"markdown": parse_markdown, "html": parse_html, "text": parse_text}
     for doc_id, title, group, kind, text in documents(inputs):
-        t, blocks = parse[kind](text)
+        t, blocks = parse[kind](text, title is not None)
         title = _clean(title or t or doc_id.rsplit("/", 1)[-1])
         ps = passages(blocks, max_chars, min_chars)
         if ps:

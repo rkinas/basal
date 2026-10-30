@@ -51,6 +51,10 @@ def test_parse_markdown_html_text():
                       (("Costs",), "Type | Days"), (("Costs",), "Tourist | 90"),
                       (("Costs", "Waivers"), "Some countries need none.")]
     assert navtree.parse_text("a\nb\n\n\nc") == (None, [((), "a b"), ((), "c")])
+    title, blocks = navtree.parse_html("<h1>Overview</h1><p>x</p><h1>Next</h1><p>y</p>", keep_h1=True)
+    assert title is None and blocks == [(("Overview",), "x"), (("Next",), "y")]
+    title, blocks = navtree.parse_markdown("# Overview\nx", keep_h1=True)
+    assert title is None and blocks == [(("Overview",), "x")]
 
 
 def test_split_and_merge_passages():
