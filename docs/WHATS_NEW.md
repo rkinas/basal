@@ -1,3 +1,15 @@
+# What is new in basal 2.5.1
+
+Not released yet. Opt-in: requests without the new question type are answered as in 2.5.
+
+- **`rank`: any number of candidates in one request (experimental):** yes / no screening in shared-context requests of
+  50 candidates, then one choice question over the top 20, beyond the 255 options of a choice question. The choice
+  reads the screening state again, a state-cache hit with `--state-cache-gb`. [NAVIGATE.md](NAVIGATE.md)
+- **`basal-navigate`: retrieval by navigating a document tree (experimental):** topics, pages and passages judged level
+  by level with `rank` questions, no index; a tree builder for Markdown, HTML, text and JSONL documents, optional
+  k-means topics (`basal[navigate]`), budgets, pinned pages and extra candidates from your own retriever.
+  [NAVIGATE.md](NAVIGATE.md#basal-navigate)
+
 # What is new in basal 2.5
 
 Released 3 November 2026. Default answers to decision requests are byte-identical to 2.4.1 (checked on an H100:

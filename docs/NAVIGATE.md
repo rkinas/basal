@@ -1,0 +1,120 @@
+# Navigate and rank (experimental, 2.5.1)
+
+Two features for retrieval with typed decisions, after *Retriever-Free Retrieval: Navigating Documents with Decision
+Models* (Wan, Jünger, Du, Liu, Krishnan and Weinberger, arXiv 2610.35868):
+
+- the **`rank` question type**: one request ranks any number of candidates, more than the 255 options of a choice
+  question;
+- **`basal-navigate`**: retrieval without an index. The corpus is a tree (topics, pages, sections, passages); at each
+  level the model judges the candidates together and only the best branches are opened.
+
+*Experimental* (see [FEATURES.md](FEATURES.md)): the API may change in a minor release, and the models were not trained
+on these prompts. Check the quality on your own data.
+
+## Rank any number of candidates
+
+```json
+{"state": "User's question: how long does a visa take?",
+ "questions": {"best": {"type": "rank",
+   "instructions": "Does {candidate} contain information needed to answer the user's question?",
+   "candidates": [{"key": "visa#3", "text": "Visas take two weeks.", "group": "Visa guide"},
+                  {"key": "visa#4", "text": "Adults pay 60.", "group": "Visa guide"},
+                  {"key": "tax#1", "text": "Pay your tax online.", "group": "Taxes"}],
+   "label": "Passage", "list_title": "Passages", "top": 20}}}
+```
+
+1. **Screening.** The candidates are numbered in a list (`Passage 7: <text>`, under a `[<group>]` line) and packed, in
+   their order, into requests of `chunk` candidates (default 50; a group stays in one request when it fits). Each
+   request's state is your state plus its list, and every candidate in it is one yes / no question, `{candidate}` in
+   the instructions naming it. A request reads its state once and judges its candidates side by side, which makes
+   their probabilities comparable; the paper found this gain levels off at about 50 candidates per request. All
+   requests go through the server's queue together, so they are batched.
+2. **Final choice** (`top` >= 2, default 20): one choice question over the top candidates by P(yes), its options their
+   names in the list. Its probabilities reorder them; the others keep their order. When one request held every
+   candidate, the choice reads that request's state again: with `basal-serve --state-cache-gb N` the state is a cache
+   hit and only the question is computed. Otherwise it reads your state with a list of only the shortlisted candidates.
+
+| field | default | |
+|---|---|---|
+| `instructions` | (required) | the yes / no question; `{candidate}` names the candidate (`Passage 7`) |
+| `candidates` | (required) | `{key: text}`, `[text, ...]` (keys `"0"`, `"1"`, ...) or `[{"key", "text", "group"}]`; up to 200,000 |
+| `label`, `list_title` | `Candidate`, none | how the list names its entries, and its heading line |
+| `chunk` | 50 | candidates per request; 0 = all in one request when it fits the model's context, else 50 |
+| `top` | 20 | the final choice's shortlist, at most the model's options per question; 0 = no choice |
+| `choice_instructions` | `Which candidate is the best match?` | the final choice's question |
+| `choice_context` | `auto` | `screen` (the screening state; needs one request), `shortlist`, or `auto` (screen when it can) |
+| `order` | `state_first` | `candidates_first` puts the list before your state, so requests about the same candidates share a cached prefix (`--state-cache-gb`) across different states |
+| `prior` | none | `{key: weight}`: a candidate's score is P(yes) x weight (e.g. its page's probability) |
+| `limit` | all | ranking entries returned |
+
+The answer: `{"type": "rank", "ranking": [{"key", "score", "choice"?, "yes"?}, ...], "top": "<key>", "candidates": n,
+"requests": n, "experimental": true}`, best first; `choice` on the shortlisted entries, `yes` (P(yes) before the prior)
+when a prior is given. `usage` sums all requests (`usage.requests`). Other questions of the same request are answered
+as usual over your state. Not available with media, `ask_if`, `coverage`, `max_error` or `evidence`.
+
+In Python: `Basal(url, timeout=600).rank(state, "Does {candidate} ...?", candidates, top=20)` (`basal.client`); a large
+ranking takes many engine calls, so give the client a timeout to match. `GET /health` counts each request of a rank
+question as in flight, and `--log-decisions` logs each of them.
+
+## basal-navigate
+
+```bash
+basal-navigate build docs/ -o tree.jsonl                  # Markdown, HTML, text or JSONL documents
+basal-serve --model Remek/basal-omni-1.0-max --state-cache-gb 16 &
+basal-navigate search tree.jsonl "How long does a visa take?" --url http://127.0.0.1:8000
+```
+
+```python
+from basal.client import Basal
+from basal.navigate import Navigator, Tree
+
+nav = Navigator(Basal("http://127.0.0.1:8000", timeout=600), Tree.load("tree.jsonl"),
+                levels=[{"keep": 2, "sure": 0.8}, {"keep": 10}], final={"top": 20})
+for hit in nav.search("How long does a visa take?", k=5)["passages"]:
+    print(hit["score"], hit["id"], hit["text"][:80])
+```
+
+At each level, one `rank` request (yes / no only) judges the candidates under the branches kept so far: the state is
+the query and every candidate's description, the question for a page "Is the information needed to answer the user's
+question on Page n?". The best branches within the level's budget are opened, the others pruned for this query. The
+passages reached are judged in one shared context, grouped under their pages in reading order, and a final choice
+reorders the top 20. The number of sequential requests grows with the depth of the tree, not with the size of the
+corpus.
+
+- **Budgets** (`levels`, one per depth; the last one repeats): `keep` (at most this many branches, default 10),
+  `min_p` (only branches with at least this probability, always at least one), `sure` (only the top branch when its
+  probability is at least this), `chunk` (candidates per request). A level that fits its budget needs no request.
+- **Last stage** (`final`): `top` (default 20; 0 = no choice), `chunk` (default 0: one shared context when it fits),
+  `multiply` (a passage's score times its page's), `choice_context`.
+- **`search(query, k, pin, extra)`**: `query` is a question, or a conversation (a list of `{"role", "text"}` turns; the
+  last six are read and the questions ask about the agent's next reply). `pin`: node ids always kept, whose passages
+  always reach the last stage (e.g. the pages a conversation used recently). `extra`: passage ids added to the last
+  stage, e.g. the top passages of a dense retriever, which recovers evidence that pruning lost.
+- **Language**: English or Polish questions and labels, from the query (`lang` to set it); `wording` replaces the
+  question of a kind (`{"page": "... {candidate} ...", "choice": "..."}`).
+- The result: `{"passages": [{"id", "score", "choice"?, "text"}], "stages": [{"depth", "candidates", "kept",
+  "requests", "ms"}], "latency_ms"}`. `basal-navigate search --queries q.jsonl` runs a file of queries (`{"id",
+  "query" | "turns", "pin"?, "extra"?}` per line) and writes one JSON line per query.
+
+### The tree
+
+A JSONL file, one node per line, children in reading order: `{"id", "parent" (null at the top), "kind" ("topic",
+"page", "section", "passage" or your own), "text" (what the model reads: a description, a title, the passage), "title"
+(optional: the heading its children are listed under), "path" (optional: a passage's heading path)}`. A node without
+children is a passage. Trees need not be uniform: a long page may have sections while a short one holds its passages
+directly.
+
+`basal-navigate build` makes one from documents:
+
+- pages are files (or JSONL lines `{"id"?, "title"?, "text" | "markdown" | "html", "group"?}`); a page reads as its
+  title and top headings; passages are paragraphs, list items and table rows (HTML: `p`, `li`, `tr`, `dt`, `dd`,
+  `pre`, `blockquote`) with their heading path; longer than `--max-chars` (2,000) they are split at sentence ends;
+- `--split-long N` adds a section per top heading under pages with more than N passages;
+- `--group-dirs` makes folders (or JSONL `group`) topics above their pages;
+- `--clusters K [--max-children M]` groups the pages into K topics by k-means over TF-IDF vectors of their title and
+  first passage, splitting a topic of more than M pages again; a topic reads as its most central titles and top terms.
+  It needs `pip install 'basal[navigate]'` (scikit-learn); in Python, `basal.navtree.cluster(texts, k, embed=fn)`
+  takes your own embedding function. The default install needs nothing new.
+
+Descriptions decide what can be found: a branch whose description does not show what it holds is pruned. Pruning is
+for this query only, and a larger `keep` trades requests for recall.
