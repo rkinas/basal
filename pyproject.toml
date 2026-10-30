@@ -33,6 +33,7 @@ gguf = ["llama-cpp-python>=0.3.36"]  # --mode gguf: a GGUF file in process (Meta
 gguf-export = ["gguf>=0.19"]  # basal-export-gguf: GGUF with the Hugging Face tokenization (docs/GGUF.md)
 mcp = ["mcp>=2.3,<3"]  # basal-serve --mcp on (MCP at /mcp) and the basal-mcp stdio bridge, for agents
 finetune = ["peft>=0.17"]  # basal-finetune: LoRA on your own labelled decisions (docs/FINETUNE.md)
+navigate = ["scikit-learn>=1.3"]  # basal-navigate build --clusters: topics by k-means (docs/NAVIGATE.md)
 # --mode tpu (experimental, Google TPU VMs; docs/HARDWARE.md, "Google TPU"): JAX with libtpu (both from PyPI), pinned to
 # the version the backend was validated with
 tpu = ["jax[tpu]==0.11.1; python_version >= '3.12' and sys_platform == 'linux'"]
@@ -58,6 +59,7 @@ basal-prepare = "basal.prepared:main"
 basal-attach = "basal.attach:main"
 basal-viz = "basal.viz:main"
 basal-interpolate = "basal.interpolate:main"
+basal-navigate = "basal.navigate:main"
 
 [tool.setuptools]
 packages = ["basal"]
