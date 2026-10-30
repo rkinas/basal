@@ -220,7 +220,8 @@ class Telemetry:
         try:
             import pynvml
             pynvml.nvmlInit()
-            self.nvml, self.handles = pynvml, visible(pynvml)
+            self.nvml = pynvml  # (CUDA index, handle, NVML index, PCI bus id): the last two name the physical GPU
+            self.handles = [(j, h, k, pci_id(pynvml, h)) for j, h, k in visible(pynvml)]
         except ImportError:
             self.gpu_note = "GPU telemetry needs nvidia-ml-py (pip install nvidia-ml-py)"
         except Exception as e:  # noqa: BLE001  (no NVIDIA driver: Apple, AMD, CPU)
@@ -234,7 +235,8 @@ class Telemetry:
             self.host_note = "CPU and memory need psutil (pip install psutil)"
 
     def read(self):
-        gpus = [gpu(self.nvml, i, h) for i, h in self.handles] if self.nvml is not None else []
+        gpus = [dict(gpu(self.nvml, j, h), nvml_index=k, pci=pci) for j, h, k, pci in self.handles] \
+            if self.nvml is not None else []
         host = {"cpus": os.cpu_count(), "load": _try(lambda: [round(x, 2) for x in os.getloadavg()])}
         if self.ps is not None:
             vm = self.ps.virtual_memory()
@@ -258,17 +260,30 @@ def _try(fn, default=None):
 
 
 def visible(nvml):
-    """[(CUDA index, NVML handle)] of the GPUs this process sees (CUDA_VISIBLE_DEVICES as indices or UUIDs; every GPU
-    without it, or when none of its entries is found)."""
+    """[(CUDA index, NVML handle, NVML index)] of the GPUs this process sees (CUDA_VISIBLE_DEVICES as indices or UUIDs;
+    every GPU without it, or when none of its entries is found). The NVML index names the physical GPU: a process pinned
+    to one GPU sees it as cuda:0 whichever it is."""
     n = nvml.nvmlDeviceGetCount()
     ids = [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()]
     out = []
     for j, s in enumerate(ids):
-        h = _try(lambda: nvml.nvmlDeviceGetHandleByUUID(s) if s.startswith(("GPU-", "MIG-"))
-                 else nvml.nvmlDeviceGetHandleByIndex(int(s)))
+        if s.startswith(("GPU-", "MIG-")):
+            h = _try(lambda: nvml.nvmlDeviceGetHandleByUUID(s))
+            k = None if h is None else _try(lambda: nvml.nvmlDeviceGetIndex(h))
+        else:
+            k = _try(lambda: int(s))
+            h = None if k is None else _try(lambda: nvml.nvmlDeviceGetHandleByIndex(k))
         if h is not None:
-            out.append((j, h))
-    return out or [(i, nvml.nvmlDeviceGetHandleByIndex(i)) for i in range(n)]
+            out.append((j, h, k))
+    return out or [(i, nvml.nvmlDeviceGetHandleByIndex(i), i) for i in range(n)]
+
+
+def pci_id(nvml, h):
+    """A GPU's PCI bus id, short: domain (last 4 digits):bus:device, e.g. 0000:61:00 (None when NVML has none)."""
+    bus = _try(lambda: nvml.nvmlDeviceGetPciInfo(h).busId)
+    bus = bus.decode() if isinstance(bus, bytes) else bus
+    parts = bus.split(":") if isinstance(bus, str) else []
+    return f"{parts[0][-4:]}:{parts[1]}:{parts[2].split('.')[0]}" if len(parts) == 3 else bus
 
 
 def gpu(nvml, i, h):

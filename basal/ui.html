@@ -170,6 +170,7 @@ td.t{font-family:var(--mono);color:#6e8698;font-size:10px}
 .gpu{border:1px solid var(--line-2);border-radius:9px;padding:14px 16px;background:#10161f}
 .gpu-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .gpu-head strong{font-size:12px;font-weight:600;color:#d7dee6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gpu-id{font:10px var(--mono);color:#7d899b;letter-spacing:.3px;margin-top:4px}
 .gpu-facts{display:flex;gap:14px;margin-top:12px;font:11px var(--mono);color:#8796a6;flex-wrap:wrap}
 .gpu-facts b{color:var(--soft);font-weight:400}
 .spark{height:34px;margin-top:12px}
@@ -697,7 +698,10 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
     set('gpu-note', `NVML · ${clock(t.at)}`);
     setHTML('gpus', '<div class="gpus">' + gpus.map((g, i) => {
       const mem = g.mem_total ? g.mem_used / g.mem_total : 0, pw = g.power_limit ? g.power / g.power_limit : 0;
-      return `<div class="gpu"><div class="gpu-head"><strong>${esc(g.name || 'GPU')}</strong><span class="tag">cuda:${esc(g.index)}</span></div>` +
+      const phys = [g.nvml_index != null ? `GPU ${g.nvml_index}` : '', g.pci || ''].filter(Boolean).join(' · ');
+      return `<div class="gpu"><div class="gpu-head"><div style="min-width:0"><strong>${esc(g.name || 'GPU')}</strong>` +
+        (phys ? `<div class="gpu-id" title="the physical GPU (NVML index, PCI bus id)">${esc(phys)}</div>` : '') +
+        `</div><span class="tag" title="this server's view of it">cuda:${esc(g.index)}</span></div>` +
         meter('Utilisation', pct(g.util), (g.util || 0) / 100) +
         meter('Memory', `${gib(g.mem_used)} of ${gib(g.mem_total)}${g.mem_own ? ` · this server ${gib(g.mem_own)}` : ''}`, mem, 'purple') +
         meter('Power', g.power == null ? '—' : `${Math.round(g.power)} of ${Math.round(g.power_limit || 0)} W`, pw, pw > .9 ? 'amber' : '') +

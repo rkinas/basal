@@ -282,7 +282,9 @@ def fake_nvml(seen):
     m.nvmlInit = call("init", None)
     m.nvmlDeviceGetCount = call("count", 2)
     m.nvmlDeviceGetHandleByIndex = lambda i: ("h", i)
-    m.nvmlDeviceGetHandleByUUID = lambda u: ("h", u)
+    m.nvmlDeviceGetHandleByUUID = lambda u: ("h", {"GPU-aa": 0, "GPU-bb": 1}[u])
+    m.nvmlDeviceGetIndex = lambda h: h[1]
+    m.nvmlDeviceGetPciInfo = lambda h: types.SimpleNamespace(busId=[b"00000000:1A:00.0", b"00000000:61:00.0"][h[1]])
     m.nvmlDeviceGetName = call("name", b"NVIDIA H100 80GB HBM3")
     m.nvmlDeviceGetUtilizationRates = call("util", types.SimpleNamespace(gpu=87, memory=40))
     m.nvmlDeviceGetMemoryInfo = call("mem", types.SimpleNamespace(used=60 * 2 ** 30, total=80 * 2 ** 30))
@@ -316,7 +318,21 @@ def test_telemetry_reads_visible_gpus_and_stops_when_no_page_polls(monkeypatch):
     t.view()  # a page again: sampling again
     assert t.thread.is_alive() and seen.count("init") == 1
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
-    assert [i for i, _ in ui_module.visible(fake_nvml([]))] == [0, 1]
+    assert [(i, k) for i, _, k in ui_module.visible(fake_nvml([]))] == [(0, 0), (1, 1)]
+
+
+def test_gpu_card_names_the_physical_gpu(monkeypatch):
+    """A server pinned to one GPU (CUDA_VISIBLE_DEVICES) sees it as cuda:0; the card also names the physical GPU, its
+    NVML index and PCI bus id, so pages of two replicas on one box tell their GPUs apart."""
+    for env, want in (("1", (1, "0000:61:00")), ("0", (0, "0000:1A:00")), ("GPU-bb", (1, "0000:61:00"))):
+        monkeypatch.setitem(sys.modules, "pynvml", fake_nvml([]))
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", env)
+        t = Telemetry()
+        t.open()
+        g = t.read()["gpus"]
+        assert len(g) == 1 and g[0]["index"] == 0 and (g[0]["nvml_index"], g[0]["pci"]) == want
+    page = (ROOT / "basal/ui.html").read_text(encoding="utf-8")
+    assert "GPU ${g.nvml_index}" in page and "g.pci" in page and "cuda:${esc(g.index)}" in page
 
 
 def test_page_ships_offline_and_fits_the_budget():
