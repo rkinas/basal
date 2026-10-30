@@ -161,8 +161,9 @@ numbers come from another model, corpus build and sample and are given for conte
 - Settings. MultiDoc2Dial: the conversation's last six turns; keep 2 help centres (only the top one when its
   probability is at least 0.8), then 10 pages, plus the help centre of the most recently retrieved page and the two
   most recent pages (`levels=[{"keep": 2, "sure": 0.8}, {"keep": 10}]`, `pin`); every passage of those pages (121 on
-  average) in one shared context. ConditionalQA: the question and the user's situation; the 652 guide titles and top headings in 14
-  requests of 50, keep 3 guides, then all their paragraphs (279 on average, 98-760) in one shared context.
+  average) in one shared context. ConditionalQA: the question and the user's situation; the 652 guide titles and top
+  headings in 14 requests of 50, keep 3 guides, then all their paragraphs (279 on average, 98-760) in one shared
+  context.
 - Speed at 8 concurrent clients: MultiDoc2Dial 1,003 turns in 3,147 s (median 24.1 s, 95th percentile 35.1 s per
   turn); ConditionalQA 271 questions in 2,233 s (median 64.0 s, 95th percentile 98.8 s per question).
 
