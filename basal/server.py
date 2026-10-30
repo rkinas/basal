@@ -2256,8 +2256,10 @@ def parser():
                          "text), polled from /ui/state; each request adds one append to an in-memory ring. full: the "
                          "page also shows the last 200 requests and their answers (kept in memory, visible to whoever "
                          "can open the page). Open one page at a time: each open page reads the state once a second, "
-                         "and more pages can slow requests down (docs/SERVING.md, Live web page). With --api-keys the "
-                         "page asks for a key; without, it is open to whoever reaches the port")
+                         "and more pages can slow requests down (one H100, 8 clients: p50 +0.4-2.2%% with 1-2 pages, "
+                         "+5.2%% with full and 1 page; 1 client: answers byte-identical; docs/SERVING.md, Live web "
+                         "page). With --api-keys the page asks for a key; without, it is open to whoever reaches the "
+                         "port")
     from .think import add_think_args  # --think off|auto (experimental; off = this server unchanged)
     add_think_args(ap)
     return ap

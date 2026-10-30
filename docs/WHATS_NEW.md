@@ -54,6 +54,16 @@ is new is opt-in unless a line says otherwise.
   answer, about three quarters of the gain on that sample (`--fallback-timeout 600` for offline or review use). Fallback
   answers repeat only with the endpoint settings in [SERVING.md](SERVING.md#several-gpus-metrics-and-health-25)
   (batch-invariant vLLM, no prefix cache, no chunked prefill).
+- **A live web page for basal-serve** (`--ui on`, default off): at `/ui`, the server's status, traffic since start
+  (requests, failures, rates, p50 / p95 / p99, per endpoint), the state cache, GPU and host telemetry, the configuration
+  as parsed and resolved (secrets redacted) and the last 200 requests' metadata, never their text; `--ui full` also
+  shows each of those requests and its answer on a click (kept in memory; use `--api-keys` on a shared host). A request
+  pays one append to a ring in memory; the rest is computed when a page polls, at most once a second. Open one page at a
+  time: on one H100 (basal-omni-1.0-mini, `--mode fast`) the throughput stayed within 1% of `--ui off` with 0, 1 or 2
+  pages open, and the p50 latency at 8 clients rose 0.4-2.2% with 1-2 pages and 5.2% with `--ui full` and one page
+  (`--ui off`'s own p50 varied by up to 9% between passes); at 1 client the latency stayed within 0.9% and the answers
+  byte-identical. A fresh server's first pass at 8 clients is slower with or without the UI. With `--api-keys` the page
+  asks for a key. [SERVING.md](SERVING.md#live-web-page-25)
 - **`GET /metrics` (Prometheus) and start-up states**: basal-serve and basal-router export their counters and gauges;
   basal-serve answers HTTP 503 `{"status": "starting"}` while the model loads and warms up, and a failed start-up exits
   instead of hanging. [SERVING.md](SERVING.md#prometheus-metrics).
