@@ -26,6 +26,7 @@ POST /v1/basal
 | [`verify`](#verify) | are these claims supported by the state? | per claim: supported / contradicted / not stated | experimental (2.1) |
 | [`compress`](#compress) | which parts of the state are needed for a question? | `compressed` text, a probability per unit | experimental (2.1) |
 | [`extract`](#extract) | fill a JSON schema from the state | `data`, per field: value, offsets, confidence | experimental (2.1) |
+| [`rank`](#rank) | order thousands of candidates by a yes / no question | `ranking` (best first), `top` | experimental (2.5) |
 
 *Stable* types keep their request and answer shape within a major version. *Experimental* types may change in a minor
 release and their measured quality is below what we call production-ready: check them on your own data.
@@ -140,6 +141,17 @@ JSON schema: nested objects, `string`, `number`, `integer`, `boolean`, `enum` / 
 values. Text fields are two decisions (the line, then the exact span), so values are always exact text of the document
 with character offsets; any field can be `null` (not stated). Not yet: arrays of strings or objects.
 Details: [TASKS.md](TASKS.md#extract).
+
+## rank
+```json
+{"type": "rank", "instructions": "Does {candidate} answer the question?", "label": "Passage", "top": 20,
+ "candidates": [{"key": "visa#3", "text": "Visas take two weeks.", "group": "Visa guide"}, ...]}
+→ {"type": "rank", "ranking": [{"key": "visa#3", "score": 0.97, "choice": 0.81}, ...], "top": "visa#3",
+   "candidates": 1000, "requests": 21}
+```
+One yes / no per candidate in shared-context requests of 50, then one choice over the top 20; beyond the 255 options of
+a choice question, up to 10,000 candidates per request. `basal-navigate` uses it to search a document tree. Details:
+[NAVIGATE.md](NAVIGATE.md).
 
 ## What basal does not do
 

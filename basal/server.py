@@ -7,7 +7,7 @@
                        also the shape of vLLM's structured-diffusion example: "ask_if" / "depends_on" on a question (a
                        skipped question is answered null) and "images" for image media
   POST /v1/basal       same as /v1/systemone; also the experimental task types classify, verify, compress, extract
-                       (basal/tasks.py)
+                       (basal/tasks.py) and rank (any number of candidates, basal/rank.py; on /v1/systemone too)
   POST /v1/decisions   OpenAI's Decisions API (predicate / choice / score), decided as /v1/systemone (basal/decisions.py)
   GET  /v1/models
   GET  /health
@@ -53,7 +53,7 @@ from .evidence import Evidence
 from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
-from . import tasks
+from . import rank, tasks
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, lang_of, letter_ids, max_options,
                      media_messages, model_format, model_layout, model_option_isolation, model_two_way, option_tokens,
                      reads_request, render)
@@ -1145,6 +1145,7 @@ class Server:
         md = resolve(a.model, a.revision, metadata_only=kind in ("gguf", "ollama", "llamacpp"))
         self.fmt = model_format(md)  # prompt format of the model (basal.json "prompt"; 1 when absent)
         self.max_options = max_options(self.fmt)
+        self.rank_max = getattr(a, "rank_max_candidates", rank.MAX_CANDIDATES)  # rank candidates per request
         self.orders = served_orders(a, self.fmt)
         # the prompt layout (prompt.LAYOUTS; 2.4.1): --layout, else the model's basal.json "layout", else canonical
         self.layout = getattr(a, "layout", None) or model_layout(md)
@@ -1729,6 +1730,8 @@ class Server:
         return {j: (b2[2], o) for j, b2, o in zip(redo, again, o2)}, n_tok
 
     async def decide(self, body):
+        if any(rank.is_rank(q) for q in body["questions"].values()):  # ranking beyond 255 options (basal/rank.py)
+            return await rank.decide(self, body)
         t0 = time.perf_counter()
         orig, plans = body, None
         if any(tasks.is_task(q) for q in body["questions"].values()):  # classify / verify / compress / extract
@@ -2240,6 +2243,10 @@ def parser():
                     help="refuse to start when the --calibration file was fitted on another model or revision "
                          "(default: a warning)")
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
+    ap.add_argument("--rank-max-candidates", dest="rank_max_candidates", type=int, default=rank.MAX_CANDIDATES,
+                    metavar="N", help="rank questions (experimental): at most N candidates per request, all its rank "
+                                      "questions together (HTTP 422 above; every 50 take one engine request through "
+                                      "the shared queue). Default %(default)s")
     ap.add_argument("--api-keys", default=None, metavar="PATH",
                     help="JSON API key file; when set, require a key for every endpoint except GET /health")
     ap.add_argument("--cors-origins", default="", help="comma-separated browser origins allowed by CORS")
