@@ -46,6 +46,9 @@ is new is opt-in unless a line says otherwise.
   `--gpus 0,1` starts one replica per GPU. Cascades from a small to a bigger model (`--escalate`, also several levels,
   such as basal-omni-pico -> mini -> ultra), `--blend` (a weighted mean of several models' probabilities) and an LLM
   fallback for questions that stay unsure (`--fallback`). [SERVING](docs/SERVING.md).
+- **Retrieval without an index** (*experimental*): the `rank` question type ranks thousands of candidates in one
+  request (yes / no screening in shared-context requests of 50, then one choice over the top 20), and `basal-navigate`
+  searches a document tree (topics, pages, passages) with it. [NAVIGATE](docs/NAVIGATE.md).
 - **Operations**: `GET /metrics` (Prometheus), a live web page of the server (`--ui on`, one page at a time),
   HTTP 503 while the model warms up, `--api-keys` and `--cors-origins`, `x-request-id` on every response.
 - **Faster start-up**: `basal-prepare` and `--prepared auto` load the kernels prepared for your GPU (basal-omni-1.0-mini
@@ -445,6 +448,7 @@ crewai_tool` gives a tool over a running server, with ready question sets (`pres
 | [FEATURES](docs/FEATURES.md) · [CALIBRATION](docs/CALIBRATION.md) | `multi`, `act`, `tool` and evidence in detail; calibrating on your own data |
 | [QUESTION_TYPES](docs/QUESTION_TYPES.md) | all question types on one page: what each asks and answers, with an example |
 | [TASKS](docs/TASKS.md) | *experimental*: `classify`, `verify`, `compress`, `extract` (JSON schema) on the same API |
+| [NAVIGATE](docs/NAVIGATE.md) | *experimental*: `rank` (thousands of candidates in one request) and `basal-navigate` (retrieval by navigating a document tree) |
 | [FORMATS](docs/FORMATS.md) · [FORMAT2](docs/FORMAT2.md) · [SOAM](docs/SOAM.md) | prompt formats, option orders and calibration files; the runtime contract; shared-state packing |
 | [HARDWARE](docs/HARDWARE.md) · [PORTS](docs/PORTS.md) · [GGUF](docs/GGUF.md) · [QUANTIZATION](docs/QUANTIZATION.md) | which mode on which GPU; MLX and GGUF ports; FP8 and other low precision |
 | [WHATS_NEW](docs/WHATS_NEW.md) · [basal-1.0 report](docs/basal-1.pdf) | the full list of changes in 2.0; the basal-1.0 technical report |
