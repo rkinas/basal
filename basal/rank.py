@@ -1,8 +1,8 @@
-"""The rank question type (experimental, 2.5.1): rank any number of candidates in one request, beyond the 255 options of
+"""The rank question type (experimental, 2.5): rank thousands of candidates in one request, beyond the 255 options of
 a choice question.
 
   {"type": "rank", "instructions": "Does {candidate} contain information needed to answer the user's question?",
-   "candidates": {key: text} | [text, ...] | [{"key": ..., "text": ..., "group": ...}, ...],
+   "candidates": {key: text} | [text, ...] | [{"key": ..., "text": ..., "group": ...}, ...],   (10,000 per request)
    "label": "Passage", "list_title": "Passages", "chunk": 50, "top": 20, "choice_instructions": "Which passage ...?",
    "choice_context": "auto" | "screen" | "shortlist", "order": "state_first" | "candidates_first",
    "prior": {key: weight}, "limit": 100}
@@ -30,7 +30,7 @@ import time
 
 from .prompt import RequestError, lang_of
 
-MAX_CANDIDATES = 200_000
+MAX_CANDIDATES = 10_000  # per request, all its rank questions together (basal-serve --rank-max-candidates)
 MAX_CHUNK = 1_000
 TOP = 20  # shortlist of the final choice (at most the model's options per question)
 CHUNK = 50  # candidates per request: the gain of a shared context levels off at about 50 (chunk 0 falls back to it)
@@ -56,7 +56,7 @@ def _int(name, q, k, default, lo, hi):
     return v
 
 
-def parse(name, q, max_options, lang):
+def parse(name, q, max_options, lang, max_candidates=MAX_CANDIDATES):
     """A rank question -> its spec; RequestError (HTTP 422) for an invalid one."""
     for k in ("ask_if", "depends_on", "coverage", "max_error", "evidence"):
         if q.get(k) is not None:
@@ -80,8 +80,11 @@ def parse(name, q, max_options, lang):
                 cands.append((str(i), _text(x), None))
     else:
         raise RequestError(f"question {name!r}: candidates must be an object {{key: text}} or a list")
-    if not 1 <= len(cands) <= MAX_CANDIDATES:
-        raise RequestError(f"question {name!r}: {len(cands)} candidates (supported: 1..{MAX_CANDIDATES})")
+    if not cands:
+        raise RequestError(f"question {name!r}: no candidates")
+    if len(cands) > max_candidates:
+        raise RequestError(f"question {name!r}: {len(cands)} candidates, more than the {max_candidates} this server "
+                           "takes per request (basal-serve --rank-max-candidates)")
     keys = [k for k, _, _ in cands]
     if len(set(keys)) != len(keys):
         raise RequestError(f"question {name!r}: candidate keys must be unique")
@@ -109,7 +112,7 @@ def parse(name, q, max_options, lang):
     return dict(name=name, instructions=instr, cands=cands, label=label, title=title, choice=choice, top=top,
                 chunk=_int(name, q, "chunk", CHUNK, 0, MAX_CHUNK), context=ctx, order=order,
                 prior={str(k): float(v) for k, v in prior.items()},
-                limit=_int(name, q, "limit", len(cands), 1, MAX_CANDIDATES))
+                limit=_int(name, q, "limit", len(cands), 1, max_candidates))
 
 
 def chunks(cands, size):
@@ -242,7 +245,12 @@ async def decide(srv, body):
     lang = body.get("lang") or lang_of(state)
     if lang not in ("pl", "en"):
         raise RequestError('lang must be "pl" or "en"')
-    specs = [parse(n, q, srv.max_options, lang) for n, q in body["questions"].items() if is_rank(q)]
+    cap = getattr(srv, "rank_max", MAX_CANDIDATES)
+    specs = [parse(n, q, srv.max_options, lang, cap) for n, q in body["questions"].items() if is_rank(q)]
+    total = sum(len(s["cands"]) for s in specs)
+    if total > cap:  # every 50 candidates are one request through the queue every client shares
+        raise RequestError(f"{total} rank candidates in this request, more than the {cap} this server takes per "
+                           "request (basal-serve --rank-max-candidates)")
     others = {n: q for n, q in body["questions"].items() if not is_rank(q)}
     fields = {k: v for k, v in body.items() if k not in ("state", "questions")}
     jobs = [rank_one(srv, state, s, fields) for s in specs]

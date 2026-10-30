@@ -1,4 +1,4 @@
-"""Trees for basal-navigate (experimental, 2.5.1): documents -> pages -> passages, optionally sections under long
+"""Trees for basal-navigate (experimental, 2.5): documents -> pages -> passages, optionally sections under long
 pages, folders as topics, or topics found by k-means (basal[navigate]: scikit-learn).
 
   build(["docs/"], split_long=60)        -> the nodes, for basal.navigate.Tree (basal-navigate build writes them)

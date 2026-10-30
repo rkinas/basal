@@ -162,7 +162,7 @@ raises `BadRequestError`), 5xx `server_error` otherwise.
 | `multi` | independent probability per label + the selected set | "which of these issues does the message raise?" |
 | `act` | the action with the lowest expected cost under your cost matrix | approve / reject / send to a person |
 | `tool` | the next tool from OpenAI / MCP tool definitions, or answer directly / ask the user / no suitable tool | the next step of an agent |
-| `rank` | the candidates in order, any number of them (experimental) | the passages for a query, the best of 5,000 products |
+| `rank` | the candidates in order, thousands of them (experimental) | the passages for a query, the best of 5,000 products |
 
 **`multi`**: each label is asked as a yes/no branch over the shared state ("does label X apply?"). `selected` holds
 the labels with probability ≥ `threshold` (default 0.5), at most `max` and at least `min`; `set_confidence` estimates
@@ -212,11 +212,11 @@ basal-2.0 models do not ship one, and the server refuses evidence requests for t
 question types next to the others in the same request. They are expanded into `choice` / `noul` / `multi` decisions over
 the shared state and answered in the shapes described in [TASKS.md](TASKS.md).
 
-**Rank** (*experimental*, 2.5.1): `{"type": "rank", "instructions": "Does {candidate} answer the question?",
-"candidates": {...} | [...]}` ranks any number of candidates, more than the 255 options of a choice question: yes / no
+**Rank** (*experimental*, 2.5): `{"type": "rank", "instructions": "Does {candidate} answer the question?",
+"candidates": {...} | [...]}` ranks thousands of candidates, more than the 255 options of a choice question: yes / no
 screening in shared-context requests of 50 candidates, then one choice question over the top 20. The answer is
 `{"type": "rank", "ranking": [{"key", "score", "choice"?}, ...], "top": "<key>", "candidates": n, "requests": n}`. See
-[NAVIGATE.md](NAVIGATE.md#rank-any-number-of-candidates), which also covers `basal-navigate`, retrieval by navigating a
+[NAVIGATE.md](NAVIGATE.md#rank-thousands-of-candidates), which also covers `basal-navigate`, retrieval by navigating a
 document tree with these questions.
 
 **Facts**: `"facts": "auto"` appends a block of computed facts to a Polish state: the weekday of every date and

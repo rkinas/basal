@@ -161,7 +161,7 @@ def test_rank_in_flight_counts_its_requests():
 @pytest.mark.parametrize("q, msg", [
     ({"instructions": "Is it relevant?", "candidates": ["a", "b"]}, "{candidate}"),
     ({"candidates": "a b"}, "candidates must be"),
-    ({"candidates": []}, "0 candidates"),
+    ({"candidates": []}, "no candidates"),
     ({"candidates": {"a": "x"}, "top": 1}, "top must be 0"),
     ({"candidates": ["a", "b"], "top": 11}, "top must be an integer from 0 to 10"),
     ({"candidates": ["a", "b"], "chunk": -1}, "chunk must be"),
@@ -187,3 +187,20 @@ def test_rank_media_refused_and_polish_defaults():
     spec = rank.parse("r", {"instructions": "Czy {candidate} pasuje?", "candidates": ["a", "b"]}, 255, "pl")
     assert spec["label"] == "Kandydat" and spec["choice"] == "Która pozycja najlepiej pasuje?" and spec["top"] == 20
     assert rank.parse("r", {"instructions": INSTR, "candidates": ["a", "b"]}, 10, "en")["top"] == 10
+
+
+def test_rank_candidates_per_request_capped():
+    """Every 50 candidates are one engine request through the queue all clients share: a server takes at most
+    --rank-max-candidates (default 10,000) per request, all its rank questions together."""
+    from basal.server import parser
+    assert parser().parse_args([]).rank_max_candidates == rank.MAX_CANDIDATES == 10_000
+    srv = server(lambda t: 1.0)
+    srv.rank_max = 100
+    q = {"type": "rank", "instructions": INSTR, "top": 0}
+    with pytest.raises(RequestError, match="101 candidates, more than the 100 this server takes per request"):
+        run(srv, {"state": "Q?", "questions": {"r": dict(q, candidates=["x"] * 101)}})
+    with pytest.raises(RequestError, match="120 rank candidates in this request, more than the 100"):
+        run(srv, {"state": "Q?", "questions": {"a": dict(q, candidates=["x"] * 60), "b": dict(q, candidates=["y"] * 60)}})
+    assert srv.calls == []  # refused before any engine request
+    out = run(srv, {"state": "Q?", "questions": {"r": dict(q, candidates=["x"] * 100)}})
+    assert out["answers"]["r"]["candidates"] == 100 and out["usage"]["requests"] == 2

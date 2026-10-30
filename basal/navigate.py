@@ -1,4 +1,4 @@
-"""basal-navigate (experimental, 2.5.1): retrieval by navigating a document tree with typed decisions, no index.
+"""basal-navigate (experimental, 2.5): retrieval by navigating a document tree with typed decisions, no index.
 
 The corpus is a tree: topics, pages (and sections) down to passages. At each level the candidates are judged together:
 one shared state holds the query and every candidate's description, and one yes / no question per candidate asks

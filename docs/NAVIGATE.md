@@ -1,9 +1,9 @@
-# Navigate and rank (experimental, 2.5.1)
+# Navigate and rank (experimental, 2.5)
 
 Two features for retrieval with typed decisions, after *Retriever-Free Retrieval: Navigating Documents with Decision
 Models* (Wan, Jünger, Du, Liu, Krishnan and Weinberger, arXiv 2610.35868):
 
-- the **`rank` question type**: one request ranks any number of candidates, more than the 255 options of a choice
+- the **`rank` question type**: one request ranks thousands of candidates, more than the 255 options of a choice
   question;
 - **`basal-navigate`**: retrieval without an index. The corpus is a tree (topics, pages, sections, passages); at each
   level the model judges the candidates together and only the best branches are opened.
@@ -11,7 +11,7 @@ Models* (Wan, Jünger, Du, Liu, Krishnan and Weinberger, arXiv 2610.35868):
 *Experimental* (see [FEATURES.md](FEATURES.md)): the API may change in a minor release, and the models were not trained
 on these prompts. Check the quality on your own data.
 
-## Rank any number of candidates
+## Rank thousands of candidates
 
 ```json
 {"state": "User's question: how long does a visa take?",
@@ -37,7 +37,7 @@ on these prompts. Check the quality on your own data.
 | field | default | |
 |---|---|---|
 | `instructions` | (required) | the yes / no question; `{candidate}` names the candidate (`Passage 7`) |
-| `candidates` | (required) | `{key: text}`, `[text, ...]` (keys `"0"`, `"1"`, ...) or `[{"key", "text", "group"}]`; up to 200,000 |
+| `candidates` | (required) | `{key: text}`, `[text, ...]` (keys `"0"`, `"1"`, ...) or `[{"key", "text", "group"}]`; at most 10,000 per request, all its rank questions together (`basal-serve --rank-max-candidates N`) |
 | `label`, `list_title` | `Candidate`, none | how the list names its entries, and its heading line |
 | `chunk` | 50 | candidates per request; 0 = all in one request when it fits the model's context, else 50 |
 | `top` | 20 | the final choice's shortlist, at most the model's options per question; 0 = no choice |

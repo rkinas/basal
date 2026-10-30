@@ -198,6 +198,8 @@ benchmarking a GPU.
   documents. The `fast` mode is not affected.
 - `--log-decisions file.jsonl` appends one line per request with the served probabilities (a propensity log, for later
   use of production feedback).
+- `--rank-max-candidates N` (default 10,000): the most candidates of `rank` questions in one request (HTTP 422 above);
+  every 50 of them are one engine request through the queue all clients share. [NAVIGATE.md](NAVIGATE.md)
 - **Status codes and load (2.3.1)**: an invalid request answers HTTP 422, the GPU out of memory 503 (retry later or
   elsewhere) and any other server error 500, all with `{"error": "..."}`. `GET /health` returns the requests in flight
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts

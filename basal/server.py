@@ -1145,6 +1145,7 @@ class Server:
         md = resolve(a.model, a.revision, metadata_only=kind in ("gguf", "ollama", "llamacpp"))
         self.fmt = model_format(md)  # prompt format of the model (basal.json "prompt"; 1 when absent)
         self.max_options = max_options(self.fmt)
+        self.rank_max = getattr(a, "rank_max_candidates", rank.MAX_CANDIDATES)  # rank candidates per request
         self.orders = served_orders(a, self.fmt)
         # the prompt layout (prompt.LAYOUTS; 2.4.1): --layout, else the model's basal.json "layout", else canonical
         self.layout = getattr(a, "layout", None) or model_layout(md)
@@ -2242,6 +2243,10 @@ def parser():
                     help="refuse to start when the --calibration file was fitted on another model or revision "
                          "(default: a warning)")
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
+    ap.add_argument("--rank-max-candidates", dest="rank_max_candidates", type=int, default=rank.MAX_CANDIDATES,
+                    metavar="N", help="rank questions (experimental): at most N candidates per request, all its rank "
+                                      "questions together (HTTP 422 above; every 50 take one engine request through "
+                                      "the shared queue). Default %(default)s")
     ap.add_argument("--api-keys", default=None, metavar="PATH",
                     help="JSON API key file; when set, require a key for every endpoint except GET /health")
     ap.add_argument("--cors-origins", default="", help="comma-separated browser origins allowed by CORS")

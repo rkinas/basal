@@ -103,7 +103,7 @@ def tool(tools, question=None, **opts):
 
 def rank(question, candidates, **opts):
     """question: names the candidate with {candidate}; candidates: {key: text}, [text] or [{"key", "text", "group"}],
-    any number; opts: top, chunk, label, list_title, choice_instructions, choice_context, order, prior, limit
+    up to the server's --rank-max-candidates (10,000) per request; opts: top, chunk, label, list_title, choice_instructions, choice_context, order, prior, limit
     (basal/rank.py, experimental). A large ranking takes many engine calls: give the client a timeout to match."""
     return {"type": "rank", "instructions": question, "candidates": candidates, **opts}
 
