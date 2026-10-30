@@ -232,6 +232,8 @@ def check_body(body):
             raise RequestError(f"missing field {k!r}")
     if not isinstance(body["questions"], dict) or not all(isinstance(q, dict) for q in body["questions"].values()):
         raise RequestError('"questions" must be an object of {name: question object}')
+    if not body["questions"]:  # (an empty object reached the engine and failed there with a 500)
+        raise RequestError('"questions" must name at least one question')
 
 
 @reads_request

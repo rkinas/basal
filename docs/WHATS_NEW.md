@@ -185,6 +185,8 @@ is new is opt-in unless a line says otherwise.
   `choice` named `task::labels`) and the other answer was dropped. In a request with task questions a name with `::`
   is now refused (HTTP 422), as a task question's own name already was. Reported by Sourcery's review of #58.
   Contributed by Dariusz Koryto (@dkoryto), [#59](https://github.com/rkinas/basal/pull/59).
+- **Fix: a request with an empty `"questions"` object** is refused with HTTP 422 (`INVALID_REQUEST`, "must name at
+  least one question"); before, it reached the engine and failed with HTTP 500 (2.4.1 too).
 - **`POST /v1/decisions`: OpenAI's Decisions API on basal-serve.** `client.decisions.create` of the OpenAI Python SDK
   works against basal-serve: predicate, choice and score questions are decided as the System One request they stand
   for (predicate as noul), with the same probabilities as `/v1/systemone`, and answered in OpenAI's shape; errors in

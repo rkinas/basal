@@ -83,6 +83,7 @@ def test_models_endpoint_reports_context_and_hides_mismatched_certification():
     (["a list"], None, "must be a JSON object"),
     ({"state": "s"}, None, "missing field 'questions'"),
     ({"state": "s", "questions": {"q": "Which?"}}, None, "question object"),
+    ({"state": "s", "questions": {}}, None, "at least one question"),
     ({"state": "s", "questions": {"q": dict(Q, criteria={"a": "Alpha"})}}, None, "1 options"),
     ({"state": "s", "questions": {"q": dict(Q, option_keys="maybe")}}, None, "option_keys"),
     ({"state": "s", "questions": {"q": dict(Q, type="act", costs={"defer": 1})}}, None, "missing field 'wrong'"),
