@@ -9,7 +9,7 @@ however many pages poll it, and lives in memory only: every start begins at zero
 nvidia-ml-py) and host telemetry (psutil) are read when installed, once a second in a side thread that runs only while a
 page polled in the last 10 seconds; never a torch.cuda call. With --ui off (the default) none of this module is
 imported and basal-serve handles requests as without it."""
-import itertools
+import bisect
 import json
 import math
 import os
@@ -18,6 +18,7 @@ import threading
 import time
 from collections import deque
 from importlib import metadata
+from operator import itemgetter
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -33,6 +34,7 @@ FONTS = ("dm-sans-latin.woff2", "dm-sans-latin-ext.woff2", "space-grotesk-latin.
 SECRET = {"key", "keys", "token", "secret", "password", "passwd", "auth", "credentials"}  # words of a secret's name
 PACKAGES = ("torch", "transformers", "vllm", "sglang", "mlx", "mlx-lm", "llama-cpp-python", "torchao", "triton",
             "flash-attn", "starlette", "uvicorn", "nvidia-ml-py", "psutil")
+END = itemgetter(0)  # a ring row's end time
 HEADERS = {  # the page: nothing from outside this server, never framed, no referrer
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
                                "font-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; "
@@ -346,17 +348,17 @@ class UI:
             await Response(f[0], media_type=f[1], headers=f[2])(scope, receive, send)
         return with_page
 
-    def fold(self):
-        """Requests answered since the last read into the totals since start, the oldest first and at most FOLD of
-        them (the rest at the next reads). A request that left the ring before it was folded (more than RING requests
-        between two reads) is not in the totals: "seen" counts the ones that are."""
-        new = list(itertools.takewhile(lambda r: r[0] > self.folded, reversed(self.ring)))[-FOLD:]
+    def fold(self, rows):
+        """Requests answered since the last read (rows: the ring's rows, oldest first) into the totals since start,
+        the oldest first and at most FOLD of them (the rest at the next reads). A request that left the ring before it
+        was folded (more than RING requests between two reads) is not in the totals: "seen" counts the ones that are."""
+        new = rows[bisect.bisect_right(rows, self.folded, key=END):][:FOLD]
         if not new:
             return
-        self.folded = new[0][0]
+        self.folded = new[-1][0]
         self.seen += len(new)
         bin_of, total, endpoints, codes = Hist.bin, self.total, self.endpoints, self.codes
-        for _, ep, status, s, *_ in reversed(new):
+        for _, ep, status, s, *_ in new:
             ms = s * 1000
             i = bin_of(ms)
             total.add(ms, i)
@@ -375,15 +377,11 @@ class UI:
         if now - self.memo_at < MEMO_S:
             return self.memo
         srv, a = self.srv, self.a
-        self.fold()
-        w10, w60 = [], []  # seconds of the requests answered in the last 10 and 60 s
-        for r in reversed(self.ring):
-            age = now - r[0]
-            if age > 60:
-                break
-            w60.append(r[3])
-            if age <= 10:
-                w10.append(r[3])
+        rows = list(self.ring)  # one copy; the rows are in the order of their end times
+        self.fold(rows)
+        i60 = bisect.bisect_left(rows, now - 60, key=END)
+        w60 = [r[3] for r in rows[i60:]]  # seconds of the requests answered in the last 60 and 10 s
+        w10 = w60[bisect.bisect_left(rows, now - 10, lo=i60, key=END) - i60:]
         up = now - self.perf0
         q50, q95, q99 = self.total.quantiles()
         load = srv.load()
@@ -414,7 +412,7 @@ class UI:
             "telemetry": self.telemetry.sample,
             "config": self.config,
             "recent": [[round(self.wall0 + r[0] - self.perf0, 3), r[1], r[2], _ms(r[3]), r[4], r[5]]
-                       for r in itertools.islice(reversed(self.ring), RECENT)],
+                       for r in reversed(rows[-RECENT:])],
         }
         self.memo, self.memo_at = json.dumps(d, separators=(",", ":")).encode(), now
         return self.memo
