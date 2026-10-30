@@ -95,6 +95,8 @@ def test_cluster_topics():
     topics = navtree.cluster(texts, 2, max_children=0)
     assert len(topics) == 2 and sorted(len(t["members"]) for t in topics) == [12, 12]
     assert all(t["text"].startswith("Pages such as: ") for t in topics)
+    assert not any(" the" in t["text"].split("Key terms:")[1] for t in navtree.cluster(
+        [f"the {x} and the {x}s in {i}" for x in ("visa", "tax") for i in range(6)], 2))  # no stop words as terms
     deep = navtree.cluster(texts, 2, max_children=5)
     assert any(t["parent"] for t in deep) and sum(len(t["members"]) for t in deep) == 24
     vec = navtree.cluster(texts, 2, embed=lambda xs: [[1.0, 0.0] if "tax" in x else [0.0, 1.0] for x in xs])

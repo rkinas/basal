@@ -23,6 +23,10 @@ PAGE_CHARS = 300
 CENTRAL, TERMS = 6, 6
 DESCRIBE = {"en": ("Pages such as: {titles}. Key terms: {terms}.", "Folder {name}: {titles}"),
             "pl": ("Strony takie jak: {titles}. Kluczowe słowa: {terms}.", "Folder {name}: {titles}")}
+STOP_PL = ("a", "aby", "albo", "ale", "bez", "być", "był", "była", "było", "były", "bo", "co", "czy", "dla", "do", "gdy",
+           "go", "i", "ich", "jak", "jako", "jest", "jego", "jej", "już", "lub", "ma", "może", "na", "nad", "nie", "o",
+           "od", "oraz", "po", "pod", "przez", "przy", "się", "są", "ta", "tak", "te", "tego", "też", "to", "tu", "w",
+           "we", "z", "za", "ze", "że")  # key terms of a topic: not these
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
@@ -273,7 +277,7 @@ def cluster(texts, k, embed=None, max_children=0, lang="en", seed=0, titles=None
         raise SystemExit("topics by k-means need scikit-learn: pip install 'basal[navigate]'") from e
     titles = titles or texts
     tfidf = TfidfVectorizer(sublinear_tf=True, max_df=0.5, min_df=1, max_features=1 << 18,
-                            token_pattern=r"(?u)\b\w\w+\b")
+                            token_pattern=r"(?u)\b\w\w+\b", stop_words="english" if lang == "en" else STOP_PL)
     T = tfidf.fit_transform(texts)
     vocab = tfidf.get_feature_names_out()
     if embed is not None:
