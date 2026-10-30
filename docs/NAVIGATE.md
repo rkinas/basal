@@ -56,6 +56,18 @@ In Python: `Basal(url, timeout=600).rank(state, "Does {candidate} ...?", candida
 ranking takes many engine calls, so give the client a timeout to match. `GET /health` counts each request of a rank
 question as in flight, and `--log-decisions` logs each of them.
 
+**Known limits (2.5).**
+
+- **Cost is one decision per candidate.** basal-omni-1.0-max (`--mode fast`, one H100) judged about 95 candidates per
+  second over 2k-15k-token states. A ConditionalQA question (652 guides, then the paragraphs of the top 3) needs about
+  950 judgments: 14 requests of guide titles and one request of about 300 paragraphs.
+- **CPU time per request grows with branches x state tokens.** The server tokenizes every question's whole prompt,
+  state included. One request of 300 passages over a 12,348-token state is 3.7M tokens to tokenize: 5.8 s on one CPU
+  thread, 0.76 s with the tokenizer's threads (12 cores). Requests of 50 candidates over a 2.4k-token state take
+  0.15 s and 0.02 s.
+- **Keep the tokenizer's parallelism on.** Do not set `TOKENIZERS_PARALLELISM=false` for basal-serve. With it off,
+  the server's CPU, not the GPU, sets the pace of large `rank` requests (seen at 100% of one core).
+
 ## basal-navigate
 
 ```bash
