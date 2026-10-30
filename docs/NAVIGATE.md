@@ -58,6 +58,10 @@ question as in flight, and `--log-decisions` logs each of them.
 
 **Known limits (2.5).**
 
+- **Latency is seconds to a minute per query, not the paper's 0.7-1.8 s** (measured there with a hosted decision model
+  and many requests in parallel). basal-omni-1.0-max, `--mode fast --state-cache-gb 16`, one H100, ConditionalQA
+  (652 guides, then the paragraphs of the top 3, final choice over 20): 271 questions at 8 concurrent clients took
+  2,233 s, 8.2 s per question of throughput, a median of 64 s per question.
 - **Cost is one decision per candidate.** basal-omni-1.0-max (`--mode fast`, one H100) judged about 95 candidates per
   second over 2k-15k-token states. A ConditionalQA question (652 guides, then the paragraphs of the top 3) needs about
   950 judgments: 14 requests of guide titles and one request of about 300 paragraphs.
