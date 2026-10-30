@@ -102,8 +102,9 @@ corpus.
   pages 11-30).
 - **`search(query, k, pin, extra)`**: `query` is a question, or a conversation (a list of `{"role", "text"}` turns; the
   last six are read and the questions ask about the agent's next reply). `pin`: node ids always kept at their level,
-  also when a branch above them was pruned (e.g. the pages a conversation used recently and their help center). `extra`: passage ids added to the last
-  stage, e.g. the top passages of a dense retriever, which recovers evidence that pruning lost.
+  also when a branch above them was pruned (e.g. the pages a conversation used recently and their help center).
+  `extra`: passage ids added to the last stage, e.g. the top passages of a dense retriever, which recovers evidence
+  that pruning lost.
 - **Language**: English or Polish questions and labels, from the query (`lang` to set it); `wording` replaces the
   question of a kind (`{"page": "... {candidate} ...", "choice": "..."}`).
 - The result: `{"passages": [{"id", "score", "choice"?, "text"}], "stages": [{"depth", "candidates", "kept",
