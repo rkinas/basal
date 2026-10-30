@@ -386,6 +386,57 @@ readiness, requests in flight, requests routed by state and by load, failures; w
 replica and escalated (with several levels also per level); with `--blend`, blended answers by the number of models;
 with `--fallback`, LLM calls by result; with `--route`, requests by script.
 
+## Live web page (2.5)
+
+`basal-serve --ui on` (off by default) also serves a live page of the server at `/ui`, opened in a browser:
+
+- **status**: the served model and its revision, mode, engine version, start and uptime, requests running and queued;
+- **traffic since start**: requests and failures, requests per second (last 10 s, last minute, since start), latency
+  p50 / p95 / p99, per endpoint, status codes, and charts of throughput and latency that the page draws while it is open;
+- **state cache** (with `--state-cache-gb` or `--prefix-cache on`): entries, hits, misses, prefix hits, evictions and
+  memory;
+- **telemetry**: per GPU utilisation, memory (and this server's part), temperature, power and SM clock (NVML, from
+  `nvidia-ml-py`); host CPU and memory, this server's RSS and CPU (`psutil`). Neither package is required: without one,
+  its panel says so;
+- **configuration**: every option as parsed, the changed ones marked, secrets redacted (`--api-keys`, options named
+  key / token / secret / password, user and password in URLs), and what they resolved to at start-up: the calibration
+  file, prepared start-up, compile, attention, prompt format and layout, context, and the versions of Python, torch,
+  transformers, vLLM, MLX and the other serving packages;
+- **recent requests**: the last 200 requests' time, endpoint, status, latency and number of questions and options, never
+  their text.
+
+```bash
+basal-serve --model Remek/basal-omni-1.0-mini --mode fast --ui on   # then open http://127.0.0.1:8000/ui
+```
+
+`--ui full` also shows the requests themselves: a click on a row of the recent requests opens the request as it was
+sent and its answer (or the error). The server keeps references to the last 200 requests' bodies (images included) and
+answers in memory, with no copy and nothing on disk, and serialises one only when the page asks for it
+(`GET /ui/request/<id>`). That text is visible to whoever can open the page: on a shared host use `--api-keys`. `--ui on`
+never keeps a request's text.
+
+**Open one page at a time.** What the page costs a request: one append of its metadata to a ring in memory (0.3 µs on an
+Apple M4 Pro's CPU, 0.7 µs on the H100 host's). The rest (totals, percentiles, rates, the configuration view) is computed when a page reads
+`GET /ui/state`, at most once a second however many pages are open, and the telemetry is read once a second in a side
+thread only while a page has polled in the last 10 s. Measured on one H100 (basal-omni-1.0-mini, `--mode fast`, 153
+requests, 3 fresh servers per case, a page being one reader of `GET /ui/state` per second): at 1 client, with no page,
+1 or 2 pages open and with `--ui full` and 1 page, requests/s and p50 latency stayed within 0.3% and 0.9% of `--ui off`
+(29.4 requests/s, p50 28.0 ms), and every answer was byte-identical to `--ui off`'s. At 8 clients in steady state (the 3
+passes after a server's first): `--ui off` 40.7 requests/s, p50 172 ms; no page 41.0 / 172 ms; 1 page 40.8 / 176 ms
+(+2.2%); 2 pages 41.1 / 172 ms (+0.4%); `--ui full` with 1 page 41.1 / 181 ms (+5.2%), while `--ui off`'s own p50 ranged
+from 165 to 181 ms between passes. A fresh server's first pass at 8 clients is slower whatever the setting (31 to 36
+requests/s). At 8 clients the answers depend on how concurrent requests are batched, with the page or without it: 95 to
+103 of the 153 responses (medians) were byte-identical to another `--ui off` server's, against 93 between two
+`--ui off` servers, with at most one top-1 change per pass.
+
+The numbers start at zero with every start and live only in the server's memory (the tables keep the last 16,384 requests); "Reset view" on the page counts from that
+moment in that page only. The page and its fonts ship with basal and load nothing from the network.
+
+With `--api-keys`, `/ui` itself is open (it holds no data; it asks for a key, which stays in that browser tab) and
+`GET /ui/state` needs a key, like the API. Without `--api-keys` the page is open to whoever reaches the port, as the API
+is: bind `--host 127.0.0.1` or put a gateway in front. `GET /ui/state` is one JSON snapshot that a script can read too;
+its fields may change between versions.
+
 ## API access
 
 `basal-serve` is open by default. To require API keys, pass `--api-keys PATH` with a JSON file containing SHA-256

@@ -18,6 +18,11 @@ The inference engine in this repository is original work licensed under the Apac
 includes contributions by Paweł Kiszczak, Piotr Durlej, Kuba Sołtys, Michał Kardyś and @lukaspoloki (README.md,
 Contributors).
 
+Fonts of the basal-serve web page (basal/fonts, latin and latin-ext subsets), licensed under the SIL Open Font License,
+Version 1.1 (basal/fonts/OFL-*.txt):
+  DM Sans        Copyright 2014 The DM Sans Project Authors (https://github.com/googlefonts/dm-fonts)
+  Space Grotesk  Copyright 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)
+
 Training data attribution (basal-1.0 models):
   English decision items in the training data were converted from the public corpus
   avbiswas/bev-decision-150K (https://huggingface.co/datasets/avbiswas/bev-decision-150K), which aggregates questions

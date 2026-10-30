@@ -46,8 +46,8 @@ is new is opt-in unless a line says otherwise.
   `--gpus 0,1` starts one replica per GPU. Cascades from a small to a bigger model (`--escalate`, also several levels,
   such as basal-omni-pico -> mini -> ultra), `--blend` (a weighted mean of several models' probabilities) and an LLM
   fallback for questions that stay unsure (`--fallback`). [SERVING](docs/SERVING.md).
-- **Operations**: `GET /metrics` (Prometheus), HTTP 503 while the model warms up, `--api-keys` and `--cors-origins`,
-  `x-request-id` on every response.
+- **Operations**: `GET /metrics` (Prometheus), a live web page of the server (`--ui on`, one page at a time),
+  HTTP 503 while the model warms up, `--api-keys` and `--cors-origins`, `x-request-id` on every response.
 - **Faster start-up**: `basal-prepare` and `--prepared auto` load the kernels prepared for your GPU (basal-omni-1.0-mini
   290 -> 172 s on an H100 with empty caches, the same answers), and torch.compile's cache survives a reboot.
 - **Answers you can rely on**: answer sets (`"coverage"`), an abstain flag with `max_error`, a second read (`--reread`),
