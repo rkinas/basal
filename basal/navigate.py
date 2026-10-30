@@ -23,9 +23,9 @@ A node without children is a passage.
 
 Budgets (`levels`, one per depth, the last one repeats): "keep" (at most this many branches), "min_p" (only those
 with at least this probability, always at least one), "sure" (only the top branch when its probability is at least
-this), "chunk" (candidates per request). `pin`: node ids always kept, and their passages always judged in the last
-stage (a conversation's recently used pages); `extra`: passage ids added to the last stage (e.g. a dense retriever's
-top passages). `final`: "top" (the choice shortlist, 0 = none), "chunk" (0 = one shared context when it fits the
+this), "chunk" (candidates per request). `pin`: node ids always kept at their level, also when a branch above them
+was pruned (a conversation's recently used pages, or its help center); `extra`: passage ids added to the last stage
+(e.g. a dense retriever's top passages). `final`: "top" (the choice shortlist, 0 = none), "chunk" (0 = one shared context when it fits the
 model's context), "multiply" (a passage's score times its page's), "choice_context" (basal/rank.py), "per_page"
 (passages per page by the page's rank, e.g. [[3, 0], [10, 10], [30, 3]]: every passage of the top 3 pages, the first
 10 of pages 4-10, the first 3 of pages 11-30).
@@ -224,11 +224,20 @@ class Navigator:
             [(e["key"], e["score"], e.get("choice")) for a in out["answers"].values() for e in a["ranking"]]
         return ranking, out["usage"].get("requests", 1)
 
-    def cap(self, pool, rank_of):
+    def depth(self, i):
+        d, p = 0, self.tree.nodes[i].get("parent")
+        while p is not None:
+            d, p = d + 1, self.tree.nodes[p].get("parent")
+        return d
+
+    def cap(self, pool, rank_of, keep=()):
         """The passages of each judged page within its rank's allowance (final "per_page"); a page ranked beyond the
-        last bound adds none, passages without a judged ancestor are kept."""
+        last bound adds none; passages without a judged ancestor and pinned passages (keep) are kept."""
         out, used = [], {}
         for x in pool:
+            if x in keep:
+                out.append(x)
+                continue
             p = self.tree.nodes[x].get("parent")
             while p is not None and p not in rank_of:
                 p = self.tree.nodes[p].get("parent")
@@ -250,8 +259,13 @@ class Navigator:
         style = self.style or ("question" if isinstance(query, str) else "dialog")
         state = query_state(query, lang, self.turns)
         pin = [p for p in pin if p in tree.nodes]
+        pin_depth = {p: self.depth(p) for p in pin}
         frontier, pool, score, rank_of, stages, depth = list(tree.roots), [], {}, {}, [], 0
+        seen = set()
         while True:
+            pruned = [p for p in pin if pin_depth[p] == depth and p not in set(frontier)]  # a pruned branch's pin
+            frontier = sorted(frontier + pruned, key=tree.pos.get) if pruned else frontier
+            seen.update(frontier)
             pool += [i for i in frontier if tree.leaf(i)]
             inner = [i for i in frontier if not tree.leaf(i)]
             if not inner:
@@ -274,10 +288,11 @@ class Navigator:
             frontier = [c for i in kept for c in tree.children[i]]
             depth += 1
         if self.final.get("per_page"):  # passages per page by the page's rank: [[up to rank, at most n (0 = all)]]
-            pool = self.cap(pool, rank_of)
+            pool = self.cap(pool, rank_of, set(pin))
         reached = set(pool)
-        for p in pin:  # pinned pages reach the last stage even when their branch was pruned
-            pool += [x for x in tree.leaves(p) if x not in reached and not reached.add(x)]
+        for p in pin:  # a pin deeper than the search went: its passages join the last stage
+            if p not in seen:
+                pool += [x for x in tree.leaves(p) if x not in reached and not reached.add(x)]
         pool += [x for x in dict.fromkeys(extra) if x in tree.nodes and tree.leaf(x) and x not in reached
                  and not reached.add(x)]
         pool.sort(key=tree.pos.get)

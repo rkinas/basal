@@ -145,3 +145,14 @@ def test_navigate_passages_per_page_by_rank():
     keys = [x["key"] for x in c.bodies[-1]["questions"]["passage"]["candidates"]]
     # p1 ranked first: all 4; p2 second: its first 2; p0 third: none, but its pinned passage p0#3 still comes
     assert keys == ["p0#3", "p1#0", "p1#1", "p1#2", "p1#3", "p2#0", "p2#1"]
+
+
+def test_navigate_pins_kept_at_their_level():
+    """A pinned topic is kept and its pages compete within the page budget (not all its passages); a pinned page under
+    a pruned topic still comes up at the page level."""
+    c = Client(passport)
+    nav = Navigator(c, Tree(NODES), levels=[{"keep": 1}, {"keep": 1}], final={"top": 0})
+    r = nav.search("passport", pin=["t1", "p5"])
+    assert r["stages"][0]["kept"] == ["t1", "t2"] and r["stages"][1]["kept"] == ["p3", "p5"]
+    assert [x["key"] for x in c.bodies[1]["questions"]["page"]["candidates"]] == ["p1", "p2", "p3", "p4", "p5"]
+    assert [x["key"] for x in c.bodies[-1]["questions"]["passage"]["candidates"]] == ["p3#1", "p3#2", "p5#1"]
