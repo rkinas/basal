@@ -59,12 +59,11 @@ question as in flight, and `--log-decisions` logs each of them.
 **Known limits (2.5).**
 
 - **Latency is seconds to a minute per query, not the paper's 0.7-1.8 s** (measured there with a hosted decision model
-  and many requests in parallel). basal-omni-1.0-max, `--mode fast --state-cache-gb 16`, one H100, ConditionalQA
-  (652 guides, then the paragraphs of the top 3, final choice over 20): 271 questions at 8 concurrent clients took
-  2,233 s, 8.2 s per question of throughput, a median of 64 s per question.
-- **Cost is one decision per candidate.** basal-omni-1.0-max (`--mode fast`, one H100) judged about 95 candidates per
-  second over 2k-15k-token states. A ConditionalQA question (652 guides, then the paragraphs of the top 3) needs about
-  950 judgments: 14 requests of guide titles and one request of about 300 paragraphs.
+  and many requests in parallel). basal-omni-1.0-max on one H100: a median of 24.1 s per MultiDoc2Dial turn and
+  64.0 s per ConditionalQA question at 8 concurrent clients ([Measured results](#measured-results)).
+- **Cost is one judgment per candidate.** basal-omni-1.0-max (`--mode fast`, one H100) made 78-135 judgments per
+  second over 2k-15k-token states. A ConditionalQA question (652 guides, then the paragraphs of the top 3) took 932
+  judgments on average: 14 requests of guide titles and one request of 279 paragraphs on average, plus the choice.
 - **CPU time per request grows with branches x state tokens.** The server tokenizes every question's whole prompt,
   state included. One request of 300 passages over a 12,348-token state is 3.7M tokens to tokenize: 5.8 s on one CPU
   thread, 0.76 s with the tokenizer's threads (12 cores). Requests of 50 candidates over a 2.4k-token state take
@@ -137,3 +136,49 @@ directly.
 
 Descriptions decide what can be found: a branch whose description does not show what it holds is pruned. Pruning is
 for this query only, and a larger `keep` trades requests for recall.
+
+## Measured results
+
+*Experimental*: measured once, for 2.5, with basal-omni-1.0-max (`--mode fast --state-cache-gb 16`, one H100). The
+model was not trained on these datasets or these prompts; the datasets were used for evaluation only. Confidence
+intervals are paired bootstrap 95% intervals (10,000 resamples of whole dialogues on MultiDoc2Dial, of questions on
+ConditionalQA). The dense baseline is Qwen3-Embedding-8B over the same passages, with a task instruction. The paper's
+numbers come from another model, corpus build and sample and are given for context only.
+
+**basal-navigate**, each query against the whole corpus:
+
+| dataset | metric | basal-navigate (choice over 20, default) | yes / no only (`top` 0) | dense | basal-navigate - dense | paper |
+|---|---|---|---|---|---|---|
+| MultiDoc2Dial validation: 1,003 turns of 150 dialogues (seed 0); 4 help centres, 413 pages, 4,110 passages | R@1 | **44.27** | 41.18 | 34.70 | +9.57 [5.71, 13.36] | 47.4 |
+| | R@10 | 79.96 | 79.26 | 80.86 | -0.90 [-4.20, +2.28] | 83.6 |
+| ConditionalQA dev: 271 questions with evidence; 652 guides, 56,123 paragraphs | Hit@1 | **63.47** | 64.94 | 44.28 | +19.19 [11.81, 26.94] | 69.7 |
+| | R@10 | 66.56 | 70.30 | 55.94 | +10.62 [6.23, 15.00] | 71.9 |
+
+- **The final choice helped on MultiDoc2Dial and hurt on ConditionalQA.** Against yes / no only: MultiDoc2Dial R@1
+  +3.09 [0.93, 5.19]; ConditionalQA Hit@1 -1.48 [-5.17, +2.21] and R@10 -3.74 [-6.08, -1.37]. It stays on by default
+  (`top` 20). To switch it off: `"top": 0` on a `rank` question, `final={"top": 0}` in `Navigator`,
+  `basal-navigate search --top 0`.
+- Settings. MultiDoc2Dial: the conversation's last six turns; keep 2 help centres (only the top one when its
+  probability is at least 0.8), then 10 pages, plus the help centre of the most recently retrieved page and the two
+  most recent pages (`levels=[{"keep": 2, "sure": 0.8}, {"keep": 10}]`, `pin`); every passage of those pages (121 on
+  average) in one shared context. ConditionalQA: the question and the user's situation; the 652 guide titles and top headings in 14
+  requests of 50, keep 3 guides, then all their paragraphs (279 on average, 98-760) in one shared context.
+- Speed at 8 concurrent clients: MultiDoc2Dial 1,003 turns in 3,147 s (median 24.1 s, 95th percentile 35.1 s per
+  turn); ConditionalQA 271 questions in 2,233 s (median 64.0 s, 95th percentile 98.8 s per question).
+
+**`rank` over 1,000 candidates** (ConditionalQA, one pool per question: its evidence paragraphs plus paragraphs taken
+alternately from the dense and the BM25 ranking, 1,000 in all, shuffled; one `rank` request each, 20 requests of 50
+plus the final choice):
+
+| order | Hit@1 | R@10 |
+|---|---|---|
+| BM25 | 24.72 | 32.92 |
+| dense | 44.28 | 55.94 |
+| `rank`, yes / no only (`top` 0) | 57.93 | 65.99 |
+| `rank`, choice over the top 20 (default) | **65.31** | 69.19 |
+| `rank`, choice over the top 255 | 62.36 | 57.81 |
+
+Yes / no only against dense: Hit@1 +13.65 [6.64, 21.03]. The choice over 20 against yes / no only: Hit@1 +7.38 [1.48,
+13.28], R@10 +3.20 [1.32, 5.22]. A `rank` request over 1,000 candidates took a median of 27.7 s at 4 concurrent
+clients.
+
