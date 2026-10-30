@@ -359,6 +359,27 @@ def _gone(pids, seconds=20):
     return False
 
 
+@pytest.mark.parametrize("args,host", [
+    (["--model", "m"], "127.0.0.1"),  # basal-serve's default 0.0.0.0 would expose the replicas past the router
+    (["--model", "m", "--host", "0.0.0.0"], "0.0.0.0"),  # the user's --host after --
+    (["--host=10.0.0.5", "--model", "m"], "10.0.0.5"),
+])
+def test_spawned_replicas_listen_on_localhost_unless_given_a_host(monkeypatch, args, host):
+    argvs = []
+
+    class Popen:
+        def __init__(self, argv, **_):
+            argvs.append(argv)
+
+    monkeypatch.setattr(R.subprocess, "Popen", Popen)
+    _, urls = R.spawn(["0", "1"], 9100, args)
+    assert urls == ["http://127.0.0.1:9100", "http://127.0.0.1:9101"]
+    for argv in argvs:
+        given = [a.split("=", 1)[1] if a.startswith("--host=") else argv[i + 1]
+                 for i, a in enumerate(argv) if a == "--host" or a.startswith("--host=")]
+        assert given == [host] and argv[-len(args):] == args
+
+
 @posix
 def test_spawned_replicas_have_their_own_process_groups(tmp_path, monkeypatch):
     monkeypatch.setenv("PIDDIR", str(tmp_path))

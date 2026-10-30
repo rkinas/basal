@@ -675,12 +675,14 @@ def _death_signal():
 def spawn(gpus, port0, serve_args):
     """One basal-serve per GPU (CUDA_VISIBLE_DEVICES), on ports port0, port0 + 1, ... -> (processes, URLs). Each in
     its own process group (Replicas.stop ends the replica and whatever it started) that, on Linux, gets SIGTERM when
-    the router dies."""
+    the router dies. The replicas listen on 127.0.0.1 only (the router reaches them there; basal-serve's own default,
+    0.0.0.0, would let the network bypass the router) unless the arguments after -- give --host."""
     procs, urls, pre = [], [], _death_signal()
+    host = [] if any(x == "--host" or x.startswith("--host=") for x in serve_args) else ["--host", "127.0.0.1"]
     for i, g in enumerate(gpus):
         port = port0 + i
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g))
-        procs.append(subprocess.Popen([*SERVE, "--port", str(port), *serve_args], env=env,
+        procs.append(subprocess.Popen([*SERVE, "--port", str(port), *host, *serve_args], env=env,
                                       start_new_session=hasattr(os, "killpg"), preexec_fn=pre))
         urls.append(f"http://127.0.0.1:{port}")
     return procs, urls

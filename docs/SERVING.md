@@ -224,7 +224,8 @@ benchmarking a GPU.
     ([API access](#api-access)).
   - **Replicas it starts** (`--gpus`) end with the router: each runs in its own process group, which the router
     ends when it stops (SIGTERM, SIGINT, SIGHUP, an error; SIGKILL after 30 s); on Linux a replica also gets
-    SIGTERM when the router is killed. When every replica has exited, the router exits with status 1.
+    SIGTERM when the router is killed. When every replica has exited, the router exits with status 1. They listen on
+    127.0.0.1 only (the router reaches them there), unless the arguments after `--` give `--host`.
 - **`GET /metrics`** (basal-serve and basal-router) is Prometheus text: engine version and model, requests waiting and
   running, requests served and failed, the state cache; per replica on the router ([Prometheus
   metrics](#prometheus-metrics)).
