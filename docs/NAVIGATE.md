@@ -85,7 +85,9 @@ corpus.
   `min_p` (only branches with at least this probability, always at least one), `sure` (only the top branch when its
   probability is at least this), `chunk` (candidates per request). A level that fits its budget needs no request.
 - **Last stage** (`final`): `top` (default 20; 0 = no choice), `chunk` (default 0: one shared context when it fits),
-  `multiply` (a passage's score times its page's), `choice_context`.
+  `multiply` (a passage's score times its page's), `choice_context`, `per_page` (passages per page by the page's rank:
+  `[[3, 0], [10, 10], [30, 3]]` takes every passage of the top 3 pages, the first 10 of pages 4-10 and the first 3 of
+  pages 11-30).
 - **`search(query, k, pin, extra)`**: `query` is a question, or a conversation (a list of `{"role", "text"}` turns; the
   last six are read and the questions ask about the agent's next reply). `pin`: node ids always kept, whose passages
   always reach the last stage (e.g. the pages a conversation used recently). `extra`: passage ids added to the last

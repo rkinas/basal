@@ -131,3 +131,17 @@ def test_tree_file_and_errors(tmp_path):
         Tree([{"id": "a", "parent": "x", "text": "a"}])
     with pytest.raises(ValueError, match="cycle"):
         Tree([{"id": "a", "parent": "b", "text": "a"}, {"id": "b", "parent": "a", "text": "b"}])
+
+
+def test_navigate_passages_per_page_by_rank():
+    nodes = [{"id": "root", "parent": None, "kind": "topic", "text": "All"}]
+    for g, w in enumerate((1, 9, 5)):
+        nodes.append({"id": f"p{g}", "parent": "root", "kind": "page", "text": f"page {w}"})
+        nodes += [{"id": f"p{g}#{i}", "parent": f"p{g}", "kind": "passage", "text": f"text {i}"} for i in range(4)]
+    c = Client(lambda t: float(t.split()[-1]) if t.startswith("page") else 1.0)
+    nav = Navigator(c, Tree(nodes), levels=[{"keep": 1}, {"keep": 3, "min_p": 0}],
+                    final={"top": 0, "per_page": [[1, 0], [2, 2]]})
+    nav.search("q", pin=["p0#3"])
+    keys = [x["key"] for x in c.bodies[-1]["questions"]["passage"]["candidates"]]
+    # p1 ranked first: all 4; p2 second: its first 2; p0 third: none, but its pinned passage p0#3 still comes
+    assert keys == ["p0#3", "p1#0", "p1#1", "p1#2", "p1#3", "p2#0", "p2#1"]

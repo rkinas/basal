@@ -26,7 +26,9 @@ with at least this probability, always at least one), "sure" (only the top branc
 this), "chunk" (candidates per request). `pin`: node ids always kept, and their passages always judged in the last
 stage (a conversation's recently used pages); `extra`: passage ids added to the last stage (e.g. a dense retriever's
 top passages). `final`: "top" (the choice shortlist, 0 = none), "chunk" (0 = one shared context when it fits the
-model's context), "multiply" (a passage's score times its page's), "choice_context" (basal/rank.py).
+model's context), "multiply" (a passage's score times its page's), "choice_context" (basal/rank.py), "per_page"
+(passages per page by the page's rank, e.g. [[3, 0], [10, 10], [30, 3]]: every passage of the top 3 pages, the first
+10 of pages 4-10, the first 3 of pages 11-30).
 """
 import argparse
 import json
@@ -222,6 +224,23 @@ class Navigator:
             [(e["key"], e["score"], e.get("choice")) for a in out["answers"].values() for e in a["ranking"]]
         return ranking, out["usage"].get("requests", 1)
 
+    def cap(self, pool, rank_of):
+        """The passages of each judged page within its rank's allowance (final "per_page"); a page ranked beyond the
+        last bound adds none, passages without a judged ancestor are kept."""
+        out, used = [], {}
+        for x in pool:
+            p = self.tree.nodes[x].get("parent")
+            while p is not None and p not in rank_of:
+                p = self.tree.nodes[p].get("parent")
+            if p is None:
+                out.append(x)
+                continue
+            n = next((m for upto, m in self.final["per_page"] if rank_of[p] < upto), -1)
+            if n == 0 or used.get(p, 0) < n:
+                out.append(x)
+                used[p] = used.get(p, 0) + 1
+        return out
+
     def search(self, query, k=10, pin=(), extra=()):
         """The best passages for a query (a question, or a conversation: a list of turns {"role", "text"} or strings)
         -> {"passages": [{"id", "score", "choice"?, "text"}], "stages": [...], "latency_ms"}."""
@@ -231,7 +250,7 @@ class Navigator:
         style = self.style or ("question" if isinstance(query, str) else "dialog")
         state = query_state(query, lang, self.turns)
         pin = [p for p in pin if p in tree.nodes]
-        frontier, pool, score, stages, depth = list(tree.roots), [], {}, [], 0
+        frontier, pool, score, rank_of, stages, depth = list(tree.roots), [], {}, {}, [], 0
         while True:
             pool += [i for i in frontier if tree.leaf(i)]
             inner = [i for i in frontier if not tree.leaf(i)]
@@ -247,12 +266,15 @@ class Navigator:
                     groups.setdefault(tree.nodes[i].get("kind"), []).append(i)
                 ranking, n_req = self.ask(state, lang, style, groups, b.get("chunk", self.chunk))
                 score.update((i, s) for i, s, _ in ranking)
+                rank_of.update((i, r) for r, (i, _, _) in enumerate(ranking))
                 kept = [i for i, _ in select([(i, s) for i, s, _ in ranking], b)]
             kept = sorted(set(kept) | (set(pin) & set(inner)), key=tree.pos.get)
             stages.append({"depth": depth, "candidates": len(inner), "kept": kept, "requests": n_req,
                            "ms": round((time.perf_counter() - t1) * 1000, 2)})
             frontier = [c for i in kept for c in tree.children[i]]
             depth += 1
+        if self.final.get("per_page"):  # passages per page by the page's rank: [[up to rank, at most n (0 = all)]]
+            pool = self.cap(pool, rank_of)
         reached = set(pool)
         for p in pin:  # pinned pages reach the last stage even when their branch was pruned
             pool += [x for x in tree.leaves(p) if x not in reached and not reached.add(x)]
