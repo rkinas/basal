@@ -43,6 +43,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from . import adapter as adapter_module
 from .prompt import PREFILL, RequestError, check_option_tokenizer, model_option_isolation, model_two_way
 
 
@@ -118,7 +119,7 @@ class EagerBackend:
     sdpa_kernels = None  # eager_sdpa_kernels: the SDPA kernels of the transformers forward (None: every enabled one)
 
     def __init__(self, model_dir, dtype="bfloat16", device=None, media=False, forward=None, ple_offload=False,
-                 attn="math"):
+                 attn="math", adapter=None):
         two_way = model_two_way(model_dir)  # basal.json "two_way": read as the model was trained (Gemma 4 only)
         iso = model_option_isolation(model_dir)  # basal.json "option_isolation": isolated option blocks (Gemma 4 only)
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -142,6 +143,7 @@ class EagerBackend:
             _memo_media(self.proc)
         self.lock, self.media_lock = threading.Lock(), threading.Lock()
         self.model = cls.from_pretrained(model_dir, dtype=getattr(torch, dtype))
+        self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0  # --adapter
         if ple_offload:  # --ple-offload on (Gemma 4 E2B / E4B): the per-layer embedding table stays in host memory
             from .gemma4 import offload_ple
             if not offload_ple(self.model):
@@ -1285,7 +1287,7 @@ class GraphBackend(EagerBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 global_attn="flex"):
+                 global_attn="flex", adapter=None):
         if compile:
             persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
@@ -1353,13 +1355,22 @@ class GraphBackend(EagerBackend):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         if self.fp8_checkpoint:
+            if adapter:
+                raise ValueError(f"--adapter {adapter.name}: {model_dir} is an FP8 checkpoint; its weights cannot take "
+                                 "a merge, serve the bf16 repository with --quant fp8")
             if quant not in (None, "fp8"):
                 raise ValueError(f"{model_dir} is an FP8 checkpoint; serve it without --quant {quant}")
             self.model, quant = load_modelopt_fp8(model_dir, "cuda", getattr(torch, dtype)), None
-        elif quant_load == "cpu":  # the bf16 weights stay in host memory until _gemma_init moves them, layer by layer
-            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).eval()
+            self.adapter_modules = 0  # an adapter was refused above
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).cuda().eval()
+            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype))
+            # --adapter: merged on the CPU (as basal-fuse-adapter, so the weights are the same), before the projection
+            # merge and the torchao quantisation
+            self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0
+            if quant_load == "cpu":  # the bf16 weights stay in host memory until _gemma_init moves them, layer by layer
+                self.model = self.model.eval()
+            else:
+                self.model = self.model.cuda().eval()
         self.quant_load = quant_load
         self.dev = (torch.device("cuda", torch.cuda.current_device()) if quant_load == "cpu"
                     else next(self.model.parameters()).device)
@@ -2986,6 +2997,7 @@ class ExitGraphBackend(GraphBackend):
 
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, heads_dir=None, default_policy="off",
                  attn="auto", merge="auto"):
+        # no --adapter: the exit heads and their thresholds were trained on the base model's hidden states
         super().__init__(model_dir, dtype, quant, compile=False, shared=True, warm=False, attn=attn, merge=merge)
         hd = Path(heads_dir) if heads_dir else Path(model_dir) / "exit_heads"
         ck = torch.load(hd / "heads.pt", map_location="cpu")
@@ -3117,14 +3129,14 @@ class MPSBackend(GraphBackend):
                 return super().__new__(GDNMPSBackend)
         return super().__new__(cls)
 
-    def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None):
+    def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None, adapter=None):
         what = recurrent_layers(model_dir) if shared else None  # without sharing: EagerBackend's forwards (exact)
         if what:
             from .gdn_graph import is_gdn
             raise ValueError(recurrent_refused(model_dir, what, is_gdn(model_dir)))
         mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
         device = device or ("mps" if mps else "cpu")
-        EagerBackend.__init__(self, model_dir, dtype, device)
+        EagerBackend.__init__(self, model_dir, dtype, device, adapter=adapter)
         self.dev = torch.device(device)
         self.shared = shared
         self._wrows = {}
@@ -3256,6 +3268,16 @@ class _VLLMOverlap:
         return asyncio.run_coroutine_threadsafe(self.engine.collective_rpc(method, *args, **kw), self.loop).result()
 
 
+VLLM_MAX_LORA_RANK = 512  # the largest max_lora_rank vLLM accepts
+LORA_PROBE = "Ala ma kota, a kot ma Alę. The cat sat on the mat."  # --adapter (vLLM / SGLang): base vs LoRA prompt
+
+
+def lora_inert(engine):
+    return (f"--adapter: {engine} answered the probe prompt with and without the LoRA identically, so it did not apply "
+            "the adapter (an adapter with zero lora_B, or an engine version whose LoRA arguments differ); refusing to "
+            "serve the base model under the adapter's name")
+
+
 class VLLMBackend:
     """vLLM backend: bf16 checkpoints and the ModelOpt FP8 / NVFP4 ports, with the engine settings of a --vllm-preset
     (VLLM_PRESETS, vllm_args). One generated token restricted to the option letters; with
@@ -3272,9 +3294,10 @@ class VLLMBackend:
     OVERLAP_CALLS = 4        # --vllm-overlap on: engine calls the server runs at once
     lock = threading.Lock()  # one vLLM call at a time (text batches and media requests); a class default for tests
     media_kinds, max_audio_s, unified = (), None, False
+    lora = None  # --adapter: the LoRARequest of every call (a class default for tests)
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, max_options=10, preset="default",
-                 fast_prefill=True, media=False, overlap=False):
+                 fast_prefill=True, media=False, overlap=False, adapter=None):
         cfg_file = Path(model_dir) / "config.json"
         cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
         kw, env = vllm_args(cfg, preset, media=media, fast_prefill=fast_prefill)
@@ -3294,9 +3317,18 @@ class VLLMBackend:
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
         self.preset, self.engine_args, self.lock = preset, kw, threading.Lock()
+        self.lora, lora_kw = None, {}
+        if adapter:  # --adapter: one native LoRA (names checked in vLLM 0.11.2's source, run on vLLM 0.32 / vllm-metal)
+            from vllm.lora.request import LoRARequest
+            if adapter.rank > VLLM_MAX_LORA_RANK:
+                raise SystemExit(f"--adapter {adapter.name}: rank {adapter.rank}; vLLM serves LoRA ranks up to "
+                                 f"{VLLM_MAX_LORA_RANK} (merge it with basal-fuse-adapter)")
+            self.lora = LoRARequest("adapter", 1, str(adapter_module.peft_dir(adapter, model_dir)))
+            lora_kw = dict(enable_lora=True, max_loras=1, max_lora_rank=max(8, 1 << (adapter.rank - 1).bit_length()))
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
         kw = {**dict(model=str(model_dir), dtype=dtype, gpu_memory_utilization=mem, max_model_len=max_len,
                      enable_prefix_caching=True, logprobs_mode="processed_logprobs", max_logprobs=max(16, max_options)),
-              **kw}
+              **kw, **lora_kw}
         if overlap:  # several calls in flight, batched by vLLM's scheduler (_VLLMOverlap)
             self.llm, self.lock, self.inflight = _VLLMOverlap(**kw), nullcontext(), self.OVERLAP_CALLS
         else:
@@ -3306,6 +3338,20 @@ class VLLMBackend:
             vllm_unified.check(self.llm)
         self.context = max_len - 1  # longest prompt: max_model_len holds the one generated token too
         self.context_reason = f"vLLM's --max-len {max_len}"
+        if self.lora:
+            self._check_lora()
+
+    def _check_lora(self):
+        """--adapter: one prompt with and without the LoRA; equal log-probabilities mean vLLM did not apply it (the
+        base model would be served under the adapter's name)."""
+        from vllm import SamplingParams
+        from vllm.inputs import TokensPrompt
+        req = [TokensPrompt(prompt_token_ids=self.tok(LORA_PROBE)["input_ids"])]
+        sp = SamplingParams(max_tokens=1, temperature=0.0, logprobs=5)
+        top = lambda **kw: {t: lp.logprob for t, lp in
+                            self.llm.generate(req, sp, use_tqdm=False, **kw)[0].outputs[0].logprobs[0].items()}
+        if top() == top(lora_request=self.lora):
+            raise SystemExit(lora_inert("vLLM"))
 
     def run(self, prompts, ids_list):
         from vllm.inputs import TokensPrompt
@@ -3322,7 +3368,7 @@ class VLLMBackend:
                                  else {}))
                for ids in ids_list]
         with self.lock:
-            outs = self.llm.generate(reqs, sps, use_tqdm=False)
+            outs = self.llm.generate(reqs, sps, use_tqdm=False, **(dict(lora_request=self.lora) if self.lora else {}))
         res = []
         for o, ids in zip(outs, ids_list):
             lp = o.outputs[0].logprobs[0]
@@ -3372,15 +3418,35 @@ class SGLangBackend:
     at the answer position (`token_ids_logprob`), and the softmax over them equals the readout of the other backends
     (a softmax over a subset of log-softmax values is the softmax over the same logits). RadixAttention shares the
     state between the option orders of one question and between the questions of one request."""
+    lora = False  # --adapter: every call names the LoRA (a class default for tests)
 
-    def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096):
+    def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, adapter=None):
         import sglang
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
+        # --adapter: one native LoRA (names checked in the SGLang 0.5.10 source; _check_lora proves it). Two slots per
+        # batch: the adapter and the base model, which the probe of _check_lora runs on (SGLang counts the base as one)
+        lora_kw = dict(enable_lora=True, lora_paths={"adapter": str(adapter_module.peft_dir(adapter, model_dir))},
+                       max_loras_per_batch=2) if adapter else {}
+        self.lora = adapter is not None
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
         self.llm = sglang.Engine(model_path=str(model_dir), dtype=dtype, mem_fraction_static=mem,
-                                 context_length=max_len, log_level="error")
+                                 context_length=max_len, log_level="error", **lora_kw)
         self.context = max_len - 1  # longest prompt: the context holds the one generated token too
         self.context_reason = f"SGLang's --max-len {max_len}"
+        if self.lora:
+            self._check_lora()
+
+    def _check_lora(self):
+        """--adapter: one prompt with and without the LoRA; equal log-probabilities mean SGLang did not apply it."""
+        ids = self.tok(LORA_PROBE)["input_ids"]
+
+        def top(**kw):
+            o = self.llm.generate(input_ids=[ids], sampling_params=[{"max_new_tokens": 1, "temperature": 0.0}],
+                                  return_logprob=True, logprob_start_len=-1, top_logprobs_num=5, **kw)
+            return [(int(x[1]), float(x[0])) for x in o[0]["meta_info"]["output_top_logprobs"][0]]
+        if top() == top(lora_path=["adapter"]):
+            raise SystemExit(lora_inert("SGLang"))
 
     @staticmethod
     def _letters(meta, ids):
@@ -3392,7 +3458,8 @@ class SGLangBackend:
         enc = [list(ids) for ids in EagerBackend.encode(self, prompts)]
         outs = self.llm.generate(input_ids=enc, sampling_params=[{"max_new_tokens": 1, "temperature": 0.0}] * len(enc),
                                  return_logprob=True, logprob_start_len=-1,
-                                 token_ids_logprob=[list(ids) for ids in ids_list])
+                                 token_ids_logprob=[list(ids) for ids in ids_list],
+                                 **(dict(lora_path=["adapter"] * len(enc)) if self.lora else {}))
         return [torch.softmax(torch.tensor(self._letters(o["meta_info"], ids), dtype=torch.float32), -1).tolist()
                 for o, ids in zip(outs, ids_list)]
 
@@ -3541,7 +3608,7 @@ class MLXBackend:
     COMPUTES = ("auto", "bf16")
 
     def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm", state_cache_gb=0,
-                 prefix=False, compute="auto"):
+                 prefix=False, compute="auto", adapter=None):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
@@ -3551,12 +3618,13 @@ class MLXBackend:
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
         self.max_rows = max_rows or self.MAX_ROWS
-        self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute).result()
+        self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute, adapter).result()
 
-    def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto"):
+    def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto", adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
         load time from bf16 weights (the embeddings and the LM head stay bf16); the -MLX-8bit exports need no quant.
-        forward: "mlx-lm" or "basal" (basal/mlx_forward.py where the architecture allows)."""
+        forward: "mlx-lm" or "basal" (basal/mlx_forward.py where the architecture allows). adapter: a LoRA adapter
+        merged into the loaded weights (bf16, or dequantised and re-quantised for an export), before q8."""
         from .gdn_graph import is_gdn
         what = recurrent_layers(md)
         if what and not is_gdn(md):  # before mlx is imported or any weights are read
@@ -3588,6 +3656,9 @@ class MLXBackend:
                              "its bf16 weights with --mode mlx")
         # lazy for q8: the weights are materialised once, after quantisation (never the full bf16 copy)
         self.model, self.config = load_model(md, lazy=bool(quant), model_config=mlx_config_overrides(cfg))
+        # --adapter: merged before q8 quantises the merged bf16 weights; merge_mlx evaluates only the adapter's layers,
+        # so q8 still never materialises the full bf16 copy (keep this order)
+        self.adapter_modules = adapter_module.merge_mlx(self.model, adapter) if adapter else 0
         # the final logit softcap of the decoder (Gemma) is applied to the fp32 code logits
         self.softcap = getattr(self.lm.args, "final_logit_softcapping", None)
         self.quantization = self.config.get("quantization")

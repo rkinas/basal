@@ -205,6 +205,33 @@ benchmarking a GPU.
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md). `--error-format openai` answers errors as `{"error": {"message",
   "type", "code"}}` (same status codes).
+- **LoRA adapters:** `--adapter DIR` (basal-serve, basal-calibrate, basal-bench) loads a
+  LoRA adapter with the model: an mlx-lm directory (`adapter_config.json` + `adapters.safetensors`) or a PEFT one
+  (`adapter_config.json` + `adapter_model.safetensors`; `use_rslora` read, DoRA and per-module ranks refused). Only
+  the text decoder's layers are merged: a tensor of another tower (a vision or audio encoder's `layers.N`) refuses the
+  adapter rather than land in the decoder's layer N. The
+  served name is `<model>+<adapter>` unless `--name`; `GET /v1/models` reports `"adapter": "<name>@<hash>"` (sha256
+  of `adapter_config.json` and the weights file, 12 hex digits: another scale is another adapter), and the start-up
+  line names the adapter and the calibration file applied.
+
+  | engine | adapter |
+  |---|---|
+  | `eager`, `mps`, `fast`, `fast-nocompile`, `fp8` / `nvfp4` (`--quant`), `strix`, `tpu` | merged into the bf16 weights at load, before the projection merge and any quantisation |
+  | `mlx`, `mlx-q8`, the `-MLX-8bit` exports | merged at load; a quantised export is dequantised, merged and re-quantised (mlx-lm's fuse) |
+  | `vllm`, `sglang` | served natively as one LoRA (argument names checked against the vLLM 0.11.2 and SGLang 0.5.10 sources; run on vLLM 0.32 with vllm-metal, where it matched the fused checkpoint on 40 of 40 top answers; not run on CUDA so far); at start-up one probe prompt runs with and without it and identical log-probabilities refuse to start. vLLM takes ranks up to 512. An mlx-lm adapter is converted to a PEFT copy in `$TMPDIR` (removed at exit); for a multimodal model (config.json `text_config`) it is refused, as its module names differ (use a PEFT adapter of the model or `basal-fuse-adapter`). An rsLoRA PEFT adapter is passed as a copy stating its scale as `lora_alpha / r` (SGLang does not read `use_rslora`) |
+  | `gguf`, `ollama`, `llamacpp`, FP8 checkpoints (`-FP8`) | refused: `basal-fuse-adapter --model M --adapter DIR --out FUSED` writes the merged checkpoint, then `basal-export-gguf`; the adapter's calibration files are copied with `fitted_on` naming the merged model (`fused_from` keeps the origin), files fitted with another adapter are left out |
+  | `fast-exit` | refused: its exit heads and their thresholds were trained on the base model's hidden states (serve with `fast`) |
+
+  The merge is mlx-lm's `LoRALinear.fuse` on every framework (`(scale · B) @ A` in fp32, added in the weight's dtype).
+  The update is computed once on the CPU for every engine (the graph engines merge before moving the model to the GPU),
+  so `--adapter` and the `basal-fuse-adapter` checkpoint have the same weights bit for bit whatever the device. On
+  basal-2.0-mini with a rank-16 adapter in 16 layers (112 linear layers): weights bit-identical to `mlx_lm fuse`, and
+  `--adapter` vs the fused checkpoint answered 84 requests (sent one at a time) byte-identically in `mlx`, `mps` and
+  `eager`; concurrent requests are batched differently from run to run, which moves bf16 probabilities by ~1e-3 on
+  any model. A calibration file in the adapter directory comes
+  before the model's; the model's own file is then loaded for its temperatures only
+  ([CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to)). The evidence head (`"evidence": true`) was trained
+  on the base model's states too: under `--adapter` an evidence request answers HTTP 422.
 
 ## Several GPUs, metrics and health (2.5)
 

@@ -41,6 +41,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from . import adapter as adapter_module
 from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, _varlen_attention, compact_refused,
                      graph_memory_bytes, persist_compile_cache, set_attention, torch_varlen_available)
 
@@ -657,7 +658,7 @@ class GDNGraphBackend(GraphBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 device=None, global_attn="flex"):
+                 device=None, global_attn="flex", adapter=None):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
         # engine; quantisation is refused here. graph_memory_gb: the pass-2 graphs captured, _pin_memory). device:
         # "mps" / "cpu" (GDNMPSBackend: no CUDA graphs, uncompiled)
@@ -698,6 +699,7 @@ class GDNGraphBackend(GraphBackend):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype))
+        self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0  # --adapter
         self.model = self.model.to("cuda" if cuda else device or "cpu").eval()
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL
