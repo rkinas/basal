@@ -52,9 +52,9 @@ def test_modelopt_fp8_loads_and_matches(tmp_path):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_modelopt_fp8_loads_the_same_tensors_as_a_model_built_on_the_device(tmp_path, dtype):
-    """The model is built in host memory and takes the checkpoint's tensors (load_state_dict assign): every
-    parameter and buffer as a model built on the device and copied into (the loader before 2.5) has it, bit for bit,
-    in the same dtype."""
+    """The model is built with its parameters on the meta device and takes the checkpoint's tensors (load_state_dict
+    assign): every parameter and buffer as a model built on the device and copied into (the loader before 2.5) has
+    it, bit for bit, in the same dtype, and nothing is left on the meta device."""
     from transformers import AutoConfig, AutoModelForCausalLM
     try:
         from transformers.initialization import no_init_weights  # transformers 5
@@ -80,6 +80,7 @@ def test_modelopt_fp8_loads_the_same_tensors_as_a_model_built_on_the_device(tmp_
         assert a[k].dtype == b[k].dtype and a[k].device == b[k].device and torch.equal(a[k], b[k]), k
     for k, v in old.named_buffers():  # buffers made at construction (rotary frequencies), not in the checkpoint
         assert torch.equal(dict(m.named_buffers())[k], v), k
+    assert not any(t.is_meta for t in [*m.parameters(), *m.buffers()])
 
 
 def test_fp8_checkpoint_refuses_other_quantisation(tmp_path, monkeypatch):

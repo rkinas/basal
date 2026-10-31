@@ -4524,9 +4524,11 @@ def merge_projections(model):
 
 def load_modelopt_fp8(model_dir, device="cuda", dtype=torch.bfloat16):
     """A ModelOpt FP8 checkpoint as a transformers model whose decoder linears are FP8Linear (embeddings, norms and
-    the LM head stay in bf16, as in the checkpoint). The model is built in host memory without initialising its
-    weights (pages never written), and only the checkpoint's tensors go to `device`: built there, its bf16 weights
-    and the checkpoint did not fit together (basal-omni-1.0-ultra-FP8: ~95 GB on an 80 GB H100)."""
+    the LM head stay in bf16, as in the checkpoint). The model is built with its parameters on the meta device (its
+    buffers, such as the rotary frequencies, on `device` as before) and takes the checkpoint's tensors as its
+    parameters: built with its bf16 weights on `device`, it did not fit next to the checkpoint (basal-omni-1.0-ultra-FP8:
+    ~95 GB on an 80 GB H100)."""
+    from accelerate import init_empty_weights
     from safetensors.torch import load_file
     from transformers import AutoConfig
     try:
@@ -4536,7 +4538,7 @@ def load_modelopt_fp8(model_dir, device="cuda", dtype=torch.bfloat16):
     cfg = AutoConfig.from_pretrained(model_dir)
     if hasattr(cfg, "quantization_config"):
         del cfg.quantization_config
-    with torch.device("cpu"), no_init_weights():
+    with torch.device(device), init_empty_weights(include_buffers=False), no_init_weights():
         model = AutoModelForCausalLM.from_config(cfg, dtype=dtype)
     sd = {}
     for f in sorted(Path(model_dir).glob("*.safetensors")):
@@ -4552,7 +4554,7 @@ def load_modelopt_fp8(model_dir, device="cuda", dtype=torch.bfloat16):
     if not fp8:
         raise ValueError(f"{model_dir}: no FP8 linear layers (weight_scale / input_scale) in the checkpoint")
     # the checkpoint's tensors become the parameters (assign), in the dtype the model gives them (as a copy into
-    # them would); what the checkpoint does not hold (buffers made at construction) follows to `device` below
+    # them would)
     ref = model.state_dict()
     sd = {k: v.to(ref[k].dtype) if k in ref and v.is_floating_point() and v.dtype != ref[k].dtype else v
           for k, v in sd.items()}
@@ -4565,7 +4567,7 @@ def load_modelopt_fp8(model_dir, device="cuda", dtype=torch.bfloat16):
     if missing or unexpected:
         raise ValueError(f"{model_dir}: checkpoint does not match the model (missing {missing[:5]}, unexpected "
                          f"{unexpected[:5]})")
-    return model.to(device).eval()
+    return model.eval()
 
 
 def quantize(model, quant):
