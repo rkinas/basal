@@ -1315,10 +1315,10 @@ class GDNMPSBackend(GDNGraphBackend, MPSBackend):
 
     streams, inflight = False, 1  # (MPSBackend's: one call at a time)
 
-    def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None):
+    def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None, adapter=None):
         mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
         GDNGraphBackend.__init__(self, model_dir, dtype, shared=shared, warm=False, device=device or (
-            "mps" if mps else "cpu"))
+            "mps" if mps else "cpu"), adapter=adapter)
 
     run = GraphBackend.run
     run_shared = GraphBackend.run_shared
