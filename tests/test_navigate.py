@@ -188,3 +188,33 @@ def test_navigate_level_beyond_max_candidates_in_parts_with_the_same_decisions()
                     max_candidates=120)
     with pytest.raises(ValueError, match="last stage has 200 passages, more than max_candidates"):
         nav.search("Which item costs 4?")
+
+
+def test_navigate_search_cli_settings_for_large_collections(tmp_path, monkeypatch, capsys):
+    """basal-navigate search takes every setting of a large collection: levels, the last stage's per_page and
+    multiply, and --max-candidates (a larger level goes out in parts)."""
+    import json
+
+    import basal.client
+    clients = []
+
+    class Stub(Client):
+        def __init__(self, *_, **__):
+            super().__init__(passport)
+            clients.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+    monkeypatch.setattr(basal.client, "Basal", Stub)
+    tree = tmp_path / "tree.jsonl"
+    Tree(NODES).save(tree)
+    navigate.main(["search", str(tree), "How do I renew my passport?", "--levels", '[{"keep": 2}, {"keep": 3}]',
+                   "--per-page", "[[1, 0], [2, 1]]", "--multiply", "--top", "0", "--final-chunk", "1", "--max-candidates", "2",
+                   "--chunk", "1", "--json"])
+    r = json.loads(capsys.readouterr().out)
+    assert r["passages"] and r["stages"][0]["requests"] == 3  # 3 topics, requests of 1, at most 2 per part
+    assert [len(q["candidates"]) for b in clients[0].bodies[:2] for q in b["questions"].values()] == [2, 1]
+    assert "prior" in clients[0].bodies[-1]["questions"]["passage"]

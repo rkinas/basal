@@ -254,6 +254,10 @@ class Navigator:
                 cur.setdefault(name, dict(q, candidates=[]))["candidates"] += [cands[i] for i in idx]
                 size += len(idx)
         out.append(cur)
+        for part in out:  # each part's prior names only its own candidates
+            for q in part.values():
+                if "prior" in q:
+                    q["prior"] = {c["key"]: q["prior"][c["key"]] for c in q["candidates"] if c["key"] in q["prior"]}
         return out
 
     def depth(self, i):
@@ -387,6 +391,8 @@ def parser():
                    help="candidates per request to basal-serve (its --rank-max-candidates, default %(default)s); a larger "
                    "level is sent as several requests")
     s.add_argument("--multiply", action="store_true", help="a passage's score times its page's")
+    s.add_argument("--per-page", default=None, help="passages per page by the page's rank as JSON, e.g. "
+                   "'[[3, 0], [10, 10], [30, 3]]' (every passage of the top 3 pages, 10 of pages 4-10, 3 of 11-30)")
     s.add_argument("--choice-context", choices=["auto", "screen", "shortlist"], default="auto")
     s.add_argument("--order", choices=["state_first", "candidates_first"], default="state_first")
     s.add_argument("--style", choices=["question", "dialog"], default=None)
@@ -412,7 +418,8 @@ def main(argv=None):
     if (a.query is None) == (a.queries is None):
         raise SystemExit("give a query or --queries")
     levels = json.loads(a.levels) if a.levels else [{"keep": a.keep or LEVEL["keep"]}]
-    final = {"top": a.top, "chunk": a.final_chunk, "multiply": a.multiply, "choice_context": a.choice_context}
+    final = {"top": a.top, "chunk": a.final_chunk, "multiply": a.multiply, "choice_context": a.choice_context,
+             **({"per_page": json.loads(a.per_page)} if a.per_page else {})}
     with Basal(a.url, timeout=a.timeout, api_key=a.api_key) as client:
         nav = Navigator(client, Tree.load(a.tree), levels, final, a.style, a.lang, chunk=a.chunk, order=a.order,
                         max_candidates=a.max_candidates)
