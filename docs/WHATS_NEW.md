@@ -81,6 +81,15 @@ is new is opt-in unless a line says otherwise.
   (`--ui off`'s own p50 varied by up to 9% between passes); at 1 client the latency stayed within 0.9% and the answers
   byte-identical. A fresh server's first pass at 8 clients is slower with or without the UI. With `--api-keys` the page
   asks for a key. [SERVING.md](SERVING.md#live-web-page-25)
+- **One page for basal-router and all its replicas** (`basal-router --ui on`, default off): at the router's `/ui`,
+  the replicas, readiness, routing by state and by load, requests in flight, failures, the cascade / blend / fallback
+  counters, traffic through the router since start and its last 200 requests (with the replica that answered), next to
+  one card per replica with its own status, traffic, state cache and GPU telemetry, read from that replica's `/ui/state`
+  (start the replicas with `--ui on`; one without it shows what the router knows). A request pays one append to a ring
+  in memory; the replicas are read only while a page polls, at most once a second. On 2 H100 (basal-omni-1.0-mini,
+  `--mode fast`, one page open) the answers at 1 client stayed byte-identical to `--ui off`, and the p50 latency at 8
+  clients rose 1.3%, within `--ui off`'s own spread between passes.
+  [SERVING.md](SERVING.md#one-page-for-basal-router-and-its-replicas)
 - **`GET /metrics` (Prometheus) and start-up states**: basal-serve and basal-router export their counters and gauges;
   basal-serve answers HTTP 503 `{"status": "starting"}` while the model loads and warms up, and a failed start-up exits
   instead of hanging. [SERVING.md](SERVING.md#prometheus-metrics).

@@ -228,6 +228,8 @@ benchmarking a GPU.
     ends when it stops (SIGTERM, SIGINT, SIGHUP, an error; SIGKILL after 30 s); on Linux a replica also gets
     SIGTERM when the router is killed. When every replica has exited, the router exits with status 1. They listen on
     127.0.0.1 only (the router reaches them there), unless the arguments after `--` give `--host`.
+  - **One live page for all replicas** (`--ui on`, off by default): the router and every replica behind it on one page
+    at the router's `/ui` ([Live web page](#live-web-page-25)).
 - **`GET /metrics`** (basal-serve and basal-router) is Prometheus text: engine version and model, requests waiting and
   running, requests served and failed, the state cache; per replica on the router ([Prometheus
   metrics](#prometheus-metrics)).
@@ -438,6 +440,43 @@ With `--api-keys`, `/ui` itself is open (it holds no data; it asks for a key, wh
 `GET /ui/state` needs a key, like the API. Without `--api-keys` the page is open to whoever reaches the port, as the API
 is: bind `--host 127.0.0.1` or put a gateway in front. `GET /ui/state` is one JSON snapshot that a script can read too;
 its fields may change between versions.
+
+### One page for basal-router and its replicas
+
+`basal-router --ui on` (off by default) serves one page for the router and every replica behind it at the router's
+`/ui`, in the same look:
+
+- **the router**: replicas ready, requests in flight, traffic through the router since start (requests, failures,
+  requests per second, latency p50 / p95 / p99, per endpoint, status codes), the configuration as parsed (secrets
+  redacted) and its last 200 requests' time, endpoint, status, latency and the replica that answered, never their text;
+- **routing**: per replica the requests routed by state and by load, its share, failures and latency through the
+  router; with `--escalate`, `--blend`, `--fallback` or `--route`, their counters;
+- **each replica**: a card with its model, mode, version, uptime, requests running and queued, throughput, latency,
+  state cache and GPUs (utilisation, memory, power, temperature), read from that replica's own `GET /ui/state`; charts of
+  throughput and GPU utilisation per replica and of latency through the router, drawn while the page is open.
+
+Start the replicas with `--ui on` too (with `--gpus`, after `--`). A replica without it, one that is not ready, or one
+that wants a key the page has not given shows what the router knows of it, and says so.
+
+```bash
+basal-router --gpus 0,1 --port 8000 --ui on -- --model Remek/basal-omni-1.0-mini --mode fast --ui on
+# then open http://127.0.0.1:8000/ui
+```
+
+A request through the router pays one append of its metadata to a ring in memory. The replicas' states are read only
+when a page reads the router's `GET /ui/state`, at most once a second however many pages are open (one read per
+replica, with the page's API key passed on as for requests), so with no page open nothing is read. Measured on 2 H100
+of one node (basal-omni-1.0-mini, `--mode fast`, one replica per GPU, 153 requests, 3 fresh starts per case), router
+and replicas with `--ui on` and one page open, against both without `--ui`: at 1 client every answer through the router
+was byte-identical (153 of 153), at 23.0 requests/s and p50 29.9 ms either way; at 8 clients (the 3 passes after a
+start's first) p50 90.6 against 89.4 ms (+1.3%) and 75.5 against 75.2 requests/s, while `--ui off`'s own p50 ranged
+from 84.5 to 95.6 ms between passes. At 8 clients the answers depend on how concurrent requests are batched, with the
+page or without it: 98 of the 153 responses (median) were byte-identical to a `--ui off` start's, against 97 between
+two `--ui off` starts, with at most 2 top-1 changes per pass in both.
+
+Like the router's `/metrics`, its page and its own numbers are open to whoever reaches its port (it listens on
+127.0.0.1 unless `--host` says otherwise). With replicas started with `--api-keys`, the page asks for a key for their
+parts: it stays in that browser tab and goes to the router, which passes it on to the replicas.
 
 ## API access
 
