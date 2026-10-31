@@ -139,6 +139,24 @@ def test_growing_and_edited_states_reuse_the_cached_prefix():
     assert be.state_cache.stats()["prefix_hits"] >= 2 and be.state_cache.stats()["entries"] == 2
 
 
+def test_block_fp8_serves_without_the_state_cache(capsys):
+    """Block FP8 at load time leaves --state-cache-gb unused (one start-up warning) and the server then does not cut
+    requests at their state, so the request path is the one without a cache; other modes keep the cache."""
+    from types import SimpleNamespace
+
+    from basal.engine import state_cache_used
+    from basal.server import states_cached
+    assert state_cache_used(16, "fp8", "block") == 0
+    assert capsys.readouterr().out.count("--state-cache-gb is not used") == 1
+    assert state_cache_used(16, "fp8", "row") == 16 and state_cache_used(16, None, "row") == 16
+    assert state_cache_used(16, "nvfp4", "row") == 16 and state_cache_used(0, "fp8", "block") == 0
+    assert capsys.readouterr().out == ""
+    a = SimpleNamespace(state_cache_gb=16)
+    assert not states_cached(a, SimpleNamespace(state_cache_off=True))
+    assert states_cached(a, SimpleNamespace(state_cache_off=False)) and states_cached(a, object())
+    assert not states_cached(SimpleNamespace(state_cache_gb=0), object())
+
+
 def test_longest_chooses_best_cached_prefix():
     cache = StateCache(budget_bytes=1024)
     prefix = list(range(cache.BLOCK))

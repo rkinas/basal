@@ -621,6 +621,17 @@ def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
     return "block" if quant == "fp8" and gemma4 and not fp8_checkpoint else "row"
 
 
+def state_cache_used(state_cache_gb, quant, fp8_scaling):
+    """--state-cache-gb as the graph engine uses it: 0 for block FP8 at load time (--mode fp8 on basal-omni's bf16
+    weights), with one start-up warning: a state continued from a cached one answered NaN there, then CUDA errors on
+    every request (basal-omni-1.0-ultra, H100), so in this release block FP8 serves without the state cache."""
+    if state_cache_gb and quant == "fp8" and fp8_scaling == "block":
+        print("basal: warning: --state-cache-gb is not used with --mode fp8 (block scaling) in this release: the state "
+              "cache is off", flush=True)
+        return 0
+    return state_cache_gb
+
+
 # basal-omni quantised at load time (--mode fp8 with block scaling, --mode nvfp4 --nvfp4-amax, --mode int8) serves only
 # the text shapes (hidden size, decoder layers) that kept the paired accuracy rule against bf16 with their own
 # calibration: ultra (31B) in all three (NVFP4 by a narrow margin, 2.4% of top answers change; int8 0.6%); max (12B)
@@ -1256,6 +1267,7 @@ class GraphBackend(EagerBackend):
     _deferred = None              # warm(): graphs warmed up, captured the largest first (_capture_deferred)
     stream = None                 # a lane's own CUDA stream (lane(); None: every thread's current stream)
     frozen = False                # a serving lane: a graph missing at run time runs eagerly instead of being captured
+    state_cache_off = False       # --state-cache-gb given but not used (state_cache_used): requests are not cut
     _eager_lock = threading.Lock()  # every lane: the first run of such a forward (it may compile: Dynamo / Inductor)
     fuse_merge = False            # the cascade's merge compiled (_merge_fused): with torch.compile on, Llama, Triton
 
@@ -1384,7 +1396,9 @@ class GraphBackend(EagerBackend):
             self.readout_layer = readout_layer in ("on", "auto") and type(last).__name__ == "LlamaDecoderLayer" \
                 and type(last.self_attn).__name__ == "LlamaAttention" and type(last.mlp).__name__ == "LlamaMLP"
         self.prefix = bool(prefix) and shared
-        gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
+        used = state_cache_used(state_cache_gb, quant, fp8_scaling)
+        self.state_cache_off = bool(state_cache_gb) and not used
+        gb = max(used, self.PREFIX_GB if self.prefix else 0)
         self.state_cache = StateCache(gb * 2 ** 30, bits=state_cache_bits) if gb and shared else None
         self._alloc_kv()
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix token ids)]
