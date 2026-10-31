@@ -57,7 +57,8 @@ Off by default (the replicas' answers then pass through untouched):
                --blend-weights 0.6 0.2 0.2   (ultra first: answers that are not blended are its own)
 GET /health: 200 when at least one replica is ready, else 503; /metrics: per replica in flight, requests routed by
 state / by load, failures, readiness, answers per cascade level, blended answers, fallback calls by result
-(Prometheus); /v1/models: the first ready replica's.
+(Prometheus); /v1/models: the first ready replica's. --ui on: GET /ui, one live page of the router and every replica
+(each replica's own panels when it runs with --ui on); GET /ui/state, its JSON.
 
 API keys: a client's Authorization / X-API-Key header is passed on, as it came, to every replica its request reaches
 (--replicas, --escalate, --blend, --route; never to --fallback), so replicas started with --api-keys (the same key file
@@ -562,8 +563,9 @@ class Router:
                  [({"script": k}, n) for k, n in sorted(self.scripts.items())])] if self.scripts else []))
 
 
-def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signal.SIGTERM), on_stop=None):
-    """The router's app. procs: the replicas it started (--gpus); on_stop: called at shutdown (main: Replicas.stop)."""
+def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signal.SIGTERM), on_stop=None, ui=None):
+    """The router's app. procs: the replicas it started (--gpus); on_stop: called at shutdown (main: Replicas.stop);
+    ui: the basal.router_ui.RouterUI of --ui on (its decision routes recorded, GET /ui/state, and the page at /ui)."""
     from contextlib import asynccontextmanager
     poll_s = POLL_S if poll_s is None else poll_s
 
@@ -611,9 +613,11 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
         if on_stop is not None:  # (uvicorn's shutdown: before it re-raises the signal that stopped it)
             await asyncio.get_running_loop().run_in_executor(None, on_stop)
 
-    return Starlette(routes=[Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
-                             Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)],
-                     lifespan=lifespan)
+    routes = [Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
+              Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)]
+    if ui is None:
+        return Starlette(routes=routes, lifespan=lifespan)
+    return ui.page(Starlette(routes=ui.routes(routes), lifespan=lifespan))
 
 
 class Replicas:
@@ -783,6 +787,13 @@ def main(argv=None):
     ap.add_argument("--fallback-extra", dest="fallback_extra", default=None,
                     help='--fallback: JSON merged into the chat request, e.g. a thinking switch: '
                          '\'{"chat_template_kwargs": {"enable_thinking": true}}\'')
+    ap.add_argument("--ui", choices=["off", "on"], default="off",
+                    help="also serve one live page of the router and every replica at /ui: replicas, readiness, "
+                         "routing, requests in flight, failures, traffic through the router since start and its recent "
+                         "requests (metadata, never text), and each replica's own status, traffic, state cache and GPU "
+                         "telemetry from its /ui/state when the replica runs with --ui on (after -- with --gpus); "
+                         "each request adds one append to an in-memory ring. Open like /metrics; the replicas' parts "
+                         "need a key when they run with --api-keys (the page asks for it)")
     a = ap.parse_args(argv)
     cascade = levels(a.escalate, a.escalate_below)
     first, blend = blends(a.blend, a.blend_weights, cascade)
@@ -805,6 +816,12 @@ def main(argv=None):
         routes[k] = v.split(",")
     router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes, blend=blend, blend_weight=first,
                     fallback=fallback)
+    ui = None
+    if a.ui == "on":  # basal/router_ui.py: the page at /ui, its state at /ui/state
+        from .router_ui import RouterUI
+        ui = RouterUI(router, a, vars(ap.parse_args([])))
+        print(f"basal-router: web UI at http://{a.host}:{a.port}/ui (open to whoever reaches this port, as /metrics "
+              "is; replicas started with --api-keys need the key on the page)", flush=True)
 
     def ended(sig, _frame):
         """SIGTERM / SIGINT / SIGHUP outside uvicorn, or re-raised by it after its shutdown: the replicas end first."""
@@ -817,7 +834,8 @@ def main(argv=None):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), ended)
     try:
-        uvicorn.run(app(router, procs=procs, on_stop=replicas.stop), host=a.host, port=a.port, log_level="warning")
+        uvicorn.run(app(router, procs=procs, on_stop=replicas.stop, ui=ui), host=a.host, port=a.port,
+                    log_level="warning")
     finally:
         replicas.stop()
     if router.dead:
