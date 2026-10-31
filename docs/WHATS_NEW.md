@@ -241,9 +241,10 @@ is new is opt-in unless a line says otherwise.
   answers' error at the 1% target is 0.85%, against 0.81% with the 16-bit cache. 4 bits failed the same check.
 - **basal-omni-1.0-ultra in block FP8 or NVFP4** (opt-in, ultra only): `--mode fp8` quantises ultra's bf16 weights as
   they load (128 x 128 block scales, the first and last 2 layers in bf16): one 80 GB H100 at 1.35x the decisions/s of
-  bf16 and 53 instead of 74 GB at 16 clients. `--mode nvfp4` with ultra's calibrated input scales and its own
-  calibration file: 2.3x bf16's scoring speed on Blackwell, 2.4% of top answers change. Other basal-omni models are
-  refused in both modes; they failed the accuracy check. Details in
+  bf16 and 53 instead of 74 GB at 16 clients; the state cache is off in block FP8 until 2.5.1 (`--state-cache-gb` is
+  not used, with a warning at start-up). `--mode nvfp4` with ultra's calibrated input scales and its own calibration
+  file: 2.3x bf16's scoring speed on Blackwell, 2.4% of top answers change. Other basal-omni models are refused in both
+  modes; they failed the accuracy check. Details in
   [QUANTIZATION.md](QUANTIZATION.md#basal-omni-10-ultra-quantised-at-load-time-25).
 - **Option-order check and averaging** (opt-in): `basal-bench --order-check` measures how often the top answer flips
   when the options are reversed or rotated, and what averaging gains; `basal-serve --order-average K` serves the mean

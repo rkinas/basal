@@ -665,6 +665,12 @@ def _fail(futs, e):
             f.set_exception(e)
 
 
+def states_cached(a, backend):
+    """--state-cache-gb: requests are cut at their state, unless the engine leaves the cache off (block FP8: the
+    request path is then the one without a cache)."""
+    return bool(getattr(a, "state_cache_gb", 0)) and not getattr(backend, "state_cache_off", False)
+
+
 class LaneGate:
     """The GPU between the two lanes of --long-lane, main lane first. The long lane runs one decoder layer at a time and
     calls between(i) before each layer: it keeps at most two layers queued on the GPU (so the main lane never waits
@@ -1262,7 +1268,7 @@ class Server:
             print(f"basal: --lanes {a.lanes}: {a.lanes - 1} more copies of the graphs in {time.time() - t:.0f} s",
                   flush=True)
         self.tok = self.backend.tok
-        self.states_cached = bool(getattr(a, "state_cache_gb", 0))  # --state-cache-gb: requests are cut at their state
+        self.states_cached = states_cached(a, self.backend)
         model = getattr(self.backend, "model", None)  # evidence head: needs the in-process HF model
         self.evidence = Evidence(md, model, self.tok, self.fmt) if isinstance(model, torch.nn.Module) else None
         self.md, self.kind = md, kind

@@ -621,6 +621,17 @@ def fp8_scaling_of(scaling, quant, gemma4, fp8_checkpoint):
     return "block" if quant == "fp8" and gemma4 and not fp8_checkpoint else "row"
 
 
+def state_cache_used(state_cache_gb, quant, fp8_scaling):
+    """--state-cache-gb as the graph engine uses it: 0 for block FP8 at load time (--mode fp8 on basal-omni's bf16
+    weights), with one start-up warning: a state continued from a cached one answered NaN there, then CUDA errors on
+    every request (basal-omni-1.0-ultra, H100), so in this release block FP8 serves without the state cache."""
+    if state_cache_gb and quant == "fp8" and fp8_scaling == "block":
+        print("basal: warning: --state-cache-gb is not used with --mode fp8 (block scaling) in this release: the state "
+              "cache is off", flush=True)
+        return 0
+    return state_cache_gb
+
+
 # basal-omni quantised at load time (--mode fp8 with block scaling, --mode nvfp4 --nvfp4-amax, --mode int8) serves only
 # the text shapes (hidden size, decoder layers) that kept the paired accuracy rule against bf16 with their own
 # calibration: ultra (31B) in all three (NVFP4 by a narrow margin, 2.4% of top answers change; int8 0.6%); max (12B)
@@ -1256,6 +1267,7 @@ class GraphBackend(EagerBackend):
     _deferred = None              # warm(): graphs warmed up, captured the largest first (_capture_deferred)
     stream = None                 # a lane's own CUDA stream (lane(); None: every thread's current stream)
     frozen = False                # a serving lane: a graph missing at run time runs eagerly instead of being captured
+    state_cache_off = False       # --state-cache-gb given but not used (state_cache_used): requests are not cut
     _eager_lock = threading.Lock()  # every lane: the first run of such a forward (it may compile: Dynamo / Inductor)
     fuse_merge = False            # the cascade's merge compiled (_merge_fused): with torch.compile on, Llama, Triton
 
@@ -1384,7 +1396,9 @@ class GraphBackend(EagerBackend):
             self.readout_layer = readout_layer in ("on", "auto") and type(last).__name__ == "LlamaDecoderLayer" \
                 and type(last.self_attn).__name__ == "LlamaAttention" and type(last.mlp).__name__ == "LlamaMLP"
         self.prefix = bool(prefix) and shared
-        gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
+        used = state_cache_used(state_cache_gb, quant, fp8_scaling)
+        self.state_cache_off = bool(state_cache_gb) and not used
+        gb = max(used, self.PREFIX_GB if self.prefix else 0)
         self.state_cache = StateCache(gb * 2 ** 30, bits=state_cache_bits) if gb and shared else None
         self._alloc_kv()
         self.template = []  # --template-prefix (with compact rows): [(start in template_kv, prefix token ids)]
@@ -4510,7 +4524,11 @@ def merge_projections(model):
 
 def load_modelopt_fp8(model_dir, device="cuda", dtype=torch.bfloat16):
     """A ModelOpt FP8 checkpoint as a transformers model whose decoder linears are FP8Linear (embeddings, norms and
-    the LM head stay in bf16, as in the checkpoint)."""
+    the LM head stay in bf16, as in the checkpoint). The model is built with its parameters on the meta device (its
+    buffers, such as the rotary frequencies, on `device` as before) and takes the checkpoint's tensors as its
+    parameters: built with its bf16 weights on `device`, it did not fit next to the checkpoint (basal-omni-1.0-ultra-FP8:
+    ~95 GB on an 80 GB H100)."""
+    from accelerate import init_empty_weights
     from safetensors.torch import load_file
     from transformers import AutoConfig
     try:
@@ -4520,7 +4538,7 @@ def load_modelopt_fp8(model_dir, device="cuda", dtype=torch.bfloat16):
     cfg = AutoConfig.from_pretrained(model_dir)
     if hasattr(cfg, "quantization_config"):
         del cfg.quantization_config
-    with torch.device(device), no_init_weights():
+    with torch.device(device), init_empty_weights(include_buffers=False), no_init_weights():
         model = AutoModelForCausalLM.from_config(cfg, dtype=dtype)
     sd = {}
     for f in sorted(Path(model_dir).glob("*.safetensors")):
@@ -4535,7 +4553,13 @@ def load_modelopt_fp8(model_dir, device="cuda", dtype=torch.bfloat16):
             fp8.add(name)
     if not fp8:
         raise ValueError(f"{model_dir}: no FP8 linear layers (weight_scale / input_scale) in the checkpoint")
-    missing, unexpected = model.load_state_dict(sd, strict=False)
+    # the checkpoint's tensors become the parameters (assign), in the dtype the model gives them (as a copy into
+    # them would)
+    ref = model.state_dict()
+    sd = {k: v.to(ref[k].dtype) if k in ref and v.is_floating_point() and v.dtype != ref[k].dtype else v
+          for k, v in sd.items()}
+    missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+    del ref, sd
     missing = [k for k in missing if k.rsplit(".", 1)[0] not in fp8]
     if getattr(cfg, "tie_word_embeddings", False) and "lm_head.weight" in missing:
         model.tie_weights()  # the output head is the embedding (Gemma 4): not in the checkpoint
