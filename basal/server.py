@@ -1075,6 +1075,9 @@ class Server:
                 getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on")):
             raise SystemExit("--state-cache-bits 8 needs --state-cache-gb or --prefix-cache on in the CUDA graph "
                              "engine (fast, fast-nocompile, fp8, int8, nvfp4)")
+        if getattr(a, "state_cache_lock", "off") == "on" and (kind != "graph" or not getattr(a, "state_cache_gb", 0)):
+            raise SystemExit("--state-cache-lock on needs --state-cache-gb in the CUDA graph engine (fast, "
+                             "fast-nocompile, fp8, int8, nvfp4)")
         if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit", "mlx")):
             raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or "
                              "--mode mlx and is not combined with --deterministic (a cached state changes the shapes of "
@@ -1260,6 +1263,8 @@ class Server:
                                         quant_load=getattr(a, "quant_load", "gpu"),
                                         state_cache_bits=getattr(a, "state_cache_bits", 16),
                                         graph_memory_gb=getattr(a, "graph_memory_gb", None), **nvfp4_args(a, md, quant))
+            if getattr(a, "state_cache_lock", "off") == "on":  # before lane() copies the backend
+                self.backend.state_cache_lock = True
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
         if getattr(a, "lanes", 1) > 1:
             t = time.time()
@@ -2140,6 +2145,12 @@ def add_engine_args(ap):
                          "up to this many GB (least recently used evicted); a later request with the same state "
                          "computes only its questions and options, one whose state begins with a cached one only its "
                          "new tokens (0: off)")
+    ap.add_argument("--state-cache-lock", dest="state_cache_lock", choices=["off", "on"], default="off",
+                    help="--state-cache-gb in the CUDA graph engine: on continues cached states under the engine's "
+                         "launch lock, which removes a rare HTTP 500 under concurrent requests (a torch.compile "
+                         "race: 1 of 8,740 requests at 8 clients without it, 0 with it); measured ~8%% lower "
+                         "throughput at 8 clients (basal-omni-1.0-max, H100: 8.19 vs 8.88 requests/s, p50 630 vs "
+                         "577 ms). off (default): as in 2.4.1")
     ap.add_argument("--state-cache-bits", dest="state_cache_bits", type=int, choices=[16, 8], default=16,
                     help="--state-cache-gb / --prefix-cache: 16 keeps the cached keys and values as computed; 8 stores "
                          "them as 8-bit integers with a scale per group (keys per channel, values per token): about "

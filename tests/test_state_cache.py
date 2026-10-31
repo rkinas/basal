@@ -4,6 +4,7 @@ and every readout still equals a separate forward of its own prompt (fp32). LRU 
 the server's state boundary."""
 import random
 
+import pytest
 import torch
 
 from basal.engine import GraphBackend, StateCache
@@ -155,6 +156,34 @@ def test_block_fp8_serves_without_the_state_cache(capsys):
     assert not states_cached(a, SimpleNamespace(state_cache_off=True))
     assert states_cached(a, SimpleNamespace(state_cache_off=False)) and states_cached(a, object())
     assert not states_cached(SimpleNamespace(state_cache_gb=0), object())
+
+
+@pytest.mark.parametrize("lock", [False, True])
+def test_states_are_continued_under_the_launch_lock_only_with_the_flag(monkeypatch, lock):
+    """--state-cache-lock on: a continued state (_continue, uncompiled) runs under the launch lock, so never beside the
+    forwards of the other call in flight (a compile in one thread failed the other's compiled calls); off (the
+    default): no lock taken, as before."""
+    rnd = random.Random(2)
+    be = Stub(tiny())
+    be.state_cache = StateCache(1e9)
+    be.state_cache.BLOCK = 4
+    be.state_cache_lock = lock
+    held, cont = [], be._continue
+    monkeypatch.setattr(be, "_continue", lambda *a: held.append(be._launch.locked()) or cont(*a))
+    s1 = [1] + [rnd.randrange(3, 50) for _ in range(20)]
+    check(be, requests(rnd, s1, 1))
+    check(be, requests(rnd, s1 + [rnd.randrange(3, 50) for _ in range(9)], 1))
+    assert held == [lock] and be.state_cache.stats()["prefix_hits"] == 1
+
+
+def test_state_cache_lock_flag():
+    from basal.server import Server, parser
+    assert parser().parse_args([]).state_cache_lock == "off"
+    assert parser().parse_args(["--state-cache-lock", "on"]).state_cache_lock == "on"
+    with pytest.raises(SystemExit, match="--state-cache-lock on needs --state-cache-gb"):
+        Server(parser().parse_args(["--mode", "fast", "--state-cache-lock", "on"]))
+    with pytest.raises(SystemExit, match="--state-cache-lock on needs --state-cache-gb"):
+        Server(parser().parse_args(["--mode", "eager", "--state-cache-gb", "4", "--state-cache-lock", "on"]))
 
 
 def test_longest_chooses_best_cached_prefix():
