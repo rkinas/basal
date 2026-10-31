@@ -246,6 +246,11 @@ is new is opt-in unless a line says otherwise.
   file: 2.3x bf16's scoring speed on Blackwell, 2.4% of top answers change. Other basal-omni models are refused in both
   modes; they failed the accuracy check. Details in
   [QUANTIZATION.md](QUANTIZATION.md#basal-omni-10-ultra-quantised-at-load-time-25).
+- **Fix: FP8 checkpoints load without a bf16 copy on the GPU** (`-FP8` repositories, `--mode fast` and `--mode fp8`):
+  the loader built the whole bf16 model on the GPU before it read the checkpoint, so basal-omni-1.0-ultra-FP8 needed
+  about 95 GB and ran out of CUDA memory on an 80 GB H100. The model is now built without its weights and the
+  checkpoint's tensors become its parameters: ultra-FP8 serves on one 80 GB H100 in both modes (44.8 GB after
+  start-up). Checkpoints that fitted before load the same tensors bit for bit and give the same answers.
 - **Option-order check and averaging** (opt-in): `basal-bench --order-check` measures how often the top answer flips
   when the options are reversed or rotated, and what averaging gains; `basal-serve --order-average K` serves the mean
   over K option orders, every order reading the request's state once. Off by default: answers are unchanged.
@@ -316,6 +321,9 @@ is new is opt-in unless a line says otherwise.
 - **Known limit:** repeated requests over long states: with `--mode fast` on one H100, basal-omni-1.0-ultra gives
   bit-identical probabilities for the same 24k-32k-token request sent again (one at a time) in 95 of 100 cases, as 2.4.1
   did; basal-omni-1.0-mini in 100 of 100. Ultra's answers on long states are not guaranteed to be bit-stable.
+- **Known limit:** with `--mode fast` and `--state-cache-gb`, a rare race can fail one request with HTTP 500 (an error
+  about FX symbolic tracing): about 1 request in 8,000 in our tests; the server recovered and kept serving (retry the
+  request). Present since 2.3.1; the fix is planned for 2.5.1.
 
 # What is new in basal 2.4.1
 
