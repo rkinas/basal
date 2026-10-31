@@ -339,7 +339,10 @@ is new is opt-in unless a line says otherwise.
   did; basal-omni-1.0-mini in 100 of 100. Ultra's answers on long states are not guaranteed to be bit-stable.
 - **Known limit:** with `--mode fast` and `--state-cache-gb`, a rare race can fail one request with HTTP 500 (an error
   about FX symbolic tracing): about 1 request in 8,000 in our tests; the server recovered and kept serving (retry the
-  request). Present since 2.3.1; the fix is planned for 2.5.1.
+  request). Present since 2.3.1. `--state-cache-lock on` (opt-in) removes it at a cost: on one H100
+  (basal-omni-1.0-max, 8 clients, 8,740 requests) 0 failed instead of 1, but 8.19 instead of 8.88 requests/s (-8%) and
+  a p50 of 630 instead of 577 ms; the top answers agreed with the uncached ones as without it (99.24% vs 99.25%). A fix
+  without that cost is planned for 2.5.1.
 
 # What is new in basal 2.4.1
 

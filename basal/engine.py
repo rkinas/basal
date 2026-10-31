@@ -1268,6 +1268,7 @@ class GraphBackend(EagerBackend):
     stream = None                 # a lane's own CUDA stream (lane(); None: every thread's current stream)
     frozen = False                # a serving lane: a graph missing at run time runs eagerly instead of being captured
     state_cache_off = False       # --state-cache-gb given but not used (state_cache_used): requests are not cut
+    state_cache_lock = False      # --state-cache-lock on: cached states continued under _launch (_extend_states)
     _eager_lock = threading.Lock()  # every lane: the first run of such a forward (it may compile: Dynamo / Inductor)
     fuse_merge = False            # the cascade's merge compiled (_merge_fused): with torch.compile on, Llama, Triton
 
@@ -2013,7 +2014,12 @@ class GraphBackend(EagerBackend):
             for (ck, cv), t in zip(kv, self.gemma.kv_lens(n) if self.gemma is not None else [n] * len(kv)):
                 o = n - ck.shape[1]  # position of the entry's first stored token (sliding layers of a long state)
                 prefix.append((ck[:, : m - o], cv[:, : m - o]))
-            new, _ = self._continue(root, prefix, m)
+            # --state-cache-lock on: the continuation (uncompiled) not beside the other call's forwards, as
+            # GDNGraphBackend's always is: a torch.compile in one thread failed the other's compiled calls (a rare
+            # HTTP 500, "FX to symbolically trace"). Off by default: it cost ~8% of the requests per second at 8
+            # clients (basal-omni-1.0-max, H100)
+            with self._launch if self.state_cache_lock else nullcontext():
+                new, _ = self._continue(root, prefix, m)
             self.state_cache.put(key, new, tokens=root, replaces=old if m == n else None)
             hits[k] = new
 
