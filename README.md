@@ -49,8 +49,9 @@ is new is opt-in unless a line says otherwise.
 - **Retrieval without an index** (*experimental*): the `rank` question type ranks thousands of candidates in one
   request (yes / no screening in shared-context requests of 50, then one choice over the top 20), and `basal-navigate`
   searches a document tree (topics, pages, passages) with it. [NAVIGATE](docs/NAVIGATE.md).
-- **Operations**: `GET /metrics` (Prometheus), a live web page of the server (`--ui on`, one page at a time),
-  HTTP 503 while the model warms up, `--api-keys` and `--cors-origins`, `x-request-id` on every response.
+- **Operations**: `GET /metrics` (Prometheus), a live web page of the server (`--ui on`, one page at a time) and one
+  page for a router and all its replicas (`basal-router --ui on`), HTTP 503 while the model warms up, `--api-keys` and
+  `--cors-origins`, `x-request-id` on every response.
 - **Faster start-up**: `basal-prepare` and `--prepared auto` load the kernels prepared for your GPU (basal-omni-1.0-mini
   290 -> 172 s on an H100 with empty caches, the same answers), and torch.compile's cache survives a reboot.
 - **Answers you can rely on**: answer sets (`"coverage"`), an abstain flag with `max_error`, a second read (`--reread`),
