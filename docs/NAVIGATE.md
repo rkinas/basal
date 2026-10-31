@@ -66,8 +66,9 @@ question as in flight, and `--log-decisions` logs each of them.
   judgments on average: 14 requests of guide titles and one request of 279 paragraphs on average, plus the choice.
 - **CPU time per request.** The server tokenizes the part a request's prompts share (template, state and list) once
   and each question's own tail after it, for the tokenizers of the basal models (Gemma 4, Qwen3.5, Bielik v3); with
-  other tokenizers it tokenizes every prompt whole. One request of 300 passages over a 12,514-token state: 0.08 s of
-  CPU instead of 3.4 s on one thread (0.52 s with the tokenizer's threads), on an Apple M4 Pro.
+  other tokenizers it tokenizes every prompt whole. One request of 300 passages over a 12,514-token state: 0.14 s of
+  CPU instead of 5.77 s on one thread of an H100 server (0.13 s instead of 1.05 s with the tokenizer's threads); 0.08 s
+  instead of 3.4 s on one thread of an Apple M4 Pro (0.52 s with the threads).
 
 ## basal-navigate
 
@@ -164,6 +165,27 @@ numbers come from another model, corpus build and sample and are given for conte
   context.
 - Speed at 8 concurrent clients: MultiDoc2Dial 1,003 turns in 3,147 s (median 24.1 s, 95th percentile 35.1 s per
   turn); ConditionalQA 271 questions in 2,233 s (median 64.0 s, 95th percentile 98.8 s per question).
+
+**Choice context.** A second measurement, on fresh queries, compared what the final choice reads: `choice_context`
+`shortlist` (your state plus only the shortlisted passages) at `top` 20 and at `top` 5, and the default `auto` at `top`
+20 (here always the screening state, because every final stage fit one request). Each was compared with yes / no only,
+all over the same screening of each query. Model and settings as above; MultiDoc2Dial validation: the next 150 dialogues
+in the same seeded order (1,002 turns scored); ConditionalQA: 300 train questions with evidence.
+
+| dataset | metric | yes / no only | shortlist, top 20 | shortlist, top 5 | auto, top 20 (default) |
+|---|---|---|---|---|---|
+| MultiDoc2Dial | R@1 | 39.52 | 42.02 (+2.50 [0.40, 4.53]) | 42.22 (+2.69 [0.30, 5.07]) | 41.22 (+1.70 [-0.31, 3.74]) |
+| | R@10 | 72.65 | 75.45 | 72.65 | 74.65 |
+| ConditionalQA | Hit@1 | 63.67 | 65.67 (+2.00 [-2.00, 6.00]) | 67.67 (+4.00 [-0.67, 8.33]) | 62.67 (-1.00 [-4.67, 3.00]) |
+| | R@10 | 71.37 | 70.24 | 71.37 | 68.68 |
+
+The default would change only for a gain with a confidence interval above zero on both datasets and an R@10 loss of at
+most 1.0 point. Both shortlist settings gained on MultiDoc2Dial; on ConditionalQA their intervals include zero, so the
+default stays `auto` with `top` 20. Dense (same queries): R@1 31.44, Hit@1 48.00. Median time of the final choice
+request at 8 concurrent clients: MultiDoc2Dial 4.4 s (shortlist, top 20), 3.2 s (top 5), 7.3 s (auto); ConditionalQA
+6.0 s, 3.7 s, 15.4 s. To choose over the shortlist: `"choice_context": "shortlist"` on a `rank` question,
+`final={"choice_context": "shortlist"}` in `Navigator`, or `basal-navigate search --choice-context shortlist` (add
+`--top 5` for the shorter list).
 
 **`rank` over 1,000 candidates** (ConditionalQA, one pool per question: its evidence paragraphs plus paragraphs taken
 alternately from the dense and the BM25 ranking, 1,000 in all, shuffled; one `rank` request each, 20 requests of 50

@@ -19,7 +19,8 @@ is new is opt-in unless a line says otherwise.
   always ends a token, so the engine reads the same ids as before. For the tokenizers of the basal models (Gemma 4,
   Qwen3.5, Bielik v3), checked token for token against whole-prompt tokenization on the release request sets, `rank`
   and `basal-navigate` requests and 12,000 fuzzed state / question splits each; other tokenizers tokenize each prompt
-  whole as before. A `rank` request of 300 candidates over a 12,514-token state takes 0.08 s of CPU instead of 3.4 s.
+  whole as before. A `rank` request of 300 candidates over a 12,514-token state takes 0.14 s of CPU instead of 5.77 s
+  on one thread of an H100 server (0.08 s instead of 3.4 s on an Apple M4 Pro).
 - **basal-viz reads Gemma 4 basal-omni text decisions:** the logit lens runs over basal-omni's text decoder with the
   output head's bias and the final logit softcap, so every layer's code distribution ends at the probabilities the
   eager engine serves. Requests with media are refused with a message (basal-viz explains text only). Gemma 4
