@@ -193,6 +193,83 @@ def check_option_tokenizer(tok):
         raise ValueError("isolated options: this tokenizer does not tokenize the prompt's pieces as the whole prompt")
 
 
+# Tokenize once (2.5): the prompts of one request share the template and the state; their ids are the shared part's ids
+# once plus each prompt's own tail, cut after a newline that comes before a character that is not whitespace. The cut is
+# always where whole-prompt tokenization puts a token boundary, for the tokenizers of these kinds: no BPE token holds a
+# newline followed by anything but whitespace (Gemma 4, Bielik v3), or the pre-tokenizer splits there (Qwen3.5's pattern).
+ONCE_SPLIT = (r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|"
+              r"\s+(?!\S)|\s+")
+ONCE_KINDS = (  # (normalizer, pre-tokenizer) as tokenizers serializes them
+    ({"type": "Replace", "pattern": {"String": " "}, "content": "\u2581"},
+     {"type": "Split", "pattern": {"String": " "}, "behavior": "MergedWithPrevious", "invert": False}),
+    (None, {"type": "Metaspace", "replacement": "\u2581", "prepend_scheme": "first", "split": False}),
+    ({"type": "NFC"}, {"type": "Sequence", "pretokenizers": [
+        {"type": "Split", "pattern": {"Regex": ONCE_SPLIT}, "behavior": "Isolated", "invert": False},
+        {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": True, "use_regex": False}]}),
+)
+
+
+def once_ids(tok):
+    """The newline's own token ids when this tokenizer can tokenize the shared part of a request's prompts once
+    (tokens_once), else None: a fast BPE tokenizer of one of ONCE_KINDS, no added token that takes the whitespace on
+    its left, and no vocabulary token with a newline followed by a character other than whitespace."""
+    bt = getattr(tok, "backend_tokenizer", None)
+    if bt is None or type(bt.model).__name__ != "BPE":
+        return None
+    m = bt.model
+    if m.dropout or getattr(m, "ignore_merges", True) or m.continuing_subword_prefix or m.end_of_word_suffix:
+        return None
+    kind = tuple(None if x is None else json.loads(x.__getstate__()) for x in (bt.normalizer, bt.pre_tokenizer))
+    if kind not in ONCE_KINDS:
+        return None
+    if kind == ONCE_KINDS[2]:  # byte-level vocabulary: newline, then space, tab, vertical tab, form feed, return
+        nl, space = "\u010a", "\u010a\u0120\u0109\u010b\u010c\u010d"
+    else:
+        nl, space = "\n", "\n\u2581 \t\v\f\r"
+    for t in bt.get_vocab(with_added_tokens=False):
+        i = t.find(nl)
+        while 0 <= i < len(t) - 1:
+            if t[i + 1] not in space:
+                return None
+            i = t.find(nl, i + 1)
+    if any(a.lstrip for a in bt.get_added_tokens_decoder().values()):
+        return None
+    return tok("\n", add_special_tokens=False).input_ids
+
+
+def shared_length(a, b):
+    """Length of the longest common prefix of two strings (a binary search over slice comparisons)."""
+    lo, hi = 0, min(len(a), len(b))
+    while lo < hi:
+        m = (lo + hi + 1) // 2
+        if a[:m] == b[:m]:
+            lo = m
+        else:
+            hi = m - 1
+    return lo
+
+
+def tokens_once(tok, prompts, nl):
+    """Token ids of a request's prompts (once_ids gave nl): the text they share up to its last newline before a
+    character that is not whitespace, tokenized once, plus each prompt's tail from that newline on, whose own tokens
+    (nl) are then dropped. None (tokenize each prompt whole) for one prompt, when no such newline is shared, or when a
+    tail does not start with nl."""
+    if len(prompts) < 2:
+        return None
+    lo, hi = min(prompts), max(prompts)  # the prefix all prompts share is the one these two share
+    n = shared_length(lo, hi)
+    c = lo.rfind("\n", 0, n - 1) if n > 1 else -1
+    while c >= 0 and lo[c + 1].isspace():
+        c = lo.rfind("\n", 0, c)
+    if c < 0:
+        return None
+    head = tok(lo[: c + 1], add_special_tokens=False).input_ids
+    tails = tok([p[c:] for p in prompts], add_special_tokens=False).input_ids
+    if any(t[: len(nl)] != nl for t in tails):
+        return None
+    return [head + t[len(nl):] for t in tails]
+
+
 def lang_of(text):
     """Polish if the text contains Polish diacritics, otherwise English (selects the prompt template)."""
     return "pl" if any(c in PL_CHARS for c in text) else "en"

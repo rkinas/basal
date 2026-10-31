@@ -64,12 +64,10 @@ question as in flight, and `--log-decisions` logs each of them.
 - **Cost is one judgment per candidate.** basal-omni-1.0-max (`--mode fast`, one H100) made 78-135 judgments per
   second over 2k-15k-token states. A ConditionalQA question (652 guides, then the paragraphs of the top 3) took 932
   judgments on average: 14 requests of guide titles and one request of 279 paragraphs on average, plus the choice.
-- **CPU time per request grows with branches x state tokens.** The server tokenizes every question's whole prompt,
-  state included. One request of 300 passages over a 12,348-token state is 3.7M tokens to tokenize: 5.8 s on one CPU
-  thread, 0.76 s with the tokenizer's threads (12 cores). Requests of 50 candidates over a 2.4k-token state take
-  0.15 s and 0.02 s.
-- **Keep the tokenizer's parallelism on.** Do not set `TOKENIZERS_PARALLELISM=false` for basal-serve. With it off,
-  the server's CPU, not the GPU, sets the pace of large `rank` requests (seen at 100% of one core).
+- **CPU time per request.** The server tokenizes the part a request's prompts share (template, state and list) once
+  and each question's own tail after it, for the tokenizers of the basal models (Gemma 4, Qwen3.5, Bielik v3); with
+  other tokenizers it tokenizes every prompt whole. One request of 300 passages over a 12,514-token state: 0.08 s of
+  CPU instead of 3.4 s on one thread (0.52 s with the tokenizer's threads), on an Apple M4 Pro.
 
 ## basal-navigate
 

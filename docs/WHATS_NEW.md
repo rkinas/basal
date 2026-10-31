@@ -14,6 +14,12 @@ is new is opt-in unless a line says otherwise.
   with basal-omni-1.0-max on one H100 against a dense 8B embedder: MultiDoc2Dial R@1 44.27 vs 34.70, ConditionalQA
   Hit@1 63.47 vs 44.28; the final choice helped on the first and lowered Hit@1 by 1.48 on the second (`top` 0 turns
   it off); 24-64 s per query (median, 8 concurrent clients). [NAVIGATE.md](NAVIGATE.md#measured-results)
+- **Tokenize once (default):** the prompts of a request share the template and the state; the server now tokenizes
+  that shared part once and each prompt's own tail after it, cut after a newline where whole-prompt tokenization
+  always ends a token, so the engine reads the same ids as before. For the tokenizers of the basal models (Gemma 4,
+  Qwen3.5, Bielik v3), checked token for token against whole-prompt tokenization on the release request sets, `rank`
+  and `basal-navigate` requests and 12,000 fuzzed state / question splits each; other tokenizers tokenize each prompt
+  whole as before. A `rank` request of 300 candidates over a 12,514-token state takes 0.08 s of CPU instead of 3.4 s.
 - **basal-viz reads Gemma 4 basal-omni text decisions:** the logit lens runs over basal-omni's text decoder with the
   output head's bias and the final logit softcap, so every layer's code distribution ends at the probabilities the
   eager engine serves. Requests with media are refused with a message (basal-viz explains text only). Gemma 4

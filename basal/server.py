@@ -55,8 +55,8 @@ from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, lang_of, letter_ids, max_options,
-                     media_messages, model_format, model_layout, model_option_isolation, model_two_way, option_tokens,
-                     reads_request, render)
+                     media_messages, model_format, model_layout, model_option_isolation, model_two_way, once_ids,
+                     option_tokens, reads_request, render, tokens_once)
 from .sets import label_set_id
 from .sets import select as select_set
 from .sets import validate as validate_set
@@ -1268,6 +1268,7 @@ class Server:
             print(f"basal: --lanes {a.lanes}: {a.lanes - 1} more copies of the graphs in {time.time() - t:.0f} s",
                   flush=True)
         self.tok = self.backend.tok
+        self.once = once_ids(self.tok)  # the shared part of a request's prompts tokenized once (prompt.tokens_once)
         self.states_cached = states_cached(a, self.backend)
         model = getattr(self.backend, "model", None)  # evidence head: needs the in-process HF model
         self.evidence = Evidence(md, model, self.tok, self.fmt) if isinstance(model, torch.nn.Module) else None
@@ -1348,8 +1349,9 @@ class Server:
         flat = [p for b in branches for p in b[3]]
         if getattr(self, "iso", False):  # isolated options: the pieces one by one, with their token counts
             toks = [option_tokens(self.tok, p, p.options, self.fmt) for p in flat]
-        else:
-            toks = self.tok(flat, add_special_tokens=False).input_ids
+        else:  # the part the prompts share (template and state) once, then each prompt's own tail; else each whole
+            once = getattr(self, "once", None)
+            toks = (once and tokens_once(self.tok, flat, once)) or self.tok(flat, add_special_tokens=False).input_ids
         longest, j = [], 0
         for b in branches:
             longest.append(max(map(len, toks[j: j + len(b[3])])))
