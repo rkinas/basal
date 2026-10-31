@@ -23,8 +23,10 @@ A node without children is a passage.
 
 Budgets (`levels`, one per depth, the last one repeats): "keep" (at most this many branches), "min_p" (only those
 with at least this probability, always at least one), "sure" (only the top branch when its probability is at least
-this), "chunk" (candidates per request). `pin`: node ids always kept at their level, also when a branch above them
-was pruned (a conversation's recently used pages, or its help center); `extra`: passage ids added to the last stage
+this), "chunk" (candidates per request). A level with more candidates than `max_candidates` (default 10,000, the
+default of basal-serve --rank-max-candidates) goes out as several requests, cut where the server's requests of `chunk`
+end, so every candidate is judged with the same neighbours as in one request. `pin`: node ids always kept at their
+level, also when a branch above them was pruned (a conversation's recently used pages, or its help center); `extra`: passage ids added to the last stage
 (e.g. a dense retriever's top passages). `final`: "top" (the choice shortlist, 0 = none), "chunk" (0 = one shared context when it fits the
 model's context), "multiply" (a passage's score times its page's), "choice_context" (basal/rank.py), "per_page"
 (passages per page by the page's rank, e.g. [[3, 0], [10, 10], [30, 3]]: every passage of the top 3 pages, the first
@@ -36,6 +38,7 @@ import sys
 import time
 
 from .prompt import lang_of
+from .rank import MAX_CANDIDATES, chunks
 
 LABELS = {
     "en": {"topic": ("Topic", "Topics"), "page": ("Page", "Pages"), "section": ("Section", "Sections"),
@@ -185,11 +188,12 @@ class Navigator:
     """Search a Tree through a basal-serve (client: basal.client.Basal, or any object with request(body) -> the
     response). levels: budgets per depth (the last one repeats); final: the last stage's settings; style "question" or
     "dialog" (default: dialog for a list of turns); lang "en" / "pl" (default: from the query); wording: your own
-    question templates {kind: "... {candidate} ...", "choice": "..."}; order: "state_first" or "candidates_first"."""
+    question templates {kind: "... {candidate} ...", "choice": "..."}; order: "state_first" or "candidates_first";
+    max_candidates: the most candidates in one request (basal-serve --rank-max-candidates)."""
 
     def __init__(self, client, tree, levels=None, final=None, style=None, lang=None, wording=None, chunk=50,
-                 order="state_first", turns=6):
-        self.client, self.tree = client, tree
+                 order="state_first", turns=6, max_candidates=MAX_CANDIDATES):
+        self.client, self.tree, self.max_candidates = client, tree, max_candidates
         self.levels = [dict(b) for b in (levels or [LEVEL])]
         self.final = {**FINAL, **(final or {})}
         self.style, self.lang, self.wording, self.chunk, self.order, self.turns = style, lang, wording or {}, chunk, \
@@ -202,7 +206,8 @@ class Navigator:
         return LABELS[lang].get(kind) or LABELS[lang][None]
 
     def ask(self, state, lang, style, groups, chunk, top=0, prior=None, context="auto"):
-        """One request with a rank question per kind of candidate -> ([(id, score)] best first, the answers, requests)."""
+        """A rank question per kind of candidate, in one request (or several: parts) -> ([(id, score, choice)] best
+        first, the server's requests)."""
         qs = {}
         for kind, ids in groups.items():
             lab, title = self.label(lang, kind)
@@ -218,11 +223,38 @@ class Navigator:
             if prior:
                 q["prior"] = {i: prior[i] for i in ids if i in prior}
             qs[kind or "item"] = q
-        out = self.client.request({"state": state, "questions": qs, "lang": lang})
-        ranking = sorted(((e["key"], e["score"], e.get("choice")) for a in out["answers"].values()
-                          for e in a["ranking"]), key=lambda x: -x[1]) if len(qs) > 1 else \
-            [(e["key"], e["score"], e.get("choice")) for a in out["answers"].values() for e in a["ranking"]]
-        return ranking, out["usage"].get("requests", 1)
+        rankings, n_req, parts = {name: [] for name in qs}, 0, self.parts(qs, chunk, top)
+        for part in parts:
+            out = self.client.request({"state": state, "questions": part, "lang": lang})
+            n_req += out["usage"].get("requests", 1)
+            for name, a in out["answers"].items():
+                rankings[name] += [(e["key"], e["score"], e.get("choice")) for e in a["ranking"]]
+        if len(parts) > 1:  # stable: equal scores keep the candidates' order, as in one request
+            rankings = {name: sorted(r, key=lambda x: -x[1]) for name, r in rankings.items()}
+        ranking = [x for r in rankings.values() for x in r]
+        return (sorted(ranking, key=lambda x: -x[1]) if len(qs) > 1 else ranking), n_req
+
+    def parts(self, qs, chunk, top):
+        """The rank questions of a level as requests of at most max_candidates candidates in all: whole requests of
+        `chunk` (rank.chunks) per part, so each candidate is judged in the same request as without parts. A last stage
+        (a choice, or one shared context) must fit one request."""
+        n = sum(len(q["candidates"]) for q in qs.values())
+        if n <= self.max_candidates:
+            return [qs]
+        if top or not chunk:
+            raise ValueError(f"the last stage has {n} passages, more than max_candidates ({self.max_candidates}, "
+                             "basal-serve --rank-max-candidates): lower keep or per_page, or raise both")
+        out, cur, size = [], {}, 0
+        for name, q in qs.items():
+            cands = q["candidates"]
+            for idx in chunks([(c["key"], c["text"], c.get("group")) for c in cands], chunk):
+                if size and size + len(idx) > self.max_candidates:
+                    out.append(cur)
+                    cur, size = {}, 0
+                cur.setdefault(name, dict(q, candidates=[]))["candidates"] += [cands[i] for i in idx]
+                size += len(idx)
+        out.append(cur)
+        return out
 
     def depth(self, i):
         d, p = 0, self.tree.nodes[i].get("parent")
@@ -351,6 +383,9 @@ def parser():
     s.add_argument("--final-chunk", type=int, default=FINAL["chunk"],
                    help="passages per request in the last stage (0 = one shared context when it fits)")
     s.add_argument("--chunk", type=int, default=50, help="candidates per request at the other levels")
+    s.add_argument("--max-candidates", type=int, default=MAX_CANDIDATES,
+                   help="candidates per request to basal-serve (its --rank-max-candidates, default %(default)s); a larger "
+                   "level is sent as several requests")
     s.add_argument("--multiply", action="store_true", help="a passage's score times its page's")
     s.add_argument("--choice-context", choices=["auto", "screen", "shortlist"], default="auto")
     s.add_argument("--order", choices=["state_first", "candidates_first"], default="state_first")
@@ -379,7 +414,8 @@ def main(argv=None):
     levels = json.loads(a.levels) if a.levels else [{"keep": a.keep or LEVEL["keep"]}]
     final = {"top": a.top, "chunk": a.final_chunk, "multiply": a.multiply, "choice_context": a.choice_context}
     with Basal(a.url, timeout=a.timeout, api_key=a.api_key) as client:
-        nav = Navigator(client, Tree.load(a.tree), levels, final, a.style, a.lang, chunk=a.chunk, order=a.order)
+        nav = Navigator(client, Tree.load(a.tree), levels, final, a.style, a.lang, chunk=a.chunk, order=a.order,
+                        max_candidates=a.max_candidates)
         if a.query is not None:
             r = nav.search(a.query, k=a.k)
             if a.json:

@@ -144,6 +144,20 @@ def test_rank_chunk_zero_falls_back_to_requests_of_50_beyond_the_context():
     assert [len(b["questions"]) for b in srv.calls] == [120]
 
 
+def test_rank_chunk_zero_measures_the_rendered_prompt():
+    """chunk 0 takes one request exactly when its longest prompt as rendered (template, list, question, options) fits
+    the context; one token less and it falls back to requests of 50 rather than a refused request."""
+    body = {"state": "Q?", "questions": {"r": {"type": "rank", "instructions": INSTR, "top": 0, "chunk": 0,
+                                               "candidates": [f"candidate text number {i}" for i in range(120)]}}}
+    srv = server(lambda t: 1.0)
+    longest = run(srv, body)["usage"]["longest_prompt_tokens"]
+    for limit, sizes in ((longest, [120]), (longest - 1, [50, 50, 20])):
+        srv = server(lambda t: 1.0)
+        srv.context = (limit, "the model's context")
+        run(srv, body)
+        assert [len(b["questions"]) for b in srv.calls] == sizes
+
+
 def test_rank_in_flight_counts_its_requests():
     srv = server(lambda t: 1.0)
     seen = []
@@ -204,3 +218,23 @@ def test_rank_candidates_per_request_capped():
     assert srv.calls == []  # refused before any engine request
     out = run(srv, {"state": "Q?", "questions": {"r": dict(q, candidates=["x"] * 100)}})
     assert out["answers"]["r"]["candidates"] == 100 and out["usage"]["requests"] == 2
+
+
+def test_rank_engine_reads_the_first_requests_while_the_rest_are_tokenized():
+    """The requests of a rank question are queued one by one as they are tokenized, all still concurrent: the engine
+    starts on the first before the server has tokenized the last."""
+    srv = server(scores)
+    events, encode, probs_for = [], srv.encode, srv.probs_for
+
+    def enc(branches):
+        events.append("tokenize")
+        return encode(branches)
+
+    def eng(prompt, ids):
+        events.append("engine")
+        return probs_for(prompt, ids)
+    srv.encode, srv.probs_for = enc, eng
+    out = run(srv, {"state": "Q?", "questions": {"r": {"type": "rank", "instructions": INSTR, "top": 0,
+                                                       "candidates": [f"doc {i}" for i in range(200)]}}})
+    assert out["usage"]["requests"] == 4 and events.count("tokenize") == 4
+    assert events.index("engine") < len(events) - 1 - events[::-1].index("tokenize")

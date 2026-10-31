@@ -156,3 +156,35 @@ def test_navigate_pins_kept_at_their_level():
     assert r["stages"][0]["kept"] == ["t1", "t2"] and r["stages"][1]["kept"] == ["p3", "p5"]
     assert [x["key"] for x in c.bodies[1]["questions"]["page"]["candidates"]] == ["p1", "p2", "p3", "p4", "p5"]
     assert [x["key"] for x in c.bodies[-1]["questions"]["passage"]["candidates"]] == ["p3#1", "p3#2", "p5#1"]
+
+
+def test_navigate_level_beyond_max_candidates_in_parts_with_the_same_decisions():
+    """A level with more candidates than max_candidates goes out as several requests, cut where the server's requests
+    of `chunk` end: each candidate is judged with the same neighbours (here every probability depends on the whole
+    prompt), so the ranking is the one of a single request. A last stage that does not fit is refused, client side."""
+    import hashlib
+
+    def prompt_hash(prompt, ids):
+        p = int(hashlib.sha256("".join(map(chr, prompt)).encode()).hexdigest()[:8], 16) / 16 ** 8
+        return [p, 1 - p][: len(ids)]
+    nodes = [{"id": f"t{t}", "parent": None, "kind": "topic", "text": f"Topic {t}", "title": f"Topic {t}"}
+             for t in range(3)]
+    for i in range(230):
+        nodes += [{"id": f"p{i}", "parent": f"t{i % 3}", "kind": "page", "text": f"Page about item {i * 7 % 101}"},
+                  {"id": f"p{i}#1", "parent": f"p{i}", "kind": "passage", "text": f"Item {i} costs {i % 13}."}]
+    tree = Tree(nodes)
+    runs = []
+    for cap in (10_000, 120):
+        c = Client(lambda t: 1.0)
+        c.srv.pos_probs = prompt_hash
+        nav = Navigator(c, tree, levels=[{"keep": 3}, {"keep": 5}], final={"top": 0}, max_candidates=cap)
+        r = nav.search("Which item costs 4?", k=5)
+        runs.append((r["passages"], [s["kept"] for s in r["stages"]],
+                     [len(q["candidates"]) for b in c.bodies for q in b["questions"].values()]))
+    assert runs[0][:2] == runs[1][:2]
+    # 77 pages per topic (group): chunks of 50 + 27, 50 + 27, 50 + 26; parts of at most 120 candidates
+    assert runs[0][2] == [230, 5] and runs[1][2] == [77, 77, 76, 5]
+    nav = Navigator(Client(lambda t: 1.0), tree, levels=[{"keep": 3}, {"keep": 200}], final={"top": 0},
+                    max_candidates=120)
+    with pytest.raises(ValueError, match="last stage has 200 passages, more than max_candidates"):
+        nav.search("Which item costs 4?")
