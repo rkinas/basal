@@ -28,7 +28,7 @@ from . import adapter as adapter_module
 from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend, MLXBackend,
                      MPSBackend, OllamaBackend, SGLangBackend, VLLMBackend, resolve)
 from .prompt import letter_ids, max_options, model_format, render
-from .server import ADAPTER_REFUSED, MODES, adapter_refused, default_mode
+from .server import MODES, adapter_refused, adapter_refused_kind, default_mode
 
 GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: --model gives tokenizer and calibration
 
@@ -254,8 +254,9 @@ def main():
     a.modes = a.modes or default_modes(a.model)
     adapter = adapter_module.read(a.adapter) if a.adapter else None
     for m in a.modes if adapter else ():  # before anything is loaded
-        if (kind := MODES.get(m.split("@")[0], ("",))[0]) in ADAPTER_REFUSED:
-            raise SystemExit(adapter_refused(adapter.name, f"--modes {m}", kind))
+        why = adapter_refused_kind(*MODES.get(m.split("@")[0], ("", None))[:2])
+        if why:
+            raise SystemExit(adapter_refused(adapter.name, f"--modes {m}", why))
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)

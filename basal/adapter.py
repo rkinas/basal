@@ -1,6 +1,6 @@
 """LoRA adapters: read an mlx-lm or PEFT adapter directory, merge it into a model's weights at load (torch, MLX, the
-TPU backend's numpy weights), write it as a PEFT directory (vLLM, SGLang), and fuse it into a checkpoint
-(basal-fuse-adapter) for the engines that serve weights basal cannot touch (GGUF, Ollama, llama.cpp).
+TPU backend's numpy weights), and fuse it into a checkpoint (basal-fuse-adapter; also the copy vLLM and SGLang serve
+under --adapter, fused_copy) for the engines that load weights basal cannot touch.
 
 Formats, by the files in the directory:
   mlx-lm  adapter_config.json (fine_tune_type "lora" or absent, lora_parameters.scale) + adapters.safetensors,
@@ -245,43 +245,84 @@ def _temp_dir():
     return out
 
 
-def peft_dir(ad, model_dir=None):
-    """A PEFT directory of the adapter (vLLM, SGLang): its own for a PEFT adapter, else a converted copy in a temporary
-    directory ($TMPDIR, removed at exit). An rsLoRA PEFT adapter gets a copy whose adapter_config.json states the same
-    scale as lora_alpha / r (SGLang ignores use_rslora; vLLM reads both the same way), its tensors linked unchanged. The
-    converted copy names the modules base_model.model.model.layers.N.<module>, the Hugging Face path of a text decoder;
-    a multimodal model (config.json text_config) nests its decoder elsewhere, so an mlx-lm adapter for one is refused
-    (fuse it with basal-fuse-adapter, or give a PEFT adapter of that model)."""
-    if ad.fmt == "peft":
-        cfg = json.loads((ad.path / CONFIG).read_text(encoding="utf-8"))
-        if not cfg.get("use_rslora"):
-            return ad.path
-        out = _temp_dir()
-        for f in ad.path.iterdir():
-            if f.is_file() and f.name != CONFIG:
-                (out / f.name).symlink_to(f.resolve())
-        cfg.update(use_rslora=False, lora_alpha=ad.scale * cfg["r"])
-        (out / CONFIG).write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        return out
-    cfg = Path(model_dir) / "config.json" if model_dir else None
-    if cfg and cfg.is_file() and "text_config" in json.loads(cfg.read_text(encoding="utf-8")):
-        raise SystemExit(f"--adapter {ad.name}: an mlx-lm adapter of a multimodal model cannot be given to vLLM / SGLang "
-                         "(its module names differ from the Hugging Face model's); merge it with basal-fuse-adapter or "
-                         "use a PEFT adapter of the model")
-    from safetensors.numpy import save_file
-    tensors = {}
-    for key, (a, b) in ad.deltas.items():
-        if a.shape[0] != ad.rank:
-            raise SystemExit(f"--adapter {ad.name}: {key}: rank {a.shape[0]} differs from the adapter's {ad.rank}; "
-                             "a PEFT directory has one rank")
-        tensors[f"base_model.model.model.{key}.lora_A.weight"] = a
-        tensors[f"base_model.model.model.{key}.lora_B.weight"] = b
+# files of a model directory a fused checkpoint does not take over: the base model's calibration, NVFP4 activation
+# scales and checksums no longer hold for the merged weights (the adapter's calibration is copied, fused_calibration)
+NOT_FUSED = ("CALIBRATION*", "NVFP4_AMAX.json", "SHA256SUMS")
+
+
+def _weight_names(ad, md):
+    """{canonical key: (safetensors file, tensor name)} of the adapter's modules in checkpoint md; refused when a module
+    is missing or found twice."""
+    from safetensors import safe_open
+    found = {}
+    for f in sorted(Path(md).glob("*.safetensors")):
+        with safe_open(f, "pt") as st:
+            for name in st.keys():
+                if not name.endswith(".weight"):
+                    continue
+                try:
+                    key = canonical(name.removesuffix(".weight"))
+                except ValueError:
+                    continue  # not a decoder layer (embeddings, the head, a vision or audio tower)
+                if key in ad.deltas:
+                    if key in found:
+                        raise SystemExit(f"--adapter {ad.name}: {key}: two weights in {md} ({found[key][1]}, {name})")
+                    found[key] = (f, name)
+    missing = sorted(set(ad.deltas) - set(found))
+    if missing:
+        raise SystemExit(f"--adapter {ad.name}: {missing[0]}: no such module in the model"
+                         + (f" (and {len(missing) - 1} more)" if len(missing) > 1 else ""))
+    return found
+
+
+def fuse_checkpoint(md, ad, out):
+    """Write checkpoint md with the adapter merged into `out` (a new or empty directory): every safetensors file again,
+    with the same tensor names, dtypes and metadata, its decoder layers' weights merged as merge_torch merges them
+    (delta cast to the weight's dtype, added in that dtype), so a server of `out` loads the weights --adapter merges at
+    load bit for bit; every other file is copied as it is (config.json, the index, tokenizer, template, basal.json), but
+    not NOT_FUSED nor subdirectories -> the number of merged modules. FP8 weights cannot take a merge (refused)."""
+    import torch
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    md, out = Path(md), Path(out)
+    names = _weight_names(ad, md)
+    by_file = {}
+    for key, (f, name) in names.items():
+        by_file.setdefault(f, {})[name] = key
+    out.mkdir(parents=True, exist_ok=True)
+    for f in sorted(md.glob("*.safetensors")):
+        if f not in by_file:  # nothing of the adapter in this file: the same bytes
+            shutil.copyfile(f, out / f.name)
+            continue
+        tensors = {}
+        with safe_open(f, "pt") as st:
+            meta = st.metadata()
+            for name in st.keys():
+                t = st.get_tensor(name)
+                key = by_file[f].get(name)
+                if key is not None:
+                    if t.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+                        raise SystemExit(f"--adapter {ad.name}: {key}: {t.dtype} weights cannot take a merge (an FP8 "
+                                         "checkpoint: fuse the bf16 repository)")
+                    _check_shape(ad, key, t.shape)
+                    t = t + torch.from_numpy(delta(ad, key)).to(t.dtype)
+                tensors[name] = t
+        save_file(tensors, str(out / f.name), metadata=meta)
+        del tensors
+    for f in sorted(md.iterdir()):
+        if f.is_file() and f.suffix != ".safetensors" and not any(f.match(s) for s in NOT_FUSED):
+            shutil.copy2(f, out / f.name)
+    return len(names)
+
+
+def fused_copy(md, ad):
+    """--adapter for the engines that load a checkpoint themselves (vLLM, SGLang): the checkpoint with the adapter
+    merged (fuse_checkpoint) in a temporary directory ($TMPDIR; the model's size on disk), removed when basal exits;
+    the engine serves it as it serves basal-fuse-adapter's output -> its path."""
     out = _temp_dir()
-    cfg = {"peft_type": "LORA", "r": ad.rank, "lora_alpha": ad.scale * ad.rank,
-           "target_modules": sorted({k.rsplit(".", 1)[-1] for k in ad.deltas}), "bias": "none",
-           "task_type": "CAUSAL_LM", "fan_in_fan_out": False, "use_rslora": False}
-    (out / CONFIG).write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    save_file(tensors, str(out / PEFT_WEIGHTS))
+    n = fuse_checkpoint(md, ad, out)
+    print(f"basal: --adapter {ad.name}: {n} layers merged into a copy of the checkpoint at {out} (removed at exit)",
+          flush=True)
     return out
 
 
@@ -301,31 +342,23 @@ def fused_calibration(cal, ad, out):
 def main():
     ap = argparse.ArgumentParser(description="Merge a LoRA adapter into a model and write the merged checkpoint (for "
                                  "the engines that cannot take --adapter: GGUF via basal-export-gguf, Ollama, "
-                                 "llama.cpp, FP8 ports).")
+                                 "llama.cpp, FP8 ports). The safetensors files are rewritten with the decoder layers' "
+                                 "weights merged as --adapter merges them at load (same names and dtypes); the other "
+                                 "files are copied, except the base model's CALIBRATION files.")
     ap.add_argument("--model", required=True, help="model directory or Hugging Face repo id")
     ap.add_argument("--revision", default=None)
     ap.add_argument("--adapter", required=True, help="LoRA adapter directory (mlx-lm or PEFT)")
     ap.add_argument("--out", required=True, help="output directory (new or empty)")
-    ap.add_argument("--dtype", default="bfloat16", choices=("bfloat16", "float16", "float32"))
     a = ap.parse_args()
     out = Path(a.out)
     if out.exists() and not out.is_dir():
         raise SystemExit(f"--out {out}: not a directory")
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"--out {out}: exists and is not empty")
-    import torch
-    from transformers import AutoModelForCausalLM
-
     from .engine import resolve
     ad = read(a.adapter)
     md = resolve(a.model, a.revision)
-    model = AutoModelForCausalLM.from_pretrained(md, dtype=getattr(torch, a.dtype))
-    n = merge_torch(model, ad)
-    model.save_pretrained(out)
-    skip = ("*.safetensors*", "CALIBRATION*", "SHA256SUMS")
-    for f in sorted(Path(md).iterdir()):  # tokenizer, chat template, basal.json; save_pretrained wrote config.json
-        if f.is_file() and not any(f.match(s) for s in skip) and not (out / f.name).exists():
-            shutil.copy2(f, out / f.name)
+    n = fuse_checkpoint(md, ad, out)
     for f in sorted(ad.path.glob("CALIBRATION*.json")):  # fitted with this adapter
         cal = fused_calibration(json.loads(f.read_text(encoding="utf-8")), ad, out)
         if cal is None:

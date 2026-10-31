@@ -4,6 +4,7 @@ adapter, and basal-fuse-adapter's merged checkpoint."""
 import json
 import math
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -65,29 +66,90 @@ def test_both_formats_read_to_the_same_deltas(tmp_path):
     assert adapter_module.identity(rescaled) != mlx.identity
 
 
-def test_peft_dir_round_trips_an_mlx_adapter(tmp_path):
+def bf16_llama(path, **save):
+    """tiny_llama saved in bfloat16, as the basal models are (fuse_checkpoint keeps each tensor's stored dtype)."""
+    tiny_llama(path)
+    m = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16)
+    for f in path.glob("*.safetensors"):
+        f.unlink()
+    m.save_pretrained(path, **save)
+    return m
+
+
+@pytest.mark.parametrize("shards", [1, 3])
+def test_fuse_checkpoint_writes_the_weights_the_load_time_merge_makes(tmp_path, shards):
+    md = tmp_path / "model"
+    m = bf16_llama(md, **({"max_shard_size": "60KB"} if shards > 1 else {}))
+    files = sorted(md.glob("*.safetensors"))
+    assert (len(files) > 1) == (shards > 1)
+    for name in ("tokenizer_config.json", "basal.json", "CALIBRATION.json", "CALIBRATION.o2.json", "NVFP4_AMAX.json",
+                 "SHA256SUMS"):
+        (md / name).write_text("{}", encoding="utf-8")
+    (md / "prepared").mkdir()
+    ad = adapter_module.read(write_adapter(tmp_path / "edu", "peft", deltas(), use_rslora=True))
+    out = tmp_path / "fused"
+    assert adapter_module.fuse_checkpoint(md, ad, out) == 2
+    adapter_module.merge_torch(m, ad)  # what --adapter merges at load
+    fused = AutoModelForCausalLM.from_pretrained(out, dtype=torch.bfloat16)
+    for k, v in m.state_dict().items():
+        assert torch.equal(fused.state_dict()[k], v), k
+    # the same tensor names, dtypes and metadata in the same files; a file without the adapter's modules is copied
+    from safetensors import safe_open
+    for f in files:
+        with safe_open(f, "pt") as a, safe_open(out / f.name, "pt") as b:
+            assert list(a.keys()) == list(b.keys()) and a.metadata() == b.metadata()
+            assert all(a.get_tensor(k).dtype == b.get_tensor(k).dtype for k in a.keys())
+            touched = any(k.removesuffix(".weight").endswith((Q, DOWN)) for k in a.keys())
+        assert (f.read_bytes() == (out / f.name).read_bytes()) == (not touched)
+    kept = sorted(x.name for x in out.iterdir() if x.suffix != ".safetensors")
+    assert "basal.json" in kept and "tokenizer_config.json" in kept and "config.json" in kept
+    assert not {"CALIBRATION.json", "CALIBRATION.o2.json", "NVFP4_AMAX.json", "SHA256SUMS", "prepared"} & set(kept)
+    assert ("model.safetensors.index.json" in kept) == (shards > 1)
+
+
+def test_fuse_checkpoint_refuses_missing_modules_and_fp8_weights(tmp_path):
+    md = tmp_path / "model"
+    bf16_llama(md)
     ds = deltas()
-    mlx = adapter_module.read(write_adapter(tmp_path / "m", "mlx", ds, scale=3.0))
-    out = adapter_module.peft_dir(mlx)
-    assert out.name.startswith("basal-adapter-")
-    cfg = json.loads((out / "adapter_config.json").read_text(encoding="utf-8"))
-    assert (cfg["r"], cfg["lora_alpha"], cfg["target_modules"]) == (2, 6.0, ["down_proj", "q_proj"])
-    back = adapter_module.read(out)
-    assert (back.fmt, back.scale, back.deltas.keys()) == ("peft", 3.0, mlx.deltas.keys())
-    assert all(np.array_equal(x, y) for k in ds for x, y in zip(back.deltas[k], mlx.deltas[k]))
-    peft = adapter_module.read(write_adapter(tmp_path / "p", "peft", ds))
-    assert adapter_module.peft_dir(peft) == peft.path  # its own directory, keys as trained
-    # rsLoRA: SGLang reads lora_alpha / r only, so the copy states the same scale that way (tensors unchanged)
-    rs = adapter_module.read(write_adapter(tmp_path / "rs", "peft", ds, use_rslora=True))
-    copy = adapter_module.peft_dir(rs)
-    cfg = json.loads((copy / "adapter_config.json").read_text(encoding="utf-8"))
-    assert cfg["use_rslora"] is False and cfg["lora_alpha"] / cfg["r"] == pytest.approx(rs.scale)
-    assert (copy / "adapter_model.safetensors").read_bytes() == (rs.path / "adapter_model.safetensors").read_bytes()
-    mm = tmp_path / "omni"
-    mm.mkdir()
-    (mm / "config.json").write_text(json.dumps({"text_config": {}}), encoding="utf-8")
-    with pytest.raises(SystemExit, match="multimodal"):
-        adapter_module.peft_dir(mlx, mm)
+    ds["layers.7.self_attn.q_proj"] = ds[Q]
+    with pytest.raises(SystemExit, match="layers.7.self_attn.q_proj: no such module"):
+        adapter_module.fuse_checkpoint(md, adapter_module.read(write_adapter(tmp_path / "x", "peft", ds)), tmp_path / "o")
+    from safetensors.torch import load_file as load_pt
+    from safetensors.torch import save_file as save_pt
+    w = load_pt(str(md / "model.safetensors"))
+    w = {k: (v.to(torch.float8_e4m3fn) if k.endswith("q_proj.weight") else v) for k, v in w.items()}
+    save_pt(w, str(md / "model.safetensors"), metadata={"format": "pt"})
+    with pytest.raises(SystemExit, match="cannot take a merge"):
+        adapter_module.fuse_checkpoint(md, adapter_module.read(write_adapter(tmp_path / "e", "peft", deltas())),
+                                       tmp_path / "o2")
+
+
+def test_vllm_and_sglang_serve_a_fused_copy(tmp_path, monkeypatch, capsys):
+    from types import ModuleType
+
+    from basal.engine import SGLangBackend, VLLMBackend
+    md = tmp_path / "model"
+    bf16_llama(md)
+    (md / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    ad = adapter_module.read(write_adapter(tmp_path / "edu", "mlx", deltas()))
+    seen = {}
+    vllm, sglang = ModuleType("vllm"), ModuleType("sglang")
+    vllm.LLM = lambda **kw: seen.setdefault("vllm", kw)
+    sglang.Engine = lambda **kw: seen.setdefault("sglang", kw)
+    monkeypatch.setitem(sys.modules, "vllm", vllm)
+    monkeypatch.setitem(sys.modules, "sglang", sglang)
+    monkeypatch.setattr("basal.engine.AutoTokenizer.from_pretrained", lambda d: type("T", (), {"eos_token": "x"})())
+    VLLMBackend(md, adapter=ad)
+    SGLangBackend(md, adapter=ad)
+    m = AutoModelForCausalLM.from_pretrained(md, dtype=torch.bfloat16)
+    adapter_module.merge_torch(m, ad)
+    for engine, kw in seen.items():
+        served = kw.get("model") or kw.get("model_path")
+        assert Path(served).name.startswith("basal-adapter-") and Path(served) != md, engine
+        fused = AutoModelForCausalLM.from_pretrained(served, dtype=torch.bfloat16)
+        assert all(torch.equal(fused.state_dict()[k], v) for k, v in m.state_dict().items()), engine
+        assert "enable_lora" not in kw, engine
+    assert capsys.readouterr().out.count("2 layers merged into a copy of the checkpoint") == 2
 
 
 def test_framework_prefixes_are_canonical():
@@ -327,7 +389,9 @@ def test_a_file_fitted_with_another_adapter_warns_or_is_refused(served, tmp_path
 
 
 @pytest.mark.parametrize("mode, why", [("gguf", "basal-fuse-adapter"), ("ollama", "basal-fuse-adapter"),
-                                       ("llamacpp", "basal-fuse-adapter"), ("fast-exit", "exit heads trained on the base")])
+                                       ("llamacpp", "basal-fuse-adapter"), ("fast-exit", "exit heads trained on the base"),
+                                       ("nvfp4", "calibrate the fused checkpoint"),
+                                       ("int8", "calibrate the fused checkpoint")])
 def test_engines_that_cannot_take_an_adapter_refuse_it_before_loading(served, mode, why):
     md, ad = served
     with pytest.raises(SystemExit, match=why):
@@ -357,8 +421,7 @@ def test_evidence_is_refused_under_an_adapter_and_the_warning_says_how_to_fit(se
 
 def test_fuse_adapter_writes_a_merged_checkpoint(tmp_path, monkeypatch, capsys):
     md = tmp_path / "model"
-    tiny_llama(md)
-    m = AutoModelForCausalLM.from_pretrained(md, dtype=torch.bfloat16)
+    m = bf16_llama(md)
     (md / "tokenizer_config.json").write_text("{}", encoding="utf-8")
     (md / "CALIBRATION.json").write_text("{}", encoding="utf-8")  # the base model's: not the merged model's
     ad = write_adapter(tmp_path / "edu", "peft", deltas())
@@ -388,52 +451,6 @@ def test_fuse_adapter_writes_a_merged_checkpoint(tmp_path, monkeypatch, capsys):
                                       str(md / "config.json")])
     with pytest.raises(SystemExit, match="not a directory"):
         adapter_module.main()
-
-
-class _ProbeTok:
-    def __call__(self, text):
-        return {"input_ids": [ord(c) % 64 for c in text]}
-
-
-@pytest.mark.parametrize("applied", [True, False])
-def test_vllm_refuses_to_start_when_the_lora_changes_nothing(monkeypatch, applied):
-    from types import ModuleType, SimpleNamespace
-
-    from basal.engine import VLLMBackend
-    vllm, inputs = ModuleType("vllm"), ModuleType("vllm.inputs")
-    vllm.SamplingParams = lambda **kw: kw
-    inputs.TokensPrompt = lambda **kw: kw
-    monkeypatch.setitem(sys.modules, "vllm", vllm)
-    monkeypatch.setitem(sys.modules, "vllm.inputs", inputs)
-
-    class LLM:
-        def generate(self, req, sp, use_tqdm=False, lora_request=None):
-            lp = -0.5 if lora_request and applied else -0.7
-            return [SimpleNamespace(outputs=[SimpleNamespace(logprobs=[{7: SimpleNamespace(logprob=lp)}])])]
-    be = VLLMBackend.__new__(VLLMBackend)
-    be.tok, be.llm, be.lora = _ProbeTok(), LLM(), object()
-    if applied:
-        be._check_lora()
-    else:
-        with pytest.raises(SystemExit, match="vLLM answered the probe prompt with and without the LoRA identically"):
-            be._check_lora()
-
-
-@pytest.mark.parametrize("applied", [True, False])
-def test_sglang_refuses_to_start_when_the_lora_changes_nothing(applied):
-    from basal.engine import SGLangBackend
-
-    class Engine:
-        def generate(self, lora_path=None, **kw):
-            lp = -0.5 if lora_path == ["adapter"] and applied else -0.7
-            return [{"meta_info": {"output_top_logprobs": [[(lp, 7, "x")]]}}]
-    be = SGLangBackend.__new__(SGLangBackend)
-    be.tok, be.llm, be.lora = _ProbeTok(), Engine(), True
-    if applied:
-        be._check_lora()
-    else:
-        with pytest.raises(SystemExit, match="SGLang answered the probe prompt"):
-            be._check_lora()
 
 
 TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]

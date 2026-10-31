@@ -3268,16 +3268,6 @@ class _VLLMOverlap:
         return asyncio.run_coroutine_threadsafe(self.engine.collective_rpc(method, *args, **kw), self.loop).result()
 
 
-VLLM_MAX_LORA_RANK = 512  # the largest max_lora_rank vLLM accepts
-LORA_PROBE = "Ala ma kota, a kot ma Alę. The cat sat on the mat."  # --adapter (vLLM / SGLang): base vs LoRA prompt
-
-
-def lora_inert(engine):
-    return (f"--adapter: {engine} answered the probe prompt with and without the LoRA identically, so it did not apply "
-            "the adapter (an adapter with zero lora_B, or an engine version whose LoRA arguments differ); refusing to "
-            "serve the base model under the adapter's name")
-
-
 class VLLMBackend:
     """vLLM backend: bf16 checkpoints and the ModelOpt FP8 / NVFP4 ports, with the engine settings of a --vllm-preset
     (VLLM_PRESETS, vllm_args). One generated token restricted to the option letters; with
@@ -3294,10 +3284,13 @@ class VLLMBackend:
     OVERLAP_CALLS = 4        # --vllm-overlap on: engine calls the server runs at once
     lock = threading.Lock()  # one vLLM call at a time (text batches and media requests); a class default for tests
     media_kinds, max_audio_s, unified = (), None, False
-    lora = None  # --adapter: the LoRARequest of every call (a class default for tests)
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, max_options=10, preset="default",
                  fast_prefill=True, media=False, overlap=False, adapter=None):
+        # --adapter: vLLM serves a copy of the checkpoint with the adapter merged (adapter.fused_copy), the weights
+        # basal-fuse-adapter writes, so its answers are those of the fused checkpoint
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
+        model_dir = adapter_module.fused_copy(model_dir, adapter) if adapter else model_dir
         cfg_file = Path(model_dir) / "config.json"
         cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
         kw, env = vllm_args(cfg, preset, media=media, fast_prefill=fast_prefill)
@@ -3317,18 +3310,9 @@ class VLLMBackend:
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
         self.preset, self.engine_args, self.lock = preset, kw, threading.Lock()
-        self.lora, lora_kw = None, {}
-        if adapter:  # --adapter: one native LoRA (names checked in vLLM 0.11.2's source, run on vLLM 0.32 / vllm-metal)
-            from vllm.lora.request import LoRARequest
-            if adapter.rank > VLLM_MAX_LORA_RANK:
-                raise SystemExit(f"--adapter {adapter.name}: rank {adapter.rank}; vLLM serves LoRA ranks up to "
-                                 f"{VLLM_MAX_LORA_RANK} (merge it with basal-fuse-adapter)")
-            self.lora = LoRARequest("adapter", 1, str(adapter_module.peft_dir(adapter, model_dir)))
-            lora_kw = dict(enable_lora=True, max_loras=1, max_lora_rank=max(8, 1 << (adapter.rank - 1).bit_length()))
-        self.adapter_modules = len(adapter.deltas) if adapter else 0
         kw = {**dict(model=str(model_dir), dtype=dtype, gpu_memory_utilization=mem, max_model_len=max_len,
                      enable_prefix_caching=True, logprobs_mode="processed_logprobs", max_logprobs=max(16, max_options)),
-              **kw, **lora_kw}
+              **kw}
         if overlap:  # several calls in flight, batched by vLLM's scheduler (_VLLMOverlap)
             self.llm, self.lock, self.inflight = _VLLMOverlap(**kw), nullcontext(), self.OVERLAP_CALLS
         else:
@@ -3338,21 +3322,6 @@ class VLLMBackend:
             vllm_unified.check(self.llm)
         self.context = max_len - 1  # longest prompt: max_model_len holds the one generated token too
         self.context_reason = f"vLLM's --max-len {max_len}"
-        if self.lora:
-            self._check_lora()
-
-    def _check_lora(self):
-        """--adapter: one prompt with and without the LoRA; equal log-probabilities mean vLLM did not apply it (the
-        base model would be served under the adapter's name)."""
-        from vllm import SamplingParams
-        from vllm.inputs import TokensPrompt
-        req = [TokensPrompt(prompt_token_ids=self.tok(LORA_PROBE)["input_ids"])]
-        sp = SamplingParams(max_tokens=1, temperature=0.0, logprobs=5)
-        top = lambda **kw: {t: lp.logprob for t, lp in
-                            self.llm.generate(req, sp, use_tqdm=False, **kw)[0].outputs[0].logprobs[0].items()}
-        if top() == top(lora_request=self.lora):
-            raise SystemExit(lora_inert("vLLM"))
-
     def run(self, prompts, ids_list):
         from vllm.inputs import TokensPrompt
         reqs = [TokensPrompt(prompt_token_ids=list(ids)) for ids in EagerBackend.encode(self, prompts)]
@@ -3368,7 +3337,7 @@ class VLLMBackend:
                                  else {}))
                for ids in ids_list]
         with self.lock:
-            outs = self.llm.generate(reqs, sps, use_tqdm=False, **(dict(lora_request=self.lora) if self.lora else {}))
+            outs = self.llm.generate(reqs, sps, use_tqdm=False)
         res = []
         for o, ids in zip(outs, ids_list):
             lp = o.outputs[0].logprobs[0]
@@ -3418,35 +3387,18 @@ class SGLangBackend:
     at the answer position (`token_ids_logprob`), and the softmax over them equals the readout of the other backends
     (a softmax over a subset of log-softmax values is the softmax over the same logits). RadixAttention shares the
     state between the option orders of one question and between the questions of one request."""
-    lora = False  # --adapter: every call names the LoRA (a class default for tests)
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, adapter=None):
         import sglang
+        # --adapter: SGLang serves a copy of the checkpoint with the adapter merged, as vLLM (VLLMBackend)
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
+        model_dir = adapter_module.fused_copy(model_dir, adapter) if adapter else model_dir
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
-        # --adapter: one native LoRA (names checked in the SGLang 0.5.10 source; _check_lora proves it). Two slots per
-        # batch: the adapter and the base model, which the probe of _check_lora runs on (SGLang counts the base as one)
-        lora_kw = dict(enable_lora=True, lora_paths={"adapter": str(adapter_module.peft_dir(adapter, model_dir))},
-                       max_loras_per_batch=2) if adapter else {}
-        self.lora = adapter is not None
-        self.adapter_modules = len(adapter.deltas) if adapter else 0
         self.llm = sglang.Engine(model_path=str(model_dir), dtype=dtype, mem_fraction_static=mem,
-                                 context_length=max_len, log_level="error", **lora_kw)
+                                 context_length=max_len, log_level="error")
         self.context = max_len - 1  # longest prompt: the context holds the one generated token too
         self.context_reason = f"SGLang's --max-len {max_len}"
-        if self.lora:
-            self._check_lora()
-
-    def _check_lora(self):
-        """--adapter: one prompt with and without the LoRA; equal log-probabilities mean SGLang did not apply it."""
-        ids = self.tok(LORA_PROBE)["input_ids"]
-
-        def top(**kw):
-            o = self.llm.generate(input_ids=[ids], sampling_params=[{"max_new_tokens": 1, "temperature": 0.0}],
-                                  return_logprob=True, logprob_start_len=-1, top_logprobs_num=5, **kw)
-            return [(int(x[1]), float(x[0])) for x in o[0]["meta_info"]["output_top_logprobs"][0]]
-        if top() == top(lora_path=["adapter"]):
-            raise SystemExit(lora_inert("SGLang"))
 
     @staticmethod
     def _letters(meta, ids):
@@ -3458,8 +3410,7 @@ class SGLangBackend:
         enc = [list(ids) for ids in EagerBackend.encode(self, prompts)]
         outs = self.llm.generate(input_ids=enc, sampling_params=[{"max_new_tokens": 1, "temperature": 0.0}] * len(enc),
                                  return_logprob=True, logprob_start_len=-1,
-                                 token_ids_logprob=[list(ids) for ids in ids_list],
-                                 **(dict(lora_path=["adapter"] * len(enc)) if self.lora else {}))
+                                 token_ids_logprob=[list(ids) for ids in ids_list])
         return [torch.softmax(torch.tensor(self._letters(o["meta_info"], ids), dtype=torch.float32), -1).tolist()
                 for o, ids in zip(outs, ids_list)]
 

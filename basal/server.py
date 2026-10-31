@@ -870,11 +870,21 @@ ADAPTER_REFUSED = dict.fromkeys(("gguf", "ollama", "llamacpp"),
                                 "them with basal-fuse-adapter and convert with basal-export-gguf")
 ADAPTER_REFUSED["exit"] = ("reads exit heads trained on the base model's hidden states, whose thresholds do not hold "
                            "for the adapter's; serve it with --mode fast")
+# by quantisation of the CUDA graph engine: served only with a calibration (and NVFP4 activation scales) measured on
+# the model itself, which the base model's files are not for the adapter's weights
+ADAPTER_REFUSED["nvfp4"] = ADAPTER_REFUSED["int8"] = (
+    "serves a model with its own calibration for that mode (and NVFP4 activation scales), measured on the base model's "
+    "weights, not the adapter's; fuse it with basal-fuse-adapter and calibrate the fused checkpoint for this mode")
 
 
 def adapter_refused(name, mode, kind):
     """Why an engine refuses --adapter (basal-serve, basal-bench); kind: a key of ADAPTER_REFUSED."""
     return f"--adapter {name}: {mode} {ADAPTER_REFUSED[kind]}"
+
+
+def adapter_refused_kind(kind, quant):
+    """The ADAPTER_REFUSED key of a mode's engine kind and quantisation, None when it takes --adapter."""
+    return kind if kind in ADAPTER_REFUSED else quant if quant in ADAPTER_REFUSED else None
 
 
 IMAGE_BUDGETS = (70, 140, 280, 560, 1120)  # soft tokens per image Gemma 4's vision tower takes
@@ -1013,7 +1023,7 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     data = {} if off or not cal.exists() else json.loads(cal.read_text(encoding="utf-8"))
     if data and adapter and not path and cal.parent != adapter.path:
         why = f"{cal.name} belongs to the base model, served with --adapter {adapter.name}"
-        return {k: v for k, v in data.items() if k not in ("thresholds", "multi", "task_thresholds")}, cal, why
+        return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
     if data and calibration_layout(data) != layout:  # another layout's thresholds do not hold here (2.4.1)
         why = f"{cal.name} was fitted on the {calibration_layout(data)} layout, served with --layout {layout}"
         return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
@@ -1090,8 +1100,9 @@ class Server:
                              f"--mode {a.mode}")
         # --adapter: read (and refused when it is not a plain LoRA) before any weights are downloaded
         self.adapter = adapter_module.read(a.adapter) if getattr(a, "adapter", None) else None
-        if self.adapter and kind in ADAPTER_REFUSED:
-            raise SystemExit(adapter_refused(self.adapter.name, f"--mode {a.mode}", kind))
+        if self.adapter and adapter_refused_kind(kind, a.quant or quant):
+            raise SystemExit(adapter_refused(self.adapter.name, f"--mode {a.mode}",
+                                             adapter_refused_kind(kind, a.quant or quant)))
         if kind == "gguf" and not a.gguf:
             raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
         if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
