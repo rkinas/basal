@@ -158,41 +158,69 @@ def test_navigate_pins_kept_at_their_level():
     assert [x["key"] for x in c.bodies[-1]["questions"]["passage"]["candidates"]] == ["p3#1", "p3#2", "p5#1"]
 
 
-def test_navigate_level_beyond_max_candidates_in_parts_with_the_same_decisions():
-    """A level with more candidates than max_candidates goes out as several requests, cut where the server's requests
-    of `chunk` end: each candidate is judged with the same neighbours (here every probability depends on the whole
-    prompt), so the ranking is the one of a single request. A last stage that does not fit is refused, client side."""
-    import hashlib
-
-    def prompt_hash(prompt, ids):
-        p = int(hashlib.sha256("".join(map(chr, prompt)).encode()).hexdigest()[:8], 16) / 16 ** 8
-        return [p, 1 - p][: len(ids)]
+def _items_tree():
     nodes = [{"id": f"t{t}", "parent": None, "kind": "topic", "text": f"Topic {t}", "title": f"Topic {t}"}
              for t in range(3)]
     for i in range(230):
         nodes += [{"id": f"p{i}", "parent": f"t{i % 3}", "kind": "page", "text": f"Page about item {i * 7 % 101}"},
                   {"id": f"p{i}#1", "parent": f"p{i}", "kind": "passage", "text": f"Item {i} costs {i % 13}."}]
-    tree = Tree(nodes)
-    runs = []
-    for cap in (10_000, 120):
+    return Tree(nodes)
+
+
+def _prompt_hash(prompt, ids):
+    import hashlib
+    p = int(hashlib.sha256("".join(map(chr, prompt)).encode()).hexdigest()[:8], 16) / 16 ** 8
+    return [p, 1 - p][: len(ids)]
+
+
+def test_navigate_split_at_off_by_default_one_request_per_level():
+    """Default (split_at 0): every level goes out as one request whatever its size, so a server refuses a level above
+    its --rank-max-candidates; split_at at or above a level's size sends the very same requests."""
+    import json
+
+    from basal.prompt import RequestError
+    tree, runs = _items_tree(), []
+    for kw in ({}, {"split_at": 0}, {"split_at": 230}, {"split_at": 10_000}):
         c = Client(lambda t: 1.0)
-        c.srv.pos_probs = prompt_hash
-        nav = Navigator(c, tree, levels=[{"keep": 3}, {"keep": 5}], final={"top": 0}, max_candidates=cap)
+        c.srv.pos_probs = _prompt_hash
+        r = Navigator(c, tree, levels=[{"keep": 3}, {"keep": 5}], final={"top": 0}, **kw).search("Which item costs 4?")
+        runs.append((json.dumps(c.bodies), json.dumps(r["passages"]), [s["requests"] for s in r["stages"]]))
+        assert [len(q["candidates"]) for b in c.bodies for q in b["questions"].values()] == [230, 5]
+    assert all(x == runs[0] for x in runs)
+    c = Client(lambda t: 1.0)
+    c.srv.rank_max = 100
+    with pytest.raises(RequestError, match="230 candidates, more than the 100 this server takes per request"):
+        Navigator(c, tree, levels=[{"keep": 3}, {"keep": 5}], final={"top": 0}).search("Which item costs 4?")
+    assert len(c.bodies) == 1
+    c = Client(lambda t: 1.0)
+    c.srv.rank_max = 100
+    r = Navigator(c, tree, levels=[{"keep": 3}, {"keep": 5}], final={"top": 0}, split_at=100).search("Which item costs 4?")
+    assert r["passages"] and [len(q["candidates"]) for b in c.bodies for q in b["questions"].values()] == [77, 77, 76, 5]
+
+
+def test_navigate_split_at_level_in_parts_with_the_same_decisions():
+    """split_at (experimental): a level with more candidates goes out as several requests, cut where the server's
+    requests of `chunk` end: each candidate reads the same prompt (here every probability depends on the whole prompt),
+    so the ranking is the one of a single request. A last stage that does not fit is refused, client side."""
+    tree, runs = _items_tree(), []
+    for split_at in (0, 120):
+        c = Client(lambda t: 1.0)
+        c.srv.pos_probs = _prompt_hash
+        nav = Navigator(c, tree, levels=[{"keep": 3}, {"keep": 5}], final={"top": 0}, split_at=split_at)
         r = nav.search("Which item costs 4?", k=5)
         runs.append((r["passages"], [s["kept"] for s in r["stages"]],
                      [len(q["candidates"]) for b in c.bodies for q in b["questions"].values()]))
     assert runs[0][:2] == runs[1][:2]
     # 77 pages per topic (group): chunks of 50 + 27, 50 + 27, 50 + 26; parts of at most 120 candidates
     assert runs[0][2] == [230, 5] and runs[1][2] == [77, 77, 76, 5]
-    nav = Navigator(Client(lambda t: 1.0), tree, levels=[{"keep": 3}, {"keep": 200}], final={"top": 0},
-                    max_candidates=120)
-    with pytest.raises(ValueError, match="last stage has 200 passages, more than max_candidates"):
+    nav = Navigator(Client(lambda t: 1.0), tree, levels=[{"keep": 3}, {"keep": 200}], final={"top": 0}, split_at=120)
+    with pytest.raises(ValueError, match="last stage has 200 passages, more than split_at"):
         nav.search("Which item costs 4?")
 
 
 def test_navigate_search_cli_settings_for_large_collections(tmp_path, monkeypatch, capsys):
     """basal-navigate search takes every setting of a large collection: levels, the last stage's per_page and
-    multiply, and --max-candidates (a larger level goes out in parts)."""
+    multiply, and the experimental --split-at (off by default: one request per level)."""
     import json
 
     import basal.client
@@ -211,10 +239,16 @@ def test_navigate_search_cli_settings_for_large_collections(tmp_path, monkeypatc
     monkeypatch.setattr(basal.client, "Basal", Stub)
     tree = tmp_path / "tree.jsonl"
     Tree(NODES).save(tree)
-    navigate.main(["search", str(tree), "How do I renew my passport?", "--levels", '[{"keep": 2}, {"keep": 3}]',
-                   "--per-page", "[[1, 0], [2, 1]]", "--multiply", "--top", "0", "--final-chunk", "1", "--max-candidates", "2",
-                   "--chunk", "1", "--json"])
-    r = json.loads(capsys.readouterr().out)
-    assert r["passages"] and r["stages"][0]["requests"] == 3  # 3 topics, requests of 1, at most 2 per part
-    assert [len(q["candidates"]) for b in clients[0].bodies[:2] for q in b["questions"].values()] == [2, 1]
-    assert "prior" in clients[0].bodies[-1]["questions"]["passage"]
+    args = ["search", str(tree), "How do I renew my passport?", "--levels", '[{"keep": 2}, {"keep": 3}]', "--per-page",
+            "[[1, 0], [2, 1]]", "--multiply", "--top", "0", "--final-chunk", "1", "--chunk", "1", "--json"]
+    for extra, sizes in (([], [3]), (["--split-at", "2"], [2, 1])):
+        clients.clear()
+        navigate.main(args + extra)
+        r = json.loads(capsys.readouterr().out)
+        assert r["passages"] and r["stages"][0]["requests"] == 3  # 3 topics, the server's requests of 1
+        assert [len(q["candidates"]) for b in clients[0].bodies[: len(sizes)] for q in b["questions"].values()][
+            : len(sizes)] == sizes
+        assert "prior" in clients[0].bodies[-1]["questions"]["passage"]
+    assert navigate.parser().parse_args(["search", "t.jsonl", "q"]).split_at == 0
+    sub = navigate.parser()._subparsers._group_actions[0].choices["search"]
+    assert next(x for x in sub._actions if x.dest == "split_at").help.startswith("experimental")

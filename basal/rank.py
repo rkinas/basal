@@ -28,7 +28,7 @@ import asyncio
 import json
 import time
 
-from .prompt import RequestError, lang_of, render
+from .prompt import RequestError, lang_of
 
 MAX_CANDIDATES = 10_000  # per request, all its rank questions together (basal-serve --rank-max-candidates)
 MAX_CHUNK = 1_000
@@ -38,6 +38,7 @@ CONTEXTS = ("auto", "screen", "shortlist")
 ORDERS = ("state_first", "candidates_first")
 LABEL = {"en": "Candidate", "pl": "Kandydat"}
 CHOICE = {"en": "Which {label} is the best match?", "pl": "Która pozycja najlepiej pasuje?"}
+MARGIN = 96  # tokens kept free for a question and its options when a whole list must fit one request (chunk 0)
 
 
 def is_rank(q):
@@ -155,20 +156,14 @@ def compose(state, text, order):
     return f"{text}\n\n{state}" if order == "candidates_first" else f"{state}\n\n{text}"
 
 
-def fits(srv, state, spec, fields):
-    """Whether the whole list fits one request of the server's context (chunk 0): the prompt of its last candidate's
-    question as the server renders it (template, state and list, question, yes / no) against the limit; True when the
-    limit is unknown."""
+def fits(srv, state, spec):
+    """Whether the whole list fits one request of the server's context (chunk 0); True when the limit is unknown."""
     limit = getattr(srv, "context", None)
     if not limit:
         return True
-    idx = range(len(spec["cands"]))
-    text, names = listing(spec["cands"], idx, spec["label"], spec["title"])
-    full, q = compose(state, text, spec["order"]), spec["instructions"].replace("{candidate}", names[idx[-1]])
-    lang = fields.get("lang") or lang_of(full + q)
-    prompt = render(srv.tok, full, q, ["Tak", "Nie"] if lang == "pl" else ["Yes", "No"], lang, srv.fmt,
-                    getattr(srv, "layout", "canonical"))
-    return len(srv.tok(prompt, add_special_tokens=False).input_ids) <= limit[0]
+    text, _ = listing(spec["cands"], range(len(spec["cands"])), spec["label"], spec["title"])
+    n = len(srv.tok(compose(state, text, spec["order"]), add_special_tokens=False).input_ids)
+    return n + len(srv.tok(spec["instructions"], add_special_tokens=False).input_ids) + MARGIN <= limit[0]
 
 
 async def sub(srv, body):
@@ -186,7 +181,7 @@ async def sub(srv, body):
 
 async def screen(srv, state, spec, fields):
     """Every candidate's P(yes) -> (scores, the requests' bodies and lists, their responses)."""
-    size = spec["chunk"] or (len(spec["cands"]) if fits(srv, state, spec, fields) else CHUNK)
+    size = spec["chunk"] or (len(spec["cands"]) if fits(srv, state, spec) else CHUNK)
     parts, bodies = [], []
     for idx in chunks(spec["cands"], size):
         text, names = listing(spec["cands"], idx, spec["label"], spec["title"])
@@ -194,16 +189,7 @@ async def screen(srv, state, spec, fields):
               for n, i in enumerate(idx)}
         bodies.append(dict(fields, state=compose(state, text, spec["order"]), questions=qs))
         parts.append((idx, names))
-    runs = []
-    try:  # all requests run concurrently, each queued once it is tokenized: the engine reads the first ones while
-        for b in bodies:  # the server tokenizes the rest
-            runs.append(asyncio.ensure_future(sub(srv, b)))
-            await asyncio.sleep(0)
-    except asyncio.CancelledError:
-        for r in runs:
-            r.cancel()
-        raise
-    outs = await asyncio.gather(*runs)
+    outs = await asyncio.gather(*(sub(srv, b) for b in bodies))
     yes = [0.0] * len(spec["cands"])
     for (idx, _), out in zip(parts, outs):
         for n, i in enumerate(idx):
