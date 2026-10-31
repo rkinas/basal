@@ -4,7 +4,7 @@ import json
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from basal.engine import FP8Linear, load_modelopt_fp8, modelopt_fp8
 from tests.test_mlx import tiny_llama
@@ -48,6 +48,38 @@ def test_modelopt_fp8_loads_and_matches(tmp_path):
         a = torch.log_softmax(ref(input_ids=ids).logits[0, -1].float(), -1)
         b = torch.log_softmax(m(input_ids=ids).logits[0, -1].float(), -1)
     assert (a.exp() - b.exp()).abs().max() < 0.05  # FP8 weights and inputs: close, not equal
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_modelopt_fp8_loads_the_same_tensors_as_a_model_built_on_the_device(tmp_path, dtype):
+    """The model is built in host memory and takes the checkpoint's tensors (load_state_dict assign): every
+    parameter and buffer as a model built on the device and copied into (the loader before 2.5) has it, bit for bit,
+    in the same dtype."""
+    from transformers import AutoConfig, AutoModelForCausalLM
+    try:
+        from transformers.initialization import no_init_weights  # transformers 5
+    except ImportError:
+        from transformers.modeling_utils import no_init_weights
+    fp8_checkpoint(tmp_path)
+    m = load_modelopt_fp8(tmp_path, "cpu", dtype)
+    cfg = AutoConfig.from_pretrained(tmp_path)
+    del cfg.quantization_config
+    with no_init_weights():
+        old = AutoModelForCausalLM.from_config(cfg, dtype=dtype)
+    sd = load_file(str(tmp_path / "model.safetensors"))
+    for name, mod in list(old.named_modules()):
+        if isinstance(mod, torch.nn.Linear) and f"{name}.weight_scale" in sd:
+            parent, child = name.rsplit(".", 1)
+            setattr(old.get_submodule(parent), child,
+                    FP8Linear(sd.pop(f"{name}.weight"), sd.pop(f"{name}.weight_scale"), sd.pop(f"{name}.input_scale"),
+                              sd.pop(f"{name}.bias", None)))
+    old.load_state_dict(sd, strict=False)
+    a, b = m.state_dict(), old.state_dict()
+    assert a.keys() == b.keys()
+    for k in a:
+        assert a[k].dtype == b[k].dtype and a[k].device == b[k].device and torch.equal(a[k], b[k]), k
+    for k, v in old.named_buffers():  # buffers made at construction (rotary frequencies), not in the checkpoint
+        assert torch.equal(dict(m.named_buffers())[k], v), k
 
 
 def test_fp8_checkpoint_refuses_other_quantisation(tmp_path, monkeypatch):
