@@ -274,6 +274,11 @@ is new is opt-in unless a line says otherwise.
   about 95 GB and ran out of CUDA memory on an 80 GB H100. The model is now built without its weights and the
   checkpoint's tensors become its parameters: ultra-FP8 serves on one 80 GB H100 in both modes (44.8 GB after
   start-up). Checkpoints that fitted before load the same tensors bit for bit and give the same answers.
+- **Fix: edited chat states with the state cache** (`--mode fast --state-cache-gb`): a state whose last turn was
+  replaced, continued from a cached one inside a sliding layer's window, could read GPU memory that was never zeroed,
+  and the request failed with HTTP 500 ("Out of range float values": NaN answers). On basal-omni-1.0-ultra (one H100,
+  `--graph-memory-gb 4 --state-cache-gb 5`) 27 of 1,248 edited-chat requests failed before the fix and 0 after; 2.4.1
+  had the same bug (2 of 624). Those buffers are zeros now; at 1 client every other answer is byte-identical to before.
 - **Option-order check and averaging** (opt-in): `basal-bench --order-check` measures how often the top answer flips
   when the options are reversed or rotated, and what averaging gains; `basal-serve --order-average K` serves the mean
   over K option orders, every order reading the request's state once. Off by default: answers are unchanged.
