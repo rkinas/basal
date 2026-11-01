@@ -286,8 +286,9 @@ def _weight_names(ad, md):
 def fuse_checkpoint(md, ad, out):
     """Write checkpoint md with the adapter merged into `out` (a new or empty directory): every safetensors file again,
     with the same tensor names, dtypes and metadata, its decoder layers' weights merged as merge_torch merges them
-    (merged()), so a server of `out` loads the weights --adapter merges at load bit for bit; every other file is copied as it is (config.json, the index, tokenizer, template, basal.json), but
-    not NOT_FUSED nor subdirectories -> the number of merged modules. FP8 weights cannot take a merge (refused)."""
+    (merged()), so a server of `out` loads the weights --adapter merges at load bit for bit; every other file is copied
+    as it is (config.json, the index, tokenizer, template, basal.json), but not NOT_FUSED nor subdirectories -> the
+    number of merged modules. FP8 weights cannot take a merge (refused)."""
     import torch
     from safetensors import safe_open
     from safetensors.torch import save_file
@@ -322,6 +323,18 @@ def fuse_checkpoint(md, ad, out):
     return len(names)
 
 
+def check_space(md, where, why):
+    """Refuse (SystemExit, before anything is written) when the file system of `where` (or its nearest existing
+    parent) has less free space than checkpoint md's weights plus 1 GB."""
+    where = Path(where).resolve()
+    while not where.exists():
+        where = where.parent
+    need = sum(f.stat().st_size for f in Path(md).glob("*.safetensors")) + (1 << 30)
+    free = shutil.disk_usage(where).free
+    if free < need:
+        raise SystemExit(f"{why}: {need / 2 ** 30:.1f} GB needed in {where}, {free / 2 ** 30:.1f} GB free")
+
+
 def fused_copy(md, ad):
     """--adapter for the engines that load a checkpoint themselves (vLLM, SGLang): the checkpoint with the adapter
     merged (fuse_checkpoint) in a temporary directory ($TMPDIR; the model's size on disk), removed when basal exits;
@@ -331,6 +344,9 @@ def fused_copy(md, ad):
     import os
     import subprocess
     import sys
+    check_space(md, tempfile.gettempdir(), f"--adapter {ad.name}: vLLM / SGLang serve a merged copy of the checkpoint "
+                "(the size of its weights) in $TMPDIR; set TMPDIR to a directory with room for it, or serve a "
+                "checkpoint written by basal-fuse-adapter")
     out = _temp_dir()
     here = str(Path(__file__).resolve().parent.parent)  # this basal package, whatever the child's working directory
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(x for x in (here, os.environ.get("PYTHONPATH")) if x))
@@ -375,6 +391,7 @@ def main():
     from .engine import resolve
     ad = read(a.adapter)
     md = resolve(a.model, a.revision)
+    check_space(md, out, f"--out {out}: the merged checkpoint has the size of the model's weights")
     n = fuse_checkpoint(md, ad, out)
     for f in sorted(ad.path.glob("CALIBRATION*.json")):  # fitted with this adapter
         cal = fused_calibration(json.loads(f.read_text(encoding="utf-8")), ad, out)

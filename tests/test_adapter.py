@@ -124,6 +124,22 @@ def test_fuse_checkpoint_refuses_missing_modules_and_fp8_weights(tmp_path):
                                        tmp_path / "o2")
 
 
+def test_the_merged_copy_needs_room_for_the_weights(tmp_path, monkeypatch):
+    from collections import namedtuple
+    md = tmp_path / "model"
+    bf16_llama(md)
+    ad = adapter_module.read(write_adapter(tmp_path / "edu", "peft", deltas()))
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(adapter_module.shutil, "disk_usage", lambda p: usage(1 << 40, 0, 1 << 29))  # 0.5 GB free
+    with pytest.raises(SystemExit, match=r"edu: vLLM / SGLang serve a merged copy.*GB needed in .*, 0.5 GB free"):
+        adapter_module.fused_copy(md, ad)
+    monkeypatch.setattr(sys, "argv", ["basal-fuse-adapter", "--model", str(md), "--adapter", str(ad.path),
+                                      "--out", str(tmp_path / "new" / "fused")])
+    with pytest.raises(SystemExit, match="the merged checkpoint has the size of the model's weights"):
+        adapter_module.main()
+    assert not (tmp_path / "new").exists()  # refused before anything is written
+
+
 def test_vllm_and_sglang_serve_a_fused_copy(tmp_path, monkeypatch, capsys):
     from types import ModuleType
 
