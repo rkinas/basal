@@ -37,6 +37,17 @@ is new is opt-in unless a line says otherwise.
   the file is applied when that snapshot is served (before, the path was recorded and `--strict-calibration` refused
   the file as fitted on another model). The same holds with `--url` and `--model`; repo ids and plain directories are
   recorded as before. Contributed by Paweł Kiszczak (@pawelkiszczak), [#71](https://github.com/rkinas/basal/pull/71).
+- **LoRA adapters at load** (`--adapter DIR` on basal-serve, basal-calibrate and basal-bench): an mlx-lm or PEFT LoRA
+  adapter (rsLoRA too) is merged into the weights at load, with the arithmetic of PEFT's `merge_and_unload`;
+  `--mode vllm` and `sglang` serve a merged copy, and `basal-fuse-adapter` writes the merged checkpoint (for GGUF,
+  Ollama or llama.cpp, or to ship it). The answers equal the fused checkpoint's and PEFT's merge's bit for bit
+  (Gemma 4 E4B and 31B adapters on an H100 in `fast`, `eager`, `fp8` and `vllm`, E4B in `mlx` on a Mac, and a
+  basal-finetune adapter of basal-omni-pico). Calibration files record the adapter
+  (`fitted_on.adapter`) and the adapter directory's own file comes first. Refused with a message: GGUF, Ollama and
+  llama.cpp, FP8 checkpoints, `fast-exit`, `nvfp4`, `int8`, `vllm` for Qwen3.5 models, DoRA.
+  [SERVING.md](SERVING.md#serving-modes),
+  [CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to). Contributed by Paweł Kiszczak (@pawelkiszczak),
+  [#52](https://github.com/rkinas/basal/pull/52).
 - **Tests on Apple M5**: the float32 MLX tests set `MLX_ENABLE_TF32=0` (`tests/conftest.py`), since MLX runs float32
   matmuls in TF32 on an M5's GPU by default; served bf16 models are not affected. Contributed by Grzegorz Brzezinka
   (@agentGreg), [#76](https://github.com/rkinas/basal/pull/76).
