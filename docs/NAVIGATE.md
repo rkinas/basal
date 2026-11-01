@@ -136,6 +136,50 @@ directly.
 Descriptions decide what can be found: a branch whose description does not show what it holds is pruned. Pruning is
 for this query only, and a larger `keep` trades requests for recall.
 
+### Very large collections (experimental)
+
+By default each level goes out as one request, and basal-serve refuses a request with more than 10,000 `rank`
+candidates (HTTP 422; `basal-serve --rank-max-candidates N` sets the limit). When a level of your tree can hold more
+candidates than that, there are two ways:
+
+- **One request per level:** raise the server's limit, e.g. `basal-serve ... --rank-max-candidates 50000`.
+- **`--split-at N`** (experimental, off by default; `Navigator(..., split_at=N)` in Python): a level with more than N
+  candidates goes out as several requests of at most N each, so the server keeps its limit (set N to the server's
+  `--rank-max-candidates`). The requests are cut where the server's requests of `chunk` candidates end, so every
+  candidate is judged in the same prompt as in one request, but the engine batches the requests differently, so
+  **scores can differ slightly from a one-request run**. A level of at most N candidates sends the same single request
+  as without the setting. The last stage, when it has a final choice (`top` above 0) or one shared context
+  (`--final-chunk` 0), must still fit one request: lower `keep` or `--per-page` if it does not.
+
+`--split-at` makes no search faster; what it gives is a large collection without refused requests at the server's
+default limit.
+
+```bash
+basal-serve --model Remek/basal-omni-1.0-max --mode fast --state-cache-gb 16 &
+basal-navigate search tree.jsonl --queries questions.jsonl --split-at 10000 \
+  --levels '[{"keep": 100}, {"keep": 30}]' --per-page '[[3, 0], [10, 10], [30, 3]]' --multiply --top 5
+```
+
+Measured once, for 2.5, on Natural Questions (DAPR test, the first 100 questions; 2.68 million paragraphs of 108,626
+pages under 1,000 k-means topics) with basal-omni-1.0-max (`--mode fast --state-cache-gb 16`, one H100 80 GB) and the
+settings above: keep 100 topics, then 30 pages, then every passage of the top 3 pages, the first 10 of pages 4-10 and
+the first 3 of pages 11-30 (213 passages on average), a choice over the top 5. The page level held 11,676 candidates
+on average (9,760-14,159), so `--split-at 10000` sent it as two requests for 99 of the 100 questions.
+
+| | one request per level, 1 client | `--split-at 10000`, 1 client | `--split-at 10000`, 8 clients |
+|---|---|---|---|
+| questions (failed) | 100 (0) | 81 (0), time limit | 100 (0) |
+| median time per question | 51.4 s | 51.6 s | 403 s |
+| wall time per question | 52.7 s | 53.2 s | 51.8 s |
+| GPU memory peak (whole card) | 77.8 GB | 79.1 GB, after the 8-client run on the same server | 79.1 GB |
+
+- **Same answers as one request per level, slightly different scores.** On the same questions, the first passage was
+  the same for all 81 (1 client) and all 100 (8 clients) questions, and the top 10 were the same passages in the same
+  order for all of them. 99% of the candidate scores matched to within 0.0001; the largest difference was 0.0012 at
+  one client and 0.045 at 8 clients, where the engine batches requests of different searches together.
+- **Memory:** at 8 concurrent clients the card reached 79.1 of its 80 GB (no request failed). 8 clients finished no
+  sooner per question than one, so for headroom run one search at a time on an 80 GB card.
+
 ## Measured results
 
 *Experimental*: measured once, for 2.5, with basal-omni-1.0-max (`--mode fast --state-cache-gb 16`, one H100). The

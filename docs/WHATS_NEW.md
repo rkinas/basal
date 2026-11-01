@@ -14,6 +14,13 @@ is new is opt-in unless a line says otherwise.
   with basal-omni-1.0-max on one H100 against a dense 8B embedder: MultiDoc2Dial R@1 44.27 vs 34.70, ConditionalQA
   Hit@1 63.47 vs 44.28; the final choice helped on the first and lowered Hit@1 by 1.48 on the second (`top` 0 turns
   it off); 24-64 s per query (median, 8 concurrent clients). [NAVIGATE.md](NAVIGATE.md#measured-results)
+- **`basal-navigate search --split-at N`: very large collections (experimental, off by default):** a level with more
+  than N candidates goes out as several requests of at most N, so a tree whose levels exceed basal-serve's
+  `--rank-max-candidates` (10,000) is searched without refused requests and without raising the limit; `--per-page`
+  sets the last stage's passages per page from the command line. Not faster: on Natural Questions (2.68 million
+  paragraphs, page levels of ~11,700 candidates, one H100) 51.6 s per question against 51.4 s with one request per
+  level. Scores can differ slightly from one-request runs (at most 0.045); the first passage and the top 10 were the
+  same on every measured question. [NAVIGATE.md](NAVIGATE.md#very-large-collections-experimental)
 - **Tokenize once (default):** the prompts of a request share the template and the state; the server now tokenizes
   that shared part once and each prompt's own tail after it, cut after a newline where whole-prompt tokenization
   always ends a token, so the engine reads the same ids as before. For the tokenizers of the basal models (Gemma 4,
