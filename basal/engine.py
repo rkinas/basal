@@ -3268,6 +3268,15 @@ class _VLLMOverlap:
         return asyncio.run_coroutine_threadsafe(self.engine.collective_rpc(method, *args, **kw), self.loop).result()
 
 
+def vllm_adapter_refused(name, what):
+    """--mode vllm --adapter on a model of recurrent-state layers (Qwen3.5): vLLM has no deterministic preset for them
+    (--vllm-preset deterministic is refused), and its answers move between starts of the same server (one readout in
+    558 by 0.002 on basal-omni-pico), so they could not be shown equal to the merged checkpoint's."""
+    return (f"--adapter {name}: --mode vllm does not take an adapter for a model with {what} (Qwen3.5): vLLM has no "
+            "deterministic preset for it, so its answers could not be checked against the merged checkpoint's; serve "
+            "it with --mode fast or eager, or serve a checkpoint written by basal-fuse-adapter with --mode vllm")
+
+
 class VLLMBackend:
     """vLLM backend: bf16 checkpoints and the ModelOpt FP8 / NVFP4 ports, with the engine settings of a --vllm-preset
     (VLLM_PRESETS, vllm_args). One generated token restricted to the option letters; with
@@ -3290,6 +3299,8 @@ class VLLMBackend:
         # --adapter: vLLM serves a copy of the checkpoint with the adapter merged (adapter.fused_copy), the weights
         # basal-fuse-adapter writes, so its answers are those of the fused checkpoint
         self.adapter_modules = len(adapter.deltas) if adapter else 0
+        if adapter and recurrent_layers(model_dir):
+            raise SystemExit(vllm_adapter_refused(adapter.name, recurrent_layers(model_dir)))
         model_dir = adapter_module.fused_copy(model_dir, adapter) if adapter else model_dir
         cfg_file = Path(model_dir) / "config.json"
         cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}

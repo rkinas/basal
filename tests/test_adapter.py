@@ -124,6 +124,18 @@ def test_fuse_checkpoint_refuses_missing_modules_and_fp8_weights(tmp_path):
                                        tmp_path / "o2")
 
 
+def test_vllm_refuses_an_adapter_for_recurrent_models(tmp_path):
+    from basal.engine import VLLMBackend
+    md = tmp_path / "pico"
+    md.mkdir()
+    (md / "config.json").write_text(json.dumps({"model_type": "qwen3_5_text", "layer_types": [
+        "linear_attention", "linear_attention", "linear_attention", "full_attention"]}), encoding="utf-8")
+    ad = adapter_module.read(write_adapter(tmp_path / "edu", "peft", deltas()))
+    with pytest.raises(SystemExit, match="vllm does not take an adapter for a model with 3 linear_attention layers"):
+        VLLMBackend(md, adapter=ad)
+    assert not list(tmp_path.glob("basal-adapter-*"))  # refused before any copy
+
+
 def test_the_merged_copy_needs_room_for_the_weights(tmp_path, monkeypatch):
     from collections import namedtuple
     md = tmp_path / "model"
