@@ -1599,10 +1599,12 @@ class GraphBackend(EagerBackend):
         """Fresh per-layer (K, V) buffers [1, kv heads, L, head size] (a root longer than the largest graph). Gemma 4:
         a sliding layer's last `window` tokens only (kv_lens: pass 2 reads no further back), so a long state takes a
         fifth of the memory on 31B (0.9 MB per token: its 10k-token states ran out of memory on an 80 GB H100 next to
-        59 GB of weights, 20 Oct); the state cache keeps the same."""
+        59 GB of weights, 20 Oct); the state cache keeps the same. Zeros, as _kv_buffers: a cached state copied in can
+        be shorter than the buffer (a sliding layer of an edited state continued from inside its window), and a masked
+        NaN in the rest still poisons the attention (0 x NaN)."""
         dt = self._dtype
         lens = self.gemma.kv_lens(L) if self.gemma is not None else [L] * len(self.kv_shapes)
-        return [(torch.empty((1, H, n, D), dtype=dt, device=self.dev), torch.empty((1, H, n, D), dtype=dt,
+        return [(torch.zeros((1, H, n, D), dtype=dt, device=self.dev), torch.zeros((1, H, n, D), dtype=dt,
                                                                                   device=self.dev))
                 for (H, D), n in zip(self.kv_shapes, lens)]
 
