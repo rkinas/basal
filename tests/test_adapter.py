@@ -1,4 +1,4 @@
-"""--adapter: the mlx-lm and PEFT formats read to the same deltas, the merge equals mlx-lm's LoRALinear.fuse on every
+"""--adapter: the mlx-lm and PEFT formats read to the same deltas, the merge equals PEFT's merge_and_unload on every
 framework (torch, MLX bf16 and 8-bit, the TPU backend's numpy weights), basal-serve's calibration rules under an
 adapter, and basal-fuse-adapter's merged checkpoint."""
 import json
@@ -187,7 +187,7 @@ def test_what_cannot_be_merged_is_refused_naming_the_directory(tmp_path):
         adapter_module.read(half)
 
 
-def test_torch_merge_adds_the_scaled_delta_in_the_weight_dtype(tmp_path):
+def test_torch_merge_adds_the_scaled_delta_in_float32_and_rounds_once(tmp_path):
     tiny_llama(tmp_path / "model")
     ad = adapter_module.read(write_adapter(tmp_path / "ad", "peft", deltas()))
     m = AutoModelForCausalLM.from_pretrained(tmp_path / "model", dtype=torch.bfloat16)
@@ -197,7 +197,7 @@ def test_torch_merge_adds_the_scaled_delta_in_the_weight_dtype(tmp_path):
     for key in (Q, DOWN):
         a, b = map(torch.from_numpy, ad.deltas[key])
         name = f"model.{key}.weight"
-        assert torch.equal(after[name], before[name] + ((2.0 * b) @ a).to(torch.bfloat16))
+        assert torch.equal(after[name], (before[name].float() + (b @ a) * 2.0).to(torch.bfloat16))
     assert all(torch.equal(after[k], v) for k, v in before.items() if k not in (f"model.{Q}.weight",
                                                                                f"model.{DOWN}.weight"))
 
@@ -291,7 +291,7 @@ def _module(model, key):
 
 
 @pytest.mark.parametrize("quantize", [False, True], ids=["full", "8bit"])
-def test_mlx_merge_equals_mlx_lm_fuse_bit_for_bit(tmp_path, quantize):
+def test_mlx_merge_rounds_once_and_stays_within_mlx_lm_fuse(tmp_path, quantize):
     mx = pytest.importorskip("mlx.core")
     import mlx.nn as nn
     tiny_llama(tmp_path / "model")
@@ -306,11 +306,14 @@ def test_mlx_merge_equals_mlx_lm_fuse_bit_for_bit(tmp_path, quantize):
     for key in (Q, DOWN):
         mine, theirs = _module(be.model, key), _module(ref, key)
         assert type(mine) is type(theirs) is (nn.QuantizedLinear if quantize else nn.Linear)
-        for p in ("weight", "scales", "biases") if quantize else ("weight",):
-            assert mx.array_equal(getattr(mine, p), getattr(theirs, p))
-        if not quantize:  # the formula itself, independent of mlx-lm: w + (scale * b) @ a
-            want = np.array(w0[key]) + adapter_module.delta(ad, key)
-            np.testing.assert_allclose(np.array(mine.weight), want, rtol=1e-5, atol=1e-6)
+        d = adapter_module.delta(ad, key).numpy()
+        if quantize:  # dequantised, merged with one rounding, re-quantised with the layer's group size and bits
+            deq = lambda m: np.array(mx.dequantize(m.weight, m.scales, m.biases, group_size=m.group_size,  # noqa: E731
+                                                   bits=m.bits, mode=m.mode).astype(mx.float32))
+            np.testing.assert_allclose(deq(mine), deq(theirs), atol=0.02)  # within a quantisation step of mlx-lm's
+        else:  # the formula itself: w + (b @ a) * scale in float32, rounded once (float32 weights here: no rounding)
+            assert np.array_equal(np.array(mine.weight), (np.array(w0[key]) + d).astype(np.float32))
+            np.testing.assert_allclose(np.array(mine.weight), np.array(theirs.weight), rtol=1e-5, atol=1e-6)
 
 
 def test_mlx_q8_quantises_the_merged_weights(tmp_path):
@@ -472,17 +475,19 @@ def peft_merged(model, path, targets, rank=4, alpha=8):
     return pm.merge_and_unload()
 
 
-def assert_same_weights(mine, ref, atol=1e-6):
+def assert_same_weights(mine, ref, atol=0.0):
+    """Bit for bit by default: the merge is PEFT's arithmetic on the CPU."""
     ref = ref.state_dict()
     changed = 0
     for k, v in mine.state_dict().items():
-        torch.testing.assert_close(v, ref[k], atol=atol, rtol=1e-5, msg=k)
+        torch.testing.assert_close(v, ref[k], atol=atol, rtol=0.0 if atol == 0 else 1e-5, msg=k)
         changed += k.endswith("proj.weight")
     return changed
 
 
-def test_merge_equals_peft_merge_and_unload_on_llama(tmp_path):
-    m = tiny_llama(tmp_path / "model")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_merge_equals_peft_merge_and_unload_on_llama(tmp_path, dtype):
+    m = tiny_llama(tmp_path / "model").to(dtype)
     ref = peft_merged(m, tmp_path / "ad", TARGETS)
     ad = adapter_module.read(tmp_path / "ad")
     assert ad.scale == pytest.approx(8 / math.sqrt(4))  # rsLoRA

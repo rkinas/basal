@@ -8,9 +8,10 @@ Formats, by the files in the directory:
   PEFT    adapter_config.json (peft_type "LORA", r, lora_alpha, use_rslora) + adapter_model.safetensors,
           keys base_model.model.<path>.lora_A.weight [r, in] / .lora_B.weight [out, r]
 
-The merge is mlx-lm's LoRALinear.fuse on every framework: delta = (scale * b) @ a in float32 ([out, in]), cast to the
-weight's dtype, added in the weight's dtype. The factors are float32 whatever their stored dtype (PEFT's own merge
-multiplies them in the weight's dtype): one rounding, at the cast, on every framework."""
+The merge is PEFT's merge_and_unload on the CPU, on every framework: delta = (b @ a) * scale in float32 ([out, in],
+torch's CPU GEMM, the factors float32 whatever their stored dtype), added to the weight in float32 and rounded once to
+the weight's dtype. (mlx-lm's LoRALinear.fuse rounds the delta to the weight's dtype before adding it: about 0.4% of a
+merged bf16 weight's elements then end one unit in the last place apart, which moved near-tie answers.)"""
 import argparse
 import atexit
 import functools
@@ -138,12 +139,21 @@ def read(path):
                    rank=max(a.shape[0] for a, _ in deltas.values()), fmt=fmt, deltas=deltas)
 
 
-def delta(ad, key, np_dtype=np.float32):
-    """The update of one module, (scale * b) @ a in float32 on the CPU ([out, in]), cast to np_dtype. Every merge (torch
-    on any device, MLX, the TPU's numpy weights, basal-fuse-adapter) takes it from here, so --adapter and the fused
-    checkpoint get bit-identical weights whatever GEMM the device would have used."""
+def delta(ad, key):
+    """The update of one module as PEFT's merge computes it on the CPU: (b @ a) * scale in float32 ([out, in]), a torch
+    tensor. Every merge (torch on any device, MLX, the TPU's numpy weights, basal-fuse-adapter) takes it from here and
+    adds it with merged(), so --adapter and the fused checkpoint get bit-identical weights whatever GEMM the device
+    would have used."""
+    import torch
     a, b = ad.deltas[key]
-    return ((np.float32(ad.scale) * b) @ a).astype(np_dtype)
+    with torch.no_grad():
+        return (torch.from_numpy(b) @ torch.from_numpy(a)) * ad.scale
+
+
+def merged(w, d):
+    """Weight w (torch) plus the float32 delta d, added in float32 and rounded once to w's dtype (PEFT's
+    `weight.data += delta` with a float32 delta)."""
+    return (w.float() + d.to(w.device)).to(w.dtype)
 
 
 def _layers(ad, get):
@@ -186,8 +196,7 @@ def merge_torch(model, ad):
             if w.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
                 raise SystemExit(f"--adapter {ad.name}: {key}: FP8 weights cannot take a merge")
             _check_shape(ad, key, w.shape)
-            d = torch.from_numpy(delta(ad, key)).to(w.dtype)  # rounded on the CPU, then moved (bf16)
-            w.add_(d.to(w.device))
+            w.copy_(merged(w, delta(ad, key)))
     return len(ad.deltas)
 
 
@@ -209,7 +218,7 @@ def merge_mlx(model, ad):
         if quantized:
             w = mx.dequantize(w, mod.scales, mod.biases, group_size=mod.group_size, bits=mod.bits, mode=mod.mode)
         _check_shape(ad, key, w.shape)
-        w = w + mx.array(delta(ad, key)).astype(w.dtype)
+        w = (w.astype(mx.float32) + mx.array(delta(ad, key).numpy())).astype(w.dtype)  # one rounding, as merged()
         if quantized:
             out, inp = w.shape
             fused = nn.Linear(inp, out, bias="bias" in mod)
@@ -234,8 +243,7 @@ def merge_numpy(weights, ad):
             raise SystemExit(f"--adapter {ad.name}: {key}: no such module in the model")
         w = np.asarray(weights[name])
         _check_shape(ad, key, w.shape)
-        d = delta(ad, key, w.dtype)
-        weights[name] = (w.astype(np.float32) + d.astype(np.float32)).astype(w.dtype)
+        weights[name] = (w.astype(np.float32) + delta(ad, key).numpy()).astype(w.dtype)  # one rounding, as merged()
     return len(ad.deltas)
 
 
@@ -278,8 +286,7 @@ def _weight_names(ad, md):
 def fuse_checkpoint(md, ad, out):
     """Write checkpoint md with the adapter merged into `out` (a new or empty directory): every safetensors file again,
     with the same tensor names, dtypes and metadata, its decoder layers' weights merged as merge_torch merges them
-    (delta cast to the weight's dtype, added in that dtype), so a server of `out` loads the weights --adapter merges at
-    load bit for bit; every other file is copied as it is (config.json, the index, tokenizer, template, basal.json), but
+    (merged()), so a server of `out` loads the weights --adapter merges at load bit for bit; every other file is copied as it is (config.json, the index, tokenizer, template, basal.json), but
     not NOT_FUSED nor subdirectories -> the number of merged modules. FP8 weights cannot take a merge (refused)."""
     import torch
     from safetensors import safe_open
@@ -305,7 +312,7 @@ def fuse_checkpoint(md, ad, out):
                         raise SystemExit(f"--adapter {ad.name}: {key}: {t.dtype} weights cannot take a merge (an FP8 "
                                          "checkpoint: fuse the bf16 repository)")
                     _check_shape(ad, key, t.shape)
-                    t = t + torch.from_numpy(delta(ad, key)).to(t.dtype)
+                    t = merged(t, delta(ad, key))
                 tensors[name] = t
         save_file(tensors, str(out / f.name), metadata=meta)
         del tensors
@@ -318,11 +325,21 @@ def fuse_checkpoint(md, ad, out):
 def fused_copy(md, ad):
     """--adapter for the engines that load a checkpoint themselves (vLLM, SGLang): the checkpoint with the adapter
     merged (fuse_checkpoint) in a temporary directory ($TMPDIR; the model's size on disk), removed when basal exits;
-    the engine serves it as it serves basal-fuse-adapter's output -> its path."""
+    the engine serves it as it serves basal-fuse-adapter's output -> its path. Written by a child process
+    (basal-fuse-adapter): the server process never runs torch's CPU thread pool before vLLM forks its engine (a forked
+    child deadlocks on that pool), and the shard it holds in memory is freed when the child exits."""
+    import os
+    import subprocess
+    import sys
     out = _temp_dir()
-    n = fuse_checkpoint(md, ad, out)
-    print(f"basal: --adapter {ad.name}: {n} layers merged into a copy of the checkpoint at {out} (removed at exit)",
-          flush=True)
+    here = str(Path(__file__).resolve().parent.parent)  # this basal package, whatever the child's working directory
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(x for x in (here, os.environ.get("PYTHONPATH")) if x))
+    r = subprocess.run([sys.executable, "-m", "basal.adapter", "--model", str(md), "--adapter", str(ad.path),
+                        "--out", str(out)], capture_output=True, text=True, env=env)
+    if r.returncode:
+        raise SystemExit((r.stderr.strip().splitlines() or [f"basal-fuse-adapter exited with {r.returncode}"])[-1])
+    print(f"basal: --adapter {ad.name}: {len(ad.deltas)} layers merged into a copy of the checkpoint at {out} "
+          "(removed at exit)", flush=True)
     return out
 
 
