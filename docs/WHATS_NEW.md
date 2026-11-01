@@ -39,6 +39,12 @@ is new is opt-in unless a line says otherwise.
   basal-serve reads it, so the page explains the prompt the served answer came from and the comparison with
   basal-serve's probabilities holds for such requests.
   Contributed by Paweł Kiszczak (@pawelkiszczak), [#73](https://github.com/rkinas/basal/pull/73).
+- **basal-viz on the MLX engine (`--mode mlx` / `mlx-q8`):** on a Mac the page reads the layers of the engine basal-serve
+  runs there (the `-MLX-8bit` / `-MLX-fp4` exports, bf16 weights, or 8-bit weights made at load with `mlx-q8`), with the
+  codes read as that engine reads them, so it shows where a quantised model's decision forms or moves (Llama-architecture
+  models; Gemma 4 basal-omni stays on the PyTorch modes). A prompt over the context is refused with HTTP 422 in every mode
+  instead of running untruncated. [SERVING.md](SERVING.md#see-how-a-decision-is-made)
+  Contributed by Grzegorz Brzezinka (@agentGreg), [#78](https://github.com/rkinas/basal/pull/78).
 - **basal-calibrate on a Hugging Face cache snapshot:** `--model <cache>/models--<org>--<name>/snapshots/<commit>`
   records `fitted_on.model` as the repo id and `fitted_on.revision` as the commit, as basal-serve names the model, so
   the file is applied when that snapshot is served (before, the path was recorded and `--strict-calibration` refused
