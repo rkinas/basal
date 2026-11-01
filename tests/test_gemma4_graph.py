@@ -398,3 +398,30 @@ def test_compiled_layers_in_inductor_deterministic_mode(monkeypatch, env, want):
         monkeypatch.setenv("TORCHINDUCTOR_DETERMINISTIC", env)
     Gemma4Graph(tiny("e4b"), compile=True)
     assert len(seen) == 3 and all(kw == {"options": {"deterministic": want}} for kw in seen)
+
+
+@pytest.mark.parametrize("kind", ["e4b", "31b"])
+def test_edited_state_over_stale_memory_answers_as_separate(kind, monkeypatch):
+    """An edited state continued from inside a sliding layer's window, with a new turn shorter than the one it
+    replaces: its cached entry is shorter than the fresh buffer of a root beyond the graphs. Fresh GPU memory can hold
+    NaN (simulated: torch.empty returns NaN); the readouts still equal separate forwards (the buffer is zeros)."""
+    from basal.engine import StateCache
+    empty = torch.empty
+
+    def stale(*a, **k):
+        t = empty(*a, **k)
+        return t.fill_(float("nan")) if t.is_floating_point() else t
+    m = tiny(kind, torch.float32)
+    be = Stub(m)
+    be.CHUNK, be.gemma.MARGIN = 5, 3
+    be.state_cache = StateCache(1 << 30)
+    be.state_cache.BLOCK = 4
+    monkeypatch.setattr(torch, "empty", stale)
+    base = [1] + [3 + (7 * i) % 40 for i in range(20)]  # longer than window 5 + MARGIN 3
+    lids = [[7, 8], [7, 8]]
+    for st in (base, base[:-3] + [44]):  # the edit: 3 tokens replaced by 1, inside the margin
+        toks = [st + [20, 21, 30 + o, 31 - o] for o in range(2)]
+        res = be.run_shared([(toks, lids, len(st))])
+        for r, e in zip(res[0], separate(m, toks, lids)):
+            assert torch.isfinite(torch.tensor(r)).all() and torch.allclose(torch.tensor(r), e, atol=1e-5)
+    assert be.state_cache.stats()["prefix_hits"] == 1
