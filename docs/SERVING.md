@@ -687,16 +687,26 @@ examples are in a drop-down, with the expected answer where the file has one.
 
 ```bash
 basal-viz --model Remek/basal-2.0-mini --port 8080     # then open http://127.0.0.1:8080
+basal-viz --model Remek/basal-2.0-mini-MLX-8bit --mode mlx     # Apple Silicon: the MLX engine
 ```
 
-It runs `--mode mps` on Apple Silicon and `--mode eager` elsewhere (`--device`, `--orders 1|2`, `--calibration` as for
-`basal-serve`), and reads the Llama-architecture models (basal-1.0, basal-1.5, basal-2.0) and basal-omni's Gemma 4
-text decoder (bf16 checkpoints; the final logit softcap is applied as the engines apply it). Requests with media are
-refused: basal-viz explains text only. It is meant for exploring, not serving: every question runs one extra forward
-per option order to record all layers.
+By default it runs the PyTorch engine, `--mode mps` on Apple Silicon and `--mode eager` elsewhere (`--device`,
+`--orders 1|2`, `--calibration` as for `basal-serve`); `--mode mlx` / `mlx-q8` (below) runs the MLX engine instead. The
+PyTorch modes read the Llama-architecture models (basal-1.0, basal-1.5, basal-2.0) and basal-omni's Gemma 4 text
+decoder (bf16 checkpoints; the final logit softcap is applied as the engines apply it); the MLX modes read the
+Llama-architecture models only. Requests with media are refused: basal-viz explains text only. It is meant for
+exploring, not serving: every question runs one extra forward per option order to record all layers, and a prompt over
+the context is refused (HTTP 422) instead of truncated.
 Inspections and their served comparisons run one request at a time because they share the model. Gemma 4
 inspections accept at most 2,048 tokens per rendered prompt (including the template, question and options);
 longer prompts return a validation error before the lens forward, so shorten the state or question.
+
+`--mode mlx` (the `-MLX-8bit` / `-MLX-fp4` exports or bf16 weights) and `--mode mlx-q8` read the layers of the MLX
+engine that `basal-serve` runs on a Mac, so the page shows where a quantised model's decision forms or moves. The
+codes are read as that engine reads them (fp32 code rows, or the quantised head itself). On the page's 49 bundled
+requests (the 44 items with gold answers and 5 requests with several questions; Apple M5 Max, basal-2.0-mini and 4.5B,
+`-MLX-8bit` and `mlx-q8`), the page's answer differs from the served one by at most 2e-6 for a single question; a
+request with several questions differs by up to 0.02, as in `--mode mps`.
 
 ## Benchmark your GPU
 

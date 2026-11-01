@@ -117,6 +117,36 @@ def test_mlx_q8_quantises_decoder_blocks_only(tmp_path):
         mlx_stub(tmp_path, "q4")
 
 
+@pytest.mark.parametrize("quant", [None, "q8", "q8-head"])
+def test_viz_mlx_lens(tmp_path, quant):
+    """basal-viz --mode mlx / mlx-q8: the per-layer readout of the MLX engine equals the PyTorch lens at every layer
+    (fp32 weights; 8-bit: close), its last layer is what the engine serves, and the layers are restored afterwards.
+    q8-head: the output head quantised too, as in the -MLX-8bit exports (the codes are read from the head itself)."""
+    pytest.importorskip("mlx.core")
+    import mlx.nn as nn
+    from basal.viz import mlx_lens, torch_lens
+    m = tiny_llama(tmp_path)
+    be = mlx_stub(tmp_path, quant and "q8")
+    if quant == "q8-head":
+        be.pool.submit(nn.quantize, be.model, group_size=64, bits=8,
+                       class_predicate=lambda path, _m: path == "lm_head").result()
+        assert be._code_rows((10, 11)) is None
+    layers = list(be.lm.model.layers)
+    tol = 0.05 if quant else 2e-4
+    served = be.run(TOKS, LIDS)
+    assert len(served) == len(TOKS)
+    for ids, codes, s in zip(TOKS, LIDS, served):
+        ref, ref_top = torch_lens(m, "cpu", ids, codes)
+        got, top = mlx_lens(be, ids, codes)
+        assert len(got) == len(ref) == 2
+        assert all(len(p) == len(codes) for p in got + ref + [s]) and len(top) == len(ref_top) == 5
+        for r, g in zip(ref, got):
+            assert max(abs(x - y) for x, y in zip(r, g)) < tol
+        assert max(abs(x - y) for x, y in zip(got[-1], s)) < 2e-4  # the page's last layer is the served readout
+        assert top[0][0] == ref_top[0][0] and abs(sum(p for _, p in top) - sum(p for _, p in ref_top)) < tol
+    assert list(be.lm.model.layers) == layers
+
+
 @FORWARDS
 def test_mlx_reads_255_format2_codes(tmp_path, forward):
     """Prompt format 2: up to 255 option codes, read from the head's logits at the prefill position (the code ids of the

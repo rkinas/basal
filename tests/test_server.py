@@ -583,6 +583,23 @@ def test_viz_packing_and_served_comparison():
     assert abs(out["questions"][1]["served_max_diff"] - 0.025) < 1e-9 and out["served"] is served["answers"]
 
 
+def test_viz_refuses_a_prompt_over_the_context():
+    """The lens runs the whole prompt through every layer: a prompt over the server's context limit is refused (HTTP
+    422) before any forward, in every mode."""
+    import types
+    from basal.prompt import RequestError
+    from basal.server import http_status
+    from basal.viz import Explainer
+    ex = Explainer.__new__(Explainer)
+    ex.fmt, ex.tok = 2, lambda p, add_special_tokens=False: types.SimpleNamespace(input_ids=list(range(len(p))))
+    ex.srv = types.SimpleNamespace(context=(16, "the model's context"),
+                                   jobs_for=lambda q, question, options: [((0, 1), "x" * 20, [1, 2])])
+    ex.lens = lambda *_: pytest.fail("no forward for a prompt over the context")
+    with pytest.raises(RequestError) as e:
+        ex.explain_branch({"type": "choice", "branches": [("Q?", ["a", "b"])], "state": "s"}, 0)
+    assert "the model's context (16 tokens); this prompt has 20" in str(e.value) and http_status(e.value) == 422
+
+
 def test_out_of_memory_frees_the_failed_forward():
     """An out-of-memory error's frames are cleared before the requests get it: the failed forward's tensors are freed at
     once, not at a later garbage collection (until then the next requests ran out of memory too; ultra eager, 20 Oct)."""
