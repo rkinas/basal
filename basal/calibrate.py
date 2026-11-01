@@ -1002,16 +1002,17 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     return dict(temperature_per_prim=temps, temperature_source=source, thresholds=thresholds, **extra), report
 
 
-def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"):
+def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical", adapter=None):
     """The calibration to compare with and keep, as basal-serve would apply it with these option orders
     (server.load_calibration: the model's file for those orders when it ships one; a file fitted on other orders
-    without its thresholds) -> (calibration, its file or None)."""
+    without its thresholds; with --adapter the adapter's file, else the model's without its thresholds) -> (calibration,
+    its file or None)."""
     if off or (md is None and not path):
         return {}, None
     if orders is None:  # a server that does not report its orders: the file as it is
         f = calibration_file(md, kind, path, quant, preset, layout)
         return (json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}), f
-    data, f, why = load_calibration(md, kind, path, quant, orders, preset=preset, layout=layout)
+    data, f, why = load_calibration(md, kind, path, quant, orders, preset=preset, layout=layout, adapter=adapter)
     if why:
         print(f"warning: {why}: its thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
     return data, f if f.exists() else None
@@ -1442,7 +1443,8 @@ def main(argv=None):
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
             raise SystemExit(f"--url {a.url}: no basal server answers ({e})") from None
         mode = a.mode or entry.get("mode")
-        engine = f"{mode} at {base}"
+        adapter = entry.get("adapter")  # the server's --adapter identity (name@sha256)
+        engine = f"{mode} at {base}" + (f" --adapter {adapter.split('@')[0]}" if adapter else "")
         orders = entry.get("orders")  # the server's option orders (servers before this field: unknown)
         kind, quant = MODES.get(mode, ("", None, False))[:2]
         preset = entry.get("vllm_preset")  # --mode vllm: the server's preset (servers before 2.2.1: none)
@@ -1465,10 +1467,12 @@ def main(argv=None):
         preset = getattr(srv.backend, "preset", None)
         a.layout = srv.layout  # --layout, else the model's basal.json "layout"
         baseline, base_file = compared(srv.md, srv.kind, a.calibration, quant, orders, a.no_calibration, preset,
-                                       a.layout)
+                                       a.layout, srv.adapter)
         model, revision = model_identity(a.model, srv.md)
         engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
-            + (f" --vllm-preset {preset}" if preset not in (None, "default") else "")
+            + (f" --vllm-preset {preset}" if preset not in (None, "default") else "") \
+            + (f" --adapter {srv.adapter.name}" if srv.adapter else "")
+        adapter = srv.adapter.identity if srv.adapter else None
         _, task_responses = asyncio.run(two_passes(srv, bodies, task_bodies, a.concurrency, settle))
     rows, failed, cal, report = fitted["rows"], fitted["failed"], fitted["cal"], fitted["report"]
     trows, tfailed = task_rows(units, task_responses) if units else ([], [])
@@ -1504,6 +1508,8 @@ def main(argv=None):
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__}")
     if revision:
         cal["fitted_on"]["revision"] = revision
+    if adapter:  # basal-serve applies the file only with this adapter (calibration_mismatch)
+        cal["fitted_on"]["adapter"] = adapter
     if task_report:
         cal["fitted_on"]["tasks"] = {t: e["n"] for t, e in task_report.items()}
         cal["fitted_on"]["task_requests"] = len(task_bodies) - len(tfailed)
@@ -1530,7 +1536,8 @@ def main(argv=None):
     else:
         Path(a.out).write_text(json.dumps(cal, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"\nwrote {a.out} (calibration file {fmt}, engine {cal['engine']})\n"
-              f"  basal-serve --model {a.model or '<model>'} --mode {mode} --calibration {a.out}")
+              f"  basal-serve --model {a.model or '<model>'} --mode {mode}"
+              + (f" --adapter {a.adapter}" if getattr(a, "adapter", None) else "") + f" --calibration {a.out}")
     summary(small + cert_notes(report, task_report, targets))
     if a.strict and report:
         strict_check(report, a.min_family)

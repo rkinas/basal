@@ -207,6 +207,44 @@ benchmarking a GPU.
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md). `--error-format openai` answers errors as `{"error": {"message",
   "type", "code"}}` (same status codes).
+- **LoRA adapters:** `--adapter DIR` (basal-serve, basal-calibrate, basal-bench) loads a
+  LoRA adapter with the model: an mlx-lm directory (`adapter_config.json` + `adapters.safetensors`) or a PEFT one
+  (`adapter_config.json` + `adapter_model.safetensors`; `use_rslora` read, DoRA and per-module ranks refused). Only
+  the text decoder's layers are merged: a tensor of another tower (a vision or audio encoder's `layers.N`) refuses the
+  adapter rather than land in the decoder's layer N. The
+  served name is `<model>+<adapter>` unless `--name`; `GET /v1/models` reports `"adapter": "<name>@<hash>"` (sha256
+  of `adapter_config.json` and the weights file, 12 hex digits: another scale is another adapter), and the start-up
+  line names the adapter and the calibration file applied.
+
+  | engine | adapter |
+  |---|---|
+  | `eager`, `mps`, `fast`, `fast-nocompile`, `fp8` (also block FP8 and `--quant-load cpu`), `strix`, `tpu` | merged into the bf16 weights at load, before the projection merge and any quantisation |
+  | `mlx`, `mlx-q8`, the `-MLX-8bit` exports | merged at load; a quantised export is dequantised, merged and re-quantised (mlx-lm's fuse) |
+  | `vllm`, `sglang` | the engine serves a copy of the checkpoint with the adapter merged, as `basal-fuse-adapter` writes it, so its answers are the fused checkpoint's (a native LoRA adds its product apart and cannot equal the merged weights). The copy is written to `$TMPDIR` at start-up and removed when basal-serve exits: it takes the size of the model's weights on disk (about 16 GB for a Gemma 4 E4B model, 62 GB for 31B), one weights file in memory while it is written, and adds the writing to the start-up (minutes for 31B). Without room it is refused before anything is written, with the space needed and free: set `TMPDIR` to a larger disk, or serve a `basal-fuse-adapter` checkpoint. `vllm` refuses `--adapter` for Qwen3.5 models (basal-omni-pico): vLLM has no deterministic preset for them and its answers move between starts of the same server, so they could not be checked against the merged checkpoint's (serve them with `fast`, `eager` or `mlx`, or a `basal-fuse-adapter` checkpoint with `vllm`) |
+  | `gguf`, `ollama`, `llamacpp`, FP8 checkpoints (`-FP8`) | refused: `basal-fuse-adapter --model M --adapter DIR --out FUSED` writes the merged checkpoint, then `basal-export-gguf`; the adapter's calibration files are copied with `fitted_on` naming the merged model (`fused_from` keeps the origin), files fitted with another adapter are left out |
+  | `nvfp4`, `int8` | refused: these modes serve only with a calibration (and NVFP4 activation scales) measured on the model itself; fuse the adapter and calibrate the fused checkpoint for the mode |
+  | `fast-exit` | refused: its exit heads and their thresholds were trained on the base model's hidden states (serve with `fast`) |
+
+  `basal-fuse-adapter` rewrites the model's safetensors files with the decoder layers' weights merged as `--adapter`
+  merges them at load (the same tensor names, dtypes and shards) and copies the other files, except the base model's
+  `CALIBRATION` files, NVFP4 activation scales and checksums, which do not hold for the merged weights. It reads one
+  weights file at a time.
+
+  The merge is PEFT's `merge_and_unload` on every framework: `(B @ A) · scale` in float32, added to the weight in
+  float32 and rounded once to the weight's dtype. The update is computed once on the CPU for every engine (the graph
+  engines merge before moving the model to the GPU), so `--adapter` and the `basal-fuse-adapter` checkpoint have the
+  same weights bit for bit whatever the device, and on the CPU the same weights as PEFT's merge. (mlx-lm's `fuse`
+  rounds the update to bf16 before adding it, which leaves about 0.4% of a merged weight's elements one unit in the
+  last place apart; on basal-omni models that moved near-tie answers.) Measured with 253 requests (561 questions) sent one at a time:
+  `--adapter` answered bit for bit as the `basal-fuse-adapter` checkpoint and as PEFT's merge with rank-128 rsLoRA
+  adapters of Gemma 4 models, E4B on an H100 in `fast`, `eager` and `vllm` (`--vllm-preset deterministic`) and on an
+  Apple M4 Pro in `mlx`, 31B on an H100 in `fast`, `eager` and `fp8` (also with `--quant-load cpu`), two-way models
+  included, and with a `basal-finetune` adapter of basal-omni-pico in `fast`, `eager` and `mlx`. Send requests one at a
+  time (`basal-run --concurrency 1`) to compare servers: concurrent requests are batched differently from run to run,
+  which moves bf16 probabilities by ~1e-3 on any model. A calibration file in the adapter directory comes before the
+  model's; the model's own file is then loaded for its temperatures only
+  ([CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to)). The evidence head (`"evidence": true`) was trained
+  on the base model's states too: under `--adapter` an evidence request answers HTTP 422.
 
 ## Several GPUs, metrics and health (2.5)
 

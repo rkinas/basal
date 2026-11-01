@@ -45,6 +45,7 @@ from pathlib import Path
 
 import torch
 
+from . import adapter as adapter_module
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
                      VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
@@ -828,12 +829,12 @@ def order_average_arg(value):
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
                    calibration_warning=None, vllm_preset=None, layout=None, two_way=None, option_isolation=False,
-                   certified=None, context=None):
+                   certified=None, context=None, adapter=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
-    model's prompt format, the option orders served, why the --calibration file may not belong to the model and the
-    --vllm-preset (--mode vllm), the two-way limits of a model trained with two-way reading, and whether its options
-    are read in isolated blocks."""
+    model's prompt format, the option orders served, why the --calibration file may not belong to the model, the
+    --vllm-preset (--mode vllm), the two-way limits of a model trained with two-way reading, whether its options
+    are read in isolated blocks and the --adapter identity (name@hash)."""
     entry = {"name": name, "release_date": RELEASE_DATE,
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
@@ -858,7 +859,32 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
         entry["certified"] = certified
     if context is not None:
         entry["context"] = context
+    if adapter:  # the LoRA adapter merged at load (basal-calibrate --url records it)
+        entry["adapter"] = adapter
     return {"models": [entry]}
+
+
+# --adapter: the engines that refuse it, and why
+ADAPTER_REFUSED = dict.fromkeys(("gguf", "ollama", "llamacpp"),
+                                "serves weights the engine cannot merge into (a GGUF file / another process); fuse "
+                                "them with basal-fuse-adapter and convert with basal-export-gguf")
+ADAPTER_REFUSED["exit"] = ("reads exit heads trained on the base model's hidden states, whose thresholds do not hold "
+                           "for the adapter's; serve it with --mode fast")
+# by quantisation of the CUDA graph engine: served only with a calibration (and NVFP4 activation scales) measured on
+# the model itself, which the base model's files are not for the adapter's weights
+ADAPTER_REFUSED["nvfp4"] = ADAPTER_REFUSED["int8"] = (
+    "serves a model with its own calibration for that mode (and NVFP4 activation scales), measured on the base model's "
+    "weights, not the adapter's; fuse it with basal-fuse-adapter and calibrate the fused checkpoint for this mode")
+
+
+def adapter_refused(name, mode, kind):
+    """Why an engine refuses --adapter (basal-serve, basal-bench); kind: a key of ADAPTER_REFUSED."""
+    return f"--adapter {name}: {mode} {ADAPTER_REFUSED[kind]}"
+
+
+def adapter_refused_kind(kind, quant):
+    """The ADAPTER_REFUSED key of a mode's engine kind and quantisation, None when it takes --adapter."""
+    return kind if kind in ADAPTER_REFUSED else quant if quant in ADAPTER_REFUSED else None
 
 
 IMAGE_BUDGETS = (70, 140, 280, 560, 1120)  # soft tokens per image Gemma 4's vision tower takes
@@ -959,9 +985,10 @@ def model_identity(name, md):
     return str(name), None
 
 
-def calibration_mismatch(cal, name, md):
-    """Why a file written by basal-calibrate for another model, or for another revision of this one, does not belong
-    to the served model; None when it does or the file does not say (files that ship with a model)."""
+def calibration_mismatch(cal, name, md, adapter=None):
+    """Why a file written by basal-calibrate for another model, or for another revision of this one, or with another
+    --adapter (or none), does not belong to the served model; None when it does or the file does not say (files that
+    ship with a model)."""
     fitted = cal.get("fitted_on")
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return None
@@ -971,6 +998,9 @@ def calibration_mismatch(cal, name, md):
         return f"it was fitted on {fitted['model']}, the served model is {model}"
     if fitted.get("revision") and rev and fitted["revision"] != rev:
         return f"it was fitted on revision {fitted['revision'][:12]} of {model}, the served revision is {rev[:12]}"
+    fa, sa = fitted.get("adapter"), adapter.identity if adapter else None
+    if fa != sa:
+        return f"it was fitted with adapter {fa or 'none'}, the served adapter is {sa or 'none'}"
     return None
 
 
@@ -978,16 +1008,22 @@ def calibration_mismatch(cal, name, md):
 UNVALIDATED_OUT = ("thresholds", "multi", "task_thresholds", "conformal")
 
 
-def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layout="canonical"):
+def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layout="canonical", adapter=None):
     """The calibration basal-serve applies -> (calibration dict, its file, None or why it is unvalidated). A file
     fitted on other option orders than the served ones gives wrong temperatures and thresholds: the file for the
     served orders, CALIBRATION[.<engine>].o<orders>.json, is used when the model ships one; otherwise the file is kept
     for its temperatures without its thresholds, fitted fallback thresholds, task thresholds and conformal levels
     (max_error defers, tasks report automated: null, answer sets hold every option), and the answers are marked
-    unvalidated. An explicit --calibration file is not replaced."""
+    unvalidated. An explicit --calibration file is not replaced. adapter (--adapter): the adapter directory's own files
+    come first; the model's file is the base model's, kept the same way as a file of other orders. An explicit
+    --calibration file is applied as it is under an adapter too (it may be fitted with one); calibration_mismatch checks
+    its fitted_on.adapter."""
     layout = layout or "canonical"
-    cal = calibration_file(md, kind, path, quant, preset, layout)
+    cal = calibration_file(md, kind, path, quant, preset, layout, adapter.path if adapter else None)
     data = {} if off or not cal.exists() else json.loads(cal.read_text(encoding="utf-8"))
+    if data and adapter and not path and cal.parent != adapter.path:
+        why = f"{cal.name} belongs to the base model, served with --adapter {adapter.name}"
+        return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
     if data and calibration_layout(data) != layout:  # another layout's thresholds do not hold here (2.4.1)
         why = f"{cal.name} was fitted on the {calibration_layout(data)} layout, served with --layout {layout}"
         return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
@@ -1002,22 +1038,24 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
 
 
-def calibration_file(md, kind, path=None, quant=None, preset=None, layout="canonical"):
+def calibration_file(md, kind, path=None, quant=None, preset=None, layout="canonical", adapter_dir=None):
     """The calibration file basal-serve loads: `path` (--calibration), else CALIBRATION.<engine>.json when the model
     ships one for the engine (calibration_name; a --vllm-preset without a file of its own: CALIBRATION.vllm.json),
     else CALIBRATION.json. Another --layout than canonical: CALIBRATION[.<engine>].<layout>.json first (2.4.1; without
-    one the canonical file is loaded and its thresholds are not applied, load_calibration)."""
+    one the canonical file is loaded and its thresholds are not applied, load_calibration). adapter_dir (--adapter):
+    any of these files in the adapter directory (fitted with the adapter) before the model's."""
     if path:
         return Path(path)
     layout = layout or "canonical"
     # 1.5: each engine has its own calibration file when shipped (fp8 too); 2.2.1: each vLLM preset
     engines = dict.fromkeys((calibration_name(kind, quant, preset), calibration_name(kind, quant)))
-    for sfx in ([f".{layout}"] if layout != "canonical" else []) + [""]:
-        for eng in engines:
-            if eng and (md / f"CALIBRATION.{eng}{sfx}.json").exists():
-                return md / f"CALIBRATION.{eng}{sfx}.json"
-        if sfx and (md / f"CALIBRATION{sfx}.json").exists():
-            return md / f"CALIBRATION{sfx}.json"
+    for d in ([Path(adapter_dir)] if adapter_dir else []) + [md]:
+        for sfx in ([f".{layout}"] if layout != "canonical" else []) + [""]:
+            for eng in engines:
+                if eng and (d / f"CALIBRATION.{eng}{sfx}.json").exists():
+                    return d / f"CALIBRATION.{eng}{sfx}.json"
+            if (sfx or d != md) and (d / f"CALIBRATION{sfx}.json").exists():
+                return d / f"CALIBRATION{sfx}.json"
     return md / "CALIBRATION.json"
 
 
@@ -1060,6 +1098,11 @@ class Server:
         if getattr(a, "compile_scope", "model") == "layer" and (kind != "graph" or not comp):
             raise SystemExit(f"--compile-scope layer: the CUDA graph engine's compiled modes (--mode fast), not "
                              f"--mode {a.mode}")
+        # --adapter: read (and refused when it is not a plain LoRA) before any weights are downloaded
+        self.adapter = adapter_module.read(a.adapter) if getattr(a, "adapter", None) else None
+        if self.adapter and adapter_refused_kind(kind, a.quant or quant):
+            raise SystemExit(adapter_refused(self.adapter.name, f"--mode {a.mode}",
+                                             adapter_refused_kind(kind, a.quant or quant)))
         if kind == "gguf" and not a.gguf:
             raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
         if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
@@ -1185,7 +1228,8 @@ class Server:
         if why:
             raise SystemExit(why)
         shared = self.orders != 1 or self.soam  # prefix sharing: option orders, or the questions of a request
-        self.name = a.name or a.model.rstrip("/").split("/")[-1]
+        base = a.model.rstrip("/").split("/")[-1]
+        self.name = a.name or (f"{base}+{self.adapter.name}" if self.adapter else base)
         quant = a.quant or quant
         why = nvfp4_calibration_refused(md, kind, quant, a)
         if why:
@@ -1213,7 +1257,7 @@ class Server:
             self.backend = EagerBackend(md, a.dtype, device=a.device, media=getattr(a, "media", "off") == "on",
                                         forward=getattr(a, "eager_forward", None),
                                         ple_offload=getattr(a, "ple_offload", "off") == "on",
-                                        attn=getattr(a, "eager_attn", "math"))
+                                        attn=getattr(a, "eager_attn", "math"), adapter=self.adapter)
         elif kind == "exit":
             self.backend = ExitGraphBackend(md, a.dtype, quant, compile=comp, heads_dir=a.exit_heads,
                                             default_policy=a.early_exit, attn=attn, merge=merge_arg(a.merge))
@@ -1222,29 +1266,29 @@ class Server:
                                        preset=getattr(a, "vllm_preset", "default"),
                                        fast_prefill=getattr(a, "vllm_fast_prefill", "auto") == "auto",
                                        media=getattr(a, "media", "off") == "on",
-                                       overlap=getattr(a, "vllm_overlap", "off") == "on")
+                                       overlap=getattr(a, "vllm_overlap", "off") == "on", adapter=self.adapter)
         elif kind == "sglang":
-            self.backend = SGLangBackend(md, a.dtype, mem=a.gpu_memory, max_len=a.max_len)
+            self.backend = SGLangBackend(md, a.dtype, mem=a.gpu_memory, max_len=a.max_len, adapter=self.adapter)
         elif kind == "mlx":
             self.backend = MLXBackend(md, quant=quant, packed=getattr(a, "mlx_packed", False),
                                       forward=getattr(a, "mlx_forward", "mlx-lm"),
                                       compute=getattr(a, "mlx_compute", "auto"),
                                       state_cache_gb=getattr(a, "state_cache_gb", 0),
-                                      prefix=getattr(a, "prefix_cache", "off") == "on")
+                                      prefix=getattr(a, "prefix_cache", "off") == "on", adapter=self.adapter)
         elif kind == "mps":
-            self.backend = MPSBackend(md, a.dtype, shared=shared, device=a.device)
+            self.backend = MPSBackend(md, a.dtype, shared=shared, device=a.device, adapter=self.adapter)
         elif kind == "gguf":
             self.backend = GGUFBackend(md, a.gguf)
         elif kind == "strix":
             from .strix import StrixHaloFastBackend
-            self.backend = StrixHaloFastBackend(md, a.dtype)
+            self.backend = StrixHaloFastBackend(md, a.dtype, adapter=self.adapter)
         elif kind == "ollama":
             self.backend = OllamaBackend(md, a.ollama_url, a.ollama_model, parallel=a.http_parallel)
         elif kind == "llamacpp":
             self.backend = LlamaCppBackend(md, a.llamacpp_url, parallel=a.http_parallel)
         elif kind == "tpu":
             from .tpu import TPUBackend
-            self.backend = TPUBackend(md, a.dtype, shared=shared, max_len=a.max_len)
+            self.backend = TPUBackend(md, a.dtype, shared=shared, max_len=a.max_len, adapter=self.adapter)
         else:
             scope = getattr(a, "compile_scope", "model")
             self.backend = GraphBackend(md, a.dtype, quant, compile="layer" if comp and scope == "layer" else comp,
@@ -1262,7 +1306,8 @@ class Server:
                                         fp8_bf16_layers=getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS),
                                         quant_load=getattr(a, "quant_load", "gpu"),
                                         state_cache_bits=getattr(a, "state_cache_bits", 16),
-                                        graph_memory_gb=getattr(a, "graph_memory_gb", None), **nvfp4_args(a, md, quant))
+                                        graph_memory_gb=getattr(a, "graph_memory_gb", None), **nvfp4_args(a, md, quant),
+                                        adapter=self.adapter)
             if getattr(a, "state_cache_lock", "off") == "on":  # before lane() copies the backend
                 self.backend.state_cache_lock = True
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
@@ -1272,29 +1317,39 @@ class Server:
             self.free_lanes = list(self.lanes)
             print(f"basal: --lanes {a.lanes}: {a.lanes - 1} more copies of the graphs in {time.time() - t:.0f} s",
                   flush=True)
+        if self.adapter:  # every backend has consumed the factors (merged, or written to its PEFT directory)
+            self.adapter.deltas.clear()
         self.tok = self.backend.tok
         self.once = once_ids(self.tok)  # the shared part of a request's prompts tokenized once (prompt.tokens_once)
         self.states_cached = states_cached(a, self.backend)
         model = getattr(self.backend, "model", None)  # evidence head: needs the in-process HF model
-        self.evidence = Evidence(md, model, self.tok, self.fmt) if isinstance(model, torch.nn.Module) else None
+        # the head was trained on the base model's final-layer states: not read under --adapter
+        self.evidence = Evidence(md, model, self.tok, self.fmt) if isinstance(model, torch.nn.Module) \
+            and not self.adapter else None
         self.md, self.kind = md, kind
         self.context = context_limit(md, self.backend)
         self.cal, cal, self.cal_unvalidated = load_calibration(md, kind, a.calibration, quant, self.orders,
                                                                 a.no_calibration, getattr(a, "vllm_preset", None),
-                                                                self.layout)
+                                                                self.layout, self.adapter)
         check_calibration(self.cal, self.fmt, cal)
         self.cal_file = cal  # --ui on: named in the configuration view
-        self.cal_mismatch = calibration_mismatch(self.cal, a.model, md) if a.calibration and not a.no_calibration \
-            else None  # a file of your own (--calibration); the files in the model directory belong to it
+        # a file of your own (--calibration) or the adapter's (fitted with an adapter); the files in the model directory
+        # belong to it
+        own = a.calibration or (bool(self.adapter) and cal.parent == self.adapter.path)
+        self.cal_mismatch = calibration_mismatch(self.cal, a.model, md, self.adapter) if own and not a.no_calibration \
+            else None
         if self.cal_mismatch:
             if getattr(a, "strict_calibration", False):
                 raise SystemExit(f"{cal}: {self.cal_mismatch} (--strict-calibration)")
             print(f"basal: warning: {cal.name}: {self.cal_mismatch}; its thresholds were certified on that model "
                   "(refit with basal-calibrate, or --strict-calibration to refuse such a file)", flush=True)
         if self.cal_unvalidated:
+            base_file = self.adapter and not a.calibration and cal.parent != self.adapter.path
             print(f"basal: warning: {self.cal_unvalidated}; its answers are marked \"calibration\": \"unvalidated\" "
-                  "and max_error defers (fit a file for this serving with basal-calibrate, or serve with the file's "
-                  "orders and layout)", flush=True)
+                  "and max_error defers (" + ("fit a file for the adapter with basal-calibrate --adapter and put it in "
+                                              "the adapter directory)" if base_file else
+                                              "fit a file for this serving with basal-calibrate, or serve with the "
+                                              "file's orders and layout)"), flush=True)
         self.temps = self.cal.get("temperature_per_prim", {})
         self.log = open(a.log_decisions, "a", buffering=1, encoding="utf-8") if a.log_decisions else None
         self.letters = {}
@@ -1937,7 +1992,9 @@ class Server:
             raise RequestError("evidence is not available for a state truncated to the context (shorten the state)")
         if ev_q:  # evidence spans: character offsets into the request's state (facts block excluded)
             if not (self.evidence and self.evidence.available):
-                raise RequestError("evidence is not available for this model (no evidence_head.pt)")
+                raise RequestError("evidence is not available with --adapter (the evidence head was trained on the base "
+                                   "model's states)" if getattr(self, "adapter", None) else
+                                   "evidence is not available for this model (no evidence_head.pt)")
             limit = len(_text(body["state"])) if body.get("facts") == "auto" else None
             for q in ev_q:
                 if q["type"] == "multi" or q.get("multi"):
@@ -1985,6 +2042,11 @@ def add_engine_args(ap):
     """The engine options of basal-serve (basal-calibrate runs the same engine in process with them)."""
     ap.add_argument("--model", default="Remek/basal-1.5-4.5B", help="local directory or Hugging Face repo id")
     ap.add_argument("--revision", default=None)
+    ap.add_argument("--adapter", default=None,
+                    help="a LoRA adapter directory merged into the model's weights at load (mlx-lm: adapter_config.json "
+                         "+ adapters.safetensors; PEFT: adapter_config.json + adapter_model.safetensors); vLLM / SGLang "
+                         "take it natively; not with GGUF, Ollama, llama.cpp (basal-fuse-adapter, then "
+                         "basal-export-gguf) or FP8 checkpoints")
     ap.add_argument("--mode", choices=list(MODES), default=None,
                     help="default: fast on CUDA, mlx on Apple Silicon (mps without mlx / mlx-lm), tpu on a TPU VM "
                          "with basal[tpu], eager otherwise")
@@ -2419,7 +2481,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                                            certified=None if getattr(srv, "cal_mismatch", None) else
                                            certified_table(srv.cal),
                                            context={"limit": srv.context[0] if srv.context else None,
-                                                    "overflow": srv.overflow, "truncate_head": srv.trunc_head}))
+                                                    "overflow": srv.overflow, "truncate_head": srv.trunc_head},
+                                           adapter=srv.adapter.identity if getattr(srv, "adapter", None) else None))
 
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})
@@ -2513,7 +2576,9 @@ def main():
     info = (f" attention {attn}" if attn else "") + (f" compact rows {rows}" if rows else "") \
         + (" template prefix" if rows and getattr(srv.backend, "template", None) else "") \
         + (f" forward {fwd}" if isinstance(fwd, str) else "") \
-        + (" compute bfloat16" if getattr(srv.backend, "compute", None) == "bfloat16" else "")
+        + (" compute bfloat16" if getattr(srv.backend, "compute", None) == "bfloat16" else "") \
+        + (f" adapter {srv.adapter.name} ({srv.backend.adapter_modules} layers)" if srv.adapter else "") \
+        + ((f" calibration {srv.cal_file}" if srv.cal else " uncalibrated") if srv.adapter else "")
     # everything built so far (weights, graphs, compiled code) lives as long as the server: out of the garbage
     # collector's sight, so a full collection no longer walks it (up to 1.4 s each at the end of start-up on 4.5B, and
     # a 2.9 s stall of one request under nsys, 20 Oct)

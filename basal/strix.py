@@ -30,6 +30,7 @@ import triton
 import triton.language as tl
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from . import adapter as adapter_module
 from .engine import GraphBackend
 from .prompt import PREFILL
 
@@ -244,7 +245,7 @@ class StrixHaloFastBackend(GraphBackend):
                 out.append(f"{name} projection {k} -> {n} (multiples of {bk} -> {bn})")
         return out
 
-    def __init__(self, model_dir, dtype="bfloat16", warm=True):
+    def __init__(self, model_dir, dtype="bfloat16", warm=True, adapter=None):
         if dtype != "bfloat16":
             raise ValueError("--mode strix runs bf16 only")
         if not torch.version.hip:
@@ -252,7 +253,9 @@ class StrixHaloFastBackend(GraphBackend):
                              "Strix Halo)")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.bfloat16).cuda().eval()
+        self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.bfloat16)
+        self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0  # on the CPU
+        self.model = self.model.cuda().eval()
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL
         self.shared = True

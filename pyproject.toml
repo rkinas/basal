@@ -60,6 +60,7 @@ basal-attach = "basal.attach:main"
 basal-viz = "basal.viz:main"
 basal-interpolate = "basal.interpolate:main"
 basal-navigate = "basal.navigate:main"
+basal-fuse-adapter = "basal.adapter:main"
 
 [tool.setuptools]
 packages = ["basal"]

@@ -43,6 +43,7 @@ import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from . import adapter as adapter_module
 from .prompt import PREFILL, RequestError, check_option_tokenizer, model_option_isolation, model_two_way
 
 
@@ -118,7 +119,7 @@ class EagerBackend:
     sdpa_kernels = None  # eager_sdpa_kernels: the SDPA kernels of the transformers forward (None: every enabled one)
 
     def __init__(self, model_dir, dtype="bfloat16", device=None, media=False, forward=None, ple_offload=False,
-                 attn="math"):
+                 attn="math", adapter=None):
         two_way = model_two_way(model_dir)  # basal.json "two_way": read as the model was trained (Gemma 4 only)
         iso = model_option_isolation(model_dir)  # basal.json "option_isolation": isolated option blocks (Gemma 4 only)
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -142,6 +143,7 @@ class EagerBackend:
             _memo_media(self.proc)
         self.lock, self.media_lock = threading.Lock(), threading.Lock()
         self.model = cls.from_pretrained(model_dir, dtype=getattr(torch, dtype))
+        self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0  # --adapter
         if ple_offload:  # --ple-offload on (Gemma 4 E2B / E4B): the per-layer embedding table stays in host memory
             from .gemma4 import offload_ple
             if not offload_ple(self.model):
@@ -1286,7 +1288,7 @@ class GraphBackend(EagerBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 global_attn="flex"):
+                 global_attn="flex", adapter=None):
         if compile:
             persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
@@ -1354,13 +1356,22 @@ class GraphBackend(EagerBackend):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         if self.fp8_checkpoint:
+            if adapter:
+                raise ValueError(f"--adapter {adapter.name}: {model_dir} is an FP8 checkpoint; its weights cannot take "
+                                 "a merge, serve the bf16 repository with --quant fp8")
             if quant not in (None, "fp8"):
                 raise ValueError(f"{model_dir} is an FP8 checkpoint; serve it without --quant {quant}")
             self.model, quant = load_modelopt_fp8(model_dir, "cuda", getattr(torch, dtype)), None
-        elif quant_load == "cpu":  # the bf16 weights stay in host memory until _gemma_init moves them, layer by layer
-            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).eval()
+            self.adapter_modules = 0  # an adapter was refused above
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype)).cuda().eval()
+            self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype))
+            # --adapter: merged on the CPU (as basal-fuse-adapter, so the weights are the same), before the projection
+            # merge and the torchao quantisation
+            self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0
+            if quant_load == "cpu":  # the bf16 weights stay in host memory until _gemma_init moves them, layer by layer
+                self.model = self.model.eval()
+            else:
+                self.model = self.model.cuda().eval()
         self.quant_load = quant_load
         self.dev = (torch.device("cuda", torch.cuda.current_device()) if quant_load == "cpu"
                     else next(self.model.parameters()).device)
@@ -2994,6 +3005,7 @@ class ExitGraphBackend(GraphBackend):
 
     def __init__(self, model_dir, dtype="bfloat16", quant=None, compile=False, heads_dir=None, default_policy="off",
                  attn="auto", merge="auto"):
+        # no --adapter: the exit heads and their thresholds were trained on the base model's hidden states
         super().__init__(model_dir, dtype, quant, compile=False, shared=True, warm=False, attn=attn, merge=merge)
         hd = Path(heads_dir) if heads_dir else Path(model_dir) / "exit_heads"
         ck = torch.load(hd / "heads.pt", map_location="cpu")
@@ -3125,14 +3137,14 @@ class MPSBackend(GraphBackend):
                 return super().__new__(GDNMPSBackend)
         return super().__new__(cls)
 
-    def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None):
+    def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None, adapter=None):
         what = recurrent_layers(model_dir) if shared else None  # without sharing: EagerBackend's forwards (exact)
         if what:
             from .gdn_graph import is_gdn
             raise ValueError(recurrent_refused(model_dir, what, is_gdn(model_dir)))
         mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
         device = device or ("mps" if mps else "cpu")
-        EagerBackend.__init__(self, model_dir, dtype, device)
+        EagerBackend.__init__(self, model_dir, dtype, device, adapter=adapter)
         self.dev = torch.device(device)
         self.shared = shared
         self._wrows = {}
@@ -3264,6 +3276,15 @@ class _VLLMOverlap:
         return asyncio.run_coroutine_threadsafe(self.engine.collective_rpc(method, *args, **kw), self.loop).result()
 
 
+def vllm_adapter_refused(name, what):
+    """--mode vllm --adapter on a model of recurrent-state layers (Qwen3.5): vLLM has no deterministic preset for them
+    (--vllm-preset deterministic is refused), and its answers move between starts of the same server (one readout in
+    558 by 0.002 on basal-omni-pico), so they could not be shown equal to the merged checkpoint's."""
+    return (f"--adapter {name}: --mode vllm does not take an adapter for a model with {what} (Qwen3.5): vLLM has no "
+            "deterministic preset for it, so its answers could not be checked against the merged checkpoint's; serve "
+            "it with --mode fast or eager, or serve a checkpoint written by basal-fuse-adapter with --mode vllm")
+
+
 class VLLMBackend:
     """vLLM backend: bf16 checkpoints and the ModelOpt FP8 / NVFP4 ports, with the engine settings of a --vllm-preset
     (VLLM_PRESETS, vllm_args). One generated token restricted to the option letters; with
@@ -3282,7 +3303,13 @@ class VLLMBackend:
     media_kinds, max_audio_s, unified = (), None, False
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, max_options=10, preset="default",
-                 fast_prefill=True, media=False, overlap=False):
+                 fast_prefill=True, media=False, overlap=False, adapter=None):
+        # --adapter: vLLM serves a copy of the checkpoint with the adapter merged (adapter.fused_copy), the weights
+        # basal-fuse-adapter writes, so its answers are those of the fused checkpoint
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
+        if adapter and recurrent_layers(model_dir):
+            raise SystemExit(vllm_adapter_refused(adapter.name, recurrent_layers(model_dir)))
+        model_dir = adapter_module.fused_copy(model_dir, adapter) if adapter else model_dir
         cfg_file = Path(model_dir) / "config.json"
         cfg = json.loads(cfg_file.read_text(encoding="utf-8")) if cfg_file.exists() else {}
         kw, env = vllm_args(cfg, preset, media=media, fast_prefill=fast_prefill)
@@ -3314,7 +3341,6 @@ class VLLMBackend:
             vllm_unified.check(self.llm)
         self.context = max_len - 1  # longest prompt: max_model_len holds the one generated token too
         self.context_reason = f"vLLM's --max-len {max_len}"
-
     def run(self, prompts, ids_list):
         from vllm.inputs import TokensPrompt
         reqs = [TokensPrompt(prompt_token_ids=list(ids)) for ids in EagerBackend.encode(self, prompts)]
@@ -3381,8 +3407,11 @@ class SGLangBackend:
     (a softmax over a subset of log-softmax values is the softmax over the same logits). RadixAttention shares the
     state between the option orders of one question and between the questions of one request."""
 
-    def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096):
+    def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, adapter=None):
         import sglang
+        # --adapter: SGLang serves a copy of the checkpoint with the adapter merged, as vLLM (VLLMBackend)
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
+        model_dir = adapter_module.fused_copy(model_dir, adapter) if adapter else model_dir
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
         self.llm = sglang.Engine(model_path=str(model_dir), dtype=dtype, mem_fraction_static=mem,
@@ -3549,7 +3578,7 @@ class MLXBackend:
     COMPUTES = ("auto", "bf16")
 
     def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm", state_cache_gb=0,
-                 prefix=False, compute="auto"):
+                 prefix=False, compute="auto", adapter=None):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
@@ -3559,12 +3588,13 @@ class MLXBackend:
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
         self.max_rows = max_rows or self.MAX_ROWS
-        self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute).result()
+        self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute, adapter).result()
 
-    def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto"):
+    def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto", adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
         load time from bf16 weights (the embeddings and the LM head stay bf16); the -MLX-8bit exports need no quant.
-        forward: "mlx-lm" or "basal" (basal/mlx_forward.py where the architecture allows)."""
+        forward: "mlx-lm" or "basal" (basal/mlx_forward.py where the architecture allows). adapter: a LoRA adapter
+        merged into the loaded weights (bf16, or dequantised and re-quantised for an export), before q8."""
         from .gdn_graph import is_gdn
         what = recurrent_layers(md)
         if what and not is_gdn(md):  # before mlx is imported or any weights are read
@@ -3596,6 +3626,9 @@ class MLXBackend:
                              "its bf16 weights with --mode mlx")
         # lazy for q8: the weights are materialised once, after quantisation (never the full bf16 copy)
         self.model, self.config = load_model(md, lazy=bool(quant), model_config=mlx_config_overrides(cfg))
+        # --adapter: merged before q8 quantises the merged bf16 weights; merge_mlx evaluates only the adapter's layers,
+        # so q8 still never materialises the full bf16 copy (keep this order)
+        self.adapter_modules = adapter_module.merge_mlx(self.model, adapter) if adapter else 0
         # the final logit softcap of the decoder (Gemma) is applied to the fp32 code logits
         self.softcap = getattr(self.lm.args, "final_logit_softcapping", None)
         self.quantization = self.config.get("quantization")
