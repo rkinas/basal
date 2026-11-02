@@ -51,8 +51,8 @@ unless a line says otherwise. All changes and the known limits: [WHATS_NEW](docs
 - **APIs, clients and tools**: OpenAI's Decisions API (`POST /v1/decisions`), `AsyncBasal`, a TypeScript client,
   presets, [LangChain / LlamaIndex / CrewAI tools](docs/SERVING.md#agent-frameworks-and-ready-question-sets-25);
   `basal-attach`, `basal-agree`, `basal-finetune`, `basal-selfcheck` and `basal-interpolate`.
-- Thank you to Miłosz Kucharski, Paweł Kiszczak, Marcin Brzeżański, Dariusz Koryto, Grzegorz Stark and Michał Kardyś for
-  their pull requests.
+- Thank you to Miłosz Kucharski, Paweł Kiszczak, Marcin Brzeżański, Dariusz Koryto, Grzegorz Stark, Michał Kardyś and
+  Grzegorz Brzezinka for their pull requests.
 
 ## Models
 
