@@ -14,7 +14,8 @@ kernels by timing) and, for Qwen3.5 models, times fla's Triton kernels at their 
 `basal-serve --prepared auto` (the default) loads a directory whose key matches before the engine is built: from the
 model directory (prepared/<key>/, shipped with a model) or the user cache (~/.cache/basal/prepared/<key>/, where
 basal-prepare writes). The key covers what the compiled code depends on: the GPU (name and compute capability), the
-torch / triton / CUDA versions (fla's for Qwen3.5 models), the Python and basal versions, the model's architecture
+torch / triton / CUDA versions (fla's for Qwen3.5 models), the Python version and the basal release whose compiled
+code this is (PREPARED_BASAL), the model's architecture
 (config.json, not its weights: they are inputs of the compiled functions), the mode, dtype and attention. Any
 difference: nothing is loaded and the engine compiles as before. CUDA graphs are still captured at every start (they
 hold device addresses). Inductor checks every loaded entry against its own key as well, so a directory that matches
@@ -35,6 +36,10 @@ from pathlib import Path
 import torch
 
 FILES = ("inductor.bin", "fla_configs.json", "manifest.json")
+# The basal version in the key: the release whose compiled code (the engine's layer functions) this one runs. A patch
+# release that changes no compiled code keeps it, so the directories shipped in the model repositories for that
+# release still load (2.5.1: 2.5.0's); a release that changes compiled code sets its own version.
+PREPARED_BASAL = "2.5.0"
 
 
 def cache_root():
@@ -42,10 +47,9 @@ def cache_root():
 
 
 def environment():
-    """What compiled code depends on besides the model: GPU, library versions, basal."""
-    from . import __version__
+    """What compiled code depends on besides the model: GPU, library versions, basal (PREPARED_BASAL)."""
     python = ".".join(platform.python_version_tuple()[:2])  # (a patch release does not change compiled code)
-    env = dict(basal=__version__, torch=torch.__version__, cuda=torch.version.cuda, python=python)
+    env = dict(basal=PREPARED_BASAL, torch=torch.__version__, cuda=torch.version.cuda, python=python)
     try:
         import triton
         env["triton"] = triton.__version__
@@ -86,7 +90,9 @@ def key(fields):
 
 def locate(model_dir, fields, spec="auto"):
     """The prepared directory to load: spec "off" -> None; a path -> that directory if its manifest has these fields;
-    "auto" -> <model_dir>/prepared/<key>, then <cache_root>/<key>, the first whose manifest matches."""
+    "auto" -> <model_dir>/prepared/<key>, then <cache_root>/<key>, the first whose manifest matches. A directory
+    counts only when every file its manifest lists is there: one that holds its manifest alone (as a metadata download
+    of basal 2.5.0 left it in a model's snapshot) is not loaded, so --prepared auto fetches the rest (fetch)."""
     if spec in (None, "off"):
         return None
     k = key(fields)
@@ -95,7 +101,7 @@ def locate(model_dir, fields, spec="auto"):
         m = d / "manifest.json"
         if m.exists():
             man = json.loads(m.read_text(encoding="utf-8"))
-            if man.get("fields") == fields:
+            if man.get("fields") == fields and all((d / f).exists() for f in man.get("files", ())):
                 return d
     return None
 
@@ -120,6 +126,19 @@ def fetch(repo, revision, fields):
             except Exception:  # (a file this directory does not have; load reads what arrived)
                 pass
     return m.parent
+
+
+def startup(model_dir, fields, spec="auto", model=None, revision=None):
+    """basal-serve's prepared start-up -> what was loaded (load), or None: the directory locate finds, else with spec
+    "auto" and a Hugging Face model (`model` not a local path) the one fetched from its repository. A given path that
+    holds none for these fields stops the start."""
+    d = locate(model_dir, fields, spec)
+    if d is None and spec == "auto" and model is not None and not Path(model).exists():
+        d = fetch(model, revision, fields)  # shipped in the model's repository
+    if d is None and spec not in ("auto", "off", None):
+        raise SystemExit(f"--prepared {spec}: no prepared start-up for this model, mode and GPU there "
+                         f"(key {key(fields)}; basal-prepare writes one)")
+    return load(d) if d is not None else None
 
 
 def load(d):

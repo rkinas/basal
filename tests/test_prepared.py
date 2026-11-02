@@ -120,6 +120,14 @@ def test_key_of_a_shipped_directory(tmp_path, monkeypatch):
         prepared.key_fields(g, "fast", env=dict(ENV, fla="0.5.3")))
 
 
+def test_patch_release_keeps_the_key():
+    """The basal version in the key is the release whose compiled code this one runs: 2.5.1 changes no compiled code,
+    so it keys as 2.5.0 and loads the directories shipped for 2.5.0; a new minor release must set its own."""
+    import basal
+    assert prepared.environment()["basal"] == prepared.PREPARED_BASAL == "2.5.0"
+    assert prepared.PREPARED_BASAL.split(".")[:2] == basal.__version__.split(".")[:2]
+
+
 def test_fetch_from_the_model_repository(tmp_path, monkeypatch):
     """--prepared auto with a Hugging Face model: prepared/<key>/ of its repository only (the files its manifest
     lists), next to the snapshot; none when the repository has no such key, its fields differ or the Hub fails."""
@@ -151,14 +159,73 @@ def test_fetch_from_the_model_repository(tmp_path, monkeypatch):
 
 
 def test_download_leaves_prepared_out(monkeypatch, tmp_path):
+    """Both downloads leave prepared/ out: the metadata one too, whose *.json would bring a manifest without its
+    kernels into the snapshot (2.5.0: --prepared auto then found that directory and never fetched inductor.bin)."""
     import huggingface_hub
-    from basal.engine import resolve
+    from basal.engine import METADATA_FILES, resolve
     seen = {}
     monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda name, **kw: (seen.update(kw), str(tmp_path))[1])
     resolve("Remek/x-not-local")
     assert seen["ignore_patterns"] == ["prepared/*"] and seen["allow_patterns"] is None
     resolve("Remek/x-not-local", metadata_only=True)
-    assert seen["ignore_patterns"] is None
+    assert seen["ignore_patterns"] == ["prepared/*"] and seen["allow_patterns"] == METADATA_FILES
+
+
+def manifest_only(d, fields, files=("inductor.bin", "manifest.json")):
+    """A prepared directory as a 2.5.0 metadata download left it in a snapshot: the manifest, none of its files."""
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "manifest.json").write_text(json.dumps(dict(fields=fields, key=prepared.key(fields), files=list(files))))
+    return d
+
+
+def test_incomplete_directory_is_not_located(tmp_path, monkeypatch):
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    m = gdn_model(tmp_path / "m")
+    f = prepared.key_fields(m, "fast", env=ENV)
+    shipped = manifest_only(m / "prepared" / prepared.key(f), f, ("fla_configs.json", "inductor.bin", "manifest.json"))
+    assert prepared.locate(m, f) is None
+    assert prepared.locate(m, f, str(shipped)) is None  # a given path as well
+    c = manifest_only(tmp_path / "cache" / prepared.key(f), f)
+    (c / "inductor.bin").write_bytes(b"kernels")
+    assert prepared.locate(m, f) == c  # the next candidate, complete
+    (shipped / "inductor.bin").write_bytes(b"kernels")
+    assert prepared.locate(m, f) == c  # fla_configs.json still missing
+    (shipped / "fla_configs.json").write_text("{}")
+    assert prepared.locate(m, f) == shipped
+
+
+def test_start_fetches_what_the_snapshot_misses(tmp_path, monkeypatch):
+    """basal-serve's path (startup) over a snapshot that holds the manifest only: the directory is fetched from the
+    model's repository and its kernels loaded; a later start finds it complete and asks the Hub for nothing."""
+    import huggingface_hub
+
+    import basal.engine
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    snap = model(tmp_path / "snap")
+    f = prepared.key_fields(snap, "fast", env=ENV)
+    k = prepared.key(f)
+    manifest_only(snap / "prepared" / k, f)
+    repo = {f"prepared/{k}/manifest.json": (snap / "prepared" / k / "manifest.json").read_text(),
+            f"prepared/{k}/inductor.bin": "kernels"}
+    asked, loaded = [], []
+
+    def download(name, filename, revision=None):
+        asked.append(filename)
+        p = snap / filename
+        p.write_text(repo[filename])
+        return str(p)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    monkeypatch.setattr(basal.engine, "persist_compile_cache", lambda: None)
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda b: loaded.append(b))
+    out = prepared.startup(snap, f, "auto", "Remek/x", "main")
+    assert asked == [f"prepared/{k}/manifest.json", f"prepared/{k}/inductor.bin"]
+    assert loaded == [b"kernels"] and out == {"dir": str(snap / "prepared" / k), "inductor": 0}
+    asked.clear()
+    assert prepared.startup(snap, f, "auto", "Remek/x", "main")["dir"] == str(snap / "prepared" / k) and asked == []
+    assert prepared.startup(snap, f, "off", "Remek/x", "main") is None and asked == []
+    assert prepared.startup(snap, f, "auto", str(snap), None)["dir"] == str(snap / "prepared" / k)  # a local model
+    with pytest.raises(SystemExit, match="no prepared start-up"):
+        prepared.startup(snap, f, str(manifest_only(tmp_path / "given", f)), "Remek/x", "main")
 
 
 def test_broken_inductor_file_is_left_out(tmp_path, monkeypatch):

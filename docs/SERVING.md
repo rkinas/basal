@@ -85,8 +85,9 @@ benchmarking a GPU.
 - **Prepared start-up** (2.5): `basal-prepare --model <model> [--mode fast|fp8|nvfp4]` starts the engine once on this GPU
   and saves what it compiled (Inductor's kernels and autotuning results, and for Qwen3.5 models the configs fla's
   kernels picked) under `~/.cache/basal/prepared/<key>` (or `--out`). `basal-serve --prepared auto` (the default) loads
-  such a directory before compiling when its key matches: the GPU, the torch / triton / fla / CUDA and basal versions,
-  the model's architecture (config.json; fine-tunes of one architecture share it), the mode, dtype and attention. A
+  such a directory before compiling when its key matches: the GPU, the torch / triton / fla / CUDA and basal versions
+  (a basal patch release that changes no compiled code keeps the key: 2.5.1 loads 2.5.0's directories), the model's
+  architecture (config.json; fine-tunes of one architecture share it), the mode, dtype and attention. A
   model may ship its own under `prepared/<key>/`. Then the server compiles nothing it has not seen and picks the same
   kernels in every start; CUDA graphs are still captured. `--prepared off` compiles as before; `--prepared <dir>`
   loads that directory or refuses to start.

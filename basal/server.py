@@ -1244,13 +1244,7 @@ class Server:
         if kind in ("graph", "exit") and comp and getattr(a, "prepared", "auto") != "off" and torch.cuda.is_available():
             from . import prepared
             fields = prepared.key_fields(md, a.mode, a.dtype, attn)
-            d = prepared.locate(md, fields, getattr(a, "prepared", "auto"))
-            if d is None and getattr(a, "prepared", "auto") == "auto" and not Path(a.model).exists():
-                d = prepared.fetch(a.model, a.revision, fields)  # shipped in the model's repository
-            if d is None and getattr(a, "prepared", "auto") not in ("auto", "off"):
-                raise SystemExit(f"--prepared {a.prepared}: no prepared start-up for this model, mode and GPU there "
-                                 f"(key {prepared.key(fields)}; basal-prepare writes one)")
-            self.prepared = prepared.load(d) if d is not None else None
+            self.prepared = prepared.startup(md, fields, getattr(a, "prepared", "auto"), a.model, a.revision)
             print(f"basal: prepared start-up: {self.prepared or 'none for this GPU and version (basal-prepare writes it)'}",
                   flush=True)
         if kind == "eager":

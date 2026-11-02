@@ -57,9 +57,10 @@ def resolve(name, revision=None, metadata_only=False):
     if p.exists():
         return p
     from huggingface_hub import snapshot_download
-    # (prepared/: start-up kernels per GPU class; basal-serve fetches its own one, prepared.fetch)
+    # (prepared/: start-up kernels per GPU class; basal-serve fetches its own one, prepared.fetch. Left out of the
+    # metadata download as well: its *.json would bring a prepared manifest into the snapshot without its kernels)
     return Path(snapshot_download(name, revision=revision, allow_patterns=METADATA_FILES if metadata_only else None,
-                                  ignore_patterns=None if metadata_only else ["prepared/*"]))
+                                  ignore_patterns=["prepared/*"]))
 
 
 def default_device():
