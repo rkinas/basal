@@ -15,5 +15,5 @@ WHATS_NEW.md itself, so open pull requests do not conflict on its first lines.
 - A change too small for the release notes needs no fragment.
 
 At release, `python scripts/changelog.py` prints the next section from the fragments, and
-`python scripts/changelog.py 2.4.2` puts it at the top of WHATS_NEW.md as "What is new in basal 2.4.2" (entries in
+`python scripts/changelog.py 2.5.1` puts it at the top of WHATS_NEW.md as "What is new in basal 2.5.1" (entries in
 PR order) and removes the fragments. The section can then be edited by hand like any other.

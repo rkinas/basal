@@ -252,8 +252,8 @@ basal-1.5 and basal-1.0 remain on Hugging Face and are served unchanged by this 
 Thank you to [Paweł Kiszczak](https://github.com/pawelkiszczak), [Piotr Durlej](https://github.com/pdurlej), [Kuba Sołtys](https://github.com/qooba),
 [Michał Kardyś](https://github.com/kardysm), [@lukaspoloki](https://github.com/lukaspoloki), [Miłosz Kucharski](https://github.com/Butterski),
 [Grzegorz Brzezinka](https://github.com/agentGreg), [@piotrkowski](https://github.com/piotrkowski), [@lukaszpodgorski-pl](https://github.com/lukaszpodgorski-pl),
-[Marcin Brzeżański](https://github.com/marcinbrzezanski) and [Grzegorz Stark](https://github.com/gstark0), whose pull requests are in this
-repository, and to [Kamil](https://github.com/kamilrosa) and [@krzysztofkaminski](https://github.com/krzysztofkaminski) for their measurements.
+[Marcin Brzeżański](https://github.com/marcinbrzezanski), [Grzegorz Stark](https://github.com/gstark0) and [Dariusz Koryto](https://github.com/dkoryto), whose pull
+requests are in this repository, and to [Kamil](https://github.com/kamilrosa) and [@krzysztofkaminski](https://github.com/krzysztofkaminski) for their measurements.
 What each one contributed, by pull request: [CONTRIBUTING](CONTRIBUTING.md#contributors-by-pull-request). `--mode tpu`
 and `--mode strix` are community-maintained: their numbers in [HARDWARE](docs/HARDWARE.md) are the contributors' own.
 

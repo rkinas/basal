@@ -2,7 +2,7 @@
 list items, as they read in docs/WHATS_NEW.md), so open pull requests do not edit the same lines of WHATS_NEW.md.
 
   python scripts/changelog.py              the next release's section, from the fragments (nothing is written)
-  python scripts/changelog.py 2.4.2        the section put at the top of docs/WHATS_NEW.md, the fragments removed
+  python scripts/changelog.py 2.5.1        the section put at the top of docs/WHATS_NEW.md, the fragments removed
 """
 import re
 import sys

@@ -98,11 +98,19 @@ not kept.
 
 Thank you to the people whose work is in this repository, by pull request:
 
-- Paweł Kiszczak ([@pawelkiszczak](https://github.com/pawelkiszczak)): the Apple Silicon engines `--mode mlx` /
-  `mlx-q8` and `--mode mps`, the in-process GGUF engine `--mode gguf` (llama-cpp-python) and `--mode ollama`, and the
-  comparison of Apple Silicon engines and quantised formats (MLX, oMLX oQ, GGUF) with its figures in
-  [HARDWARE.md](docs/HARDWARE.md#apple-silicon) ([#4](https://github.com/rkinas/basal/pull/4)); the development
-  commands (`make`) and read-only pre-commit checks ([#46](https://github.com/rkinas/basal/pull/46)).
+- Paweł Kiszczak ([@pawelkiszczak](https://github.com/pawelkiszczak)): the Apple Silicon engines `--mode mlx` / `mlx-q8`
+  and `--mode mps`, the in-process GGUF engine `--mode gguf` (llama-cpp-python) and `--mode ollama`, and the comparison
+  of Apple Silicon engines and quantised formats (MLX, oMLX oQ, GGUF) with its figures in
+  [HARDWARE.md](docs/HARDWARE.md#apple-silicon) ([#4](https://github.com/rkinas/basal/pull/4)); the development commands
+  (`make`) and read-only pre-commit checks ([#46](https://github.com/rkinas/basal/pull/46)); LoRA adapters merged at
+  load (`--adapter`, [#52](https://github.com/rkinas/basal/pull/52)), a `code` in error responses
+  ([#62](https://github.com/rkinas/basal/pull/62)), the certified thresholds and the context in `GET /v1/models`
+  ([#64](https://github.com/rkinas/basal/pull/64)), MCP model selection
+  ([#66](https://github.com/rkinas/basal/pull/66)), `--api-keys`, `--cors-origins` and `x-request-id`
+  ([#68](https://github.com/rkinas/basal/pull/68)), `basal-calibrate` on a Hugging Face cache snapshot
+  ([#71](https://github.com/rkinas/basal/pull/71)), and `basal-viz` with `"facts": "auto"`
+  ([#73](https://github.com/rkinas/basal/pull/73)) and on Gemma 4 basal-omni text decisions
+  ([#75](https://github.com/rkinas/basal/pull/75)).
 - Piotr Durlej ([@pdurlej](https://github.com/pdurlej)): `basal-export-gguf`, which converts a basal model to GGUF, or
   repairs an existing GGUF file, so that its tokenizer matches the Hugging Face one, as in the official `-GGUF` files
   ([#8](https://github.com/rkinas/basal/pull/8)).
@@ -134,23 +142,32 @@ Thank you to the people whose work is in this repository, by pull request:
   ([#44](https://github.com/rkinas/basal/pull/44)) and `--compile-scope layer`
   ([#49](https://github.com/rkinas/basal/pull/49)).
 - Grzegorz Brzezinka ([@agentGreg](https://github.com/agentGreg)): the calibration report's per-type ECE as
-  `basal-serve` applies the temperatures ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count
-  for the 1% target in CALIBRATION.md ([#25](https://github.com/rkinas/basal/pull/25)), the Apple M5 Max
-  benchmark tables in [HARDWARE.md](docs/HARDWARE.md) ([#18](https://github.com/rkinas/basal/pull/18)), and
-  `--mlx-packed`, two option orders in one forward on Apple Silicon, with its root cause
-  ([#27](https://github.com/rkinas/basal/issues/27), [#28](https://github.com/rkinas/basal/pull/28)), and two fixes
-  to the facts block: amounts with a dot thousands separator ([#31](https://github.com/rkinas/basal/pull/31)) and
-  "roku" after a date, which is not a one-year duration ([#32](https://github.com/rkinas/basal/pull/32)).
+  `basal-serve` applies the temperatures ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count for
+  the 1% target in CALIBRATION.md ([#25](https://github.com/rkinas/basal/pull/25)), the Apple M5 Max benchmark tables in
+  [HARDWARE.md](docs/HARDWARE.md) ([#18](https://github.com/rkinas/basal/pull/18)), and `--mlx-packed`, two option
+  orders in one forward on Apple Silicon, with its root cause ([#27](https://github.com/rkinas/basal/issues/27),
+  [#28](https://github.com/rkinas/basal/pull/28)), and two fixes to the facts block: amounts with a dot thousands
+  separator ([#31](https://github.com/rkinas/basal/pull/31)) and "roku" after a date, which is not a one-year duration
+  ([#32](https://github.com/rkinas/basal/pull/32)); the float32 MLX tests without TF32 on Apple M5
+  ([#76](https://github.com/rkinas/basal/pull/76)) and `basal-viz` on the MLX engine
+  ([#78](https://github.com/rkinas/basal/pull/78)).
 - [@piotrkowski](https://github.com/piotrkowski): `--mode strix` reproduced on a second Strix Halo (ROG Flow Z13),
   bit-identical edge cases and a similar speed-up ([#21](https://github.com/rkinas/basal/pull/21)).
 - [@lukaszpodgorski-pl](https://github.com/lukaszpodgorski-pl): basal on Windows: kernel checks for torch builds without
   FlashAttention or Triton, and UTF-8 for every text file ([#38](https://github.com/rkinas/basal/pull/38)).
 - Marcin Brzeżański ([@marcinbrzezanski](https://github.com/marcinbrzezanski)): Prometheus metrics: the engine version,
   the state cache's evictions and prefix hits, and a cache read that never waits for the engine
-  ([#48](https://github.com/rkinas/basal/pull/48)).
+  ([#48](https://github.com/rkinas/basal/pull/48)); a state cache that keeps the branches of shared histories
+  ([#56](https://github.com/rkinas/basal/pull/56)).
 - Grzegorz Stark ([@gstark0](https://github.com/gstark0)): `--state-cache-gb` and `--prefix-cache` on Apple Silicon
   (`--mode mlx`), with the guard against MLX's fused attention losing precision for a few queries over a cache
   ([#50](https://github.com/rkinas/basal/pull/50)).
+- Dariusz Koryto ([@dkoryto](https://github.com/dkoryto)): continuous integration, ruff and the CPU tests on Linux and
+  macOS for every pull request ([#53](https://github.com/rkinas/basal/pull/53)); a Python client for every question
+  type, with `AsyncBasal` ([#58](https://github.com/rkinas/basal/pull/58)); a question named `<task>::<part>` in a
+  request with task questions refused instead of misread ([#59](https://github.com/rkinas/basal/pull/59));
+  `basal-interpolate` ([#60](https://github.com/rkinas/basal/pull/60)); and changelog fragments in `docs/changes`
+  ([#55](https://github.com/rkinas/basal/pull/55)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),
