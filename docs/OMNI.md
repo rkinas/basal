@@ -7,7 +7,7 @@ question. They are trained on text; with `--media on` the server also takes imag
 ## Serve
 
 ```bash
-uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
+uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.1.tar.gz"
 basal-serve --model Remek/basal-omni-1.0-max --mode eager --media on --port 8000    # or Remek/basal-omni-1.0-mini
 ```
 

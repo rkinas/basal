@@ -1,3 +1,16 @@
+# What is new in basal 2.5.1
+
+Released 2 November 2026. A bug fix; defaults and answers are unchanged.
+
+- **`--prepared auto` loads the start-up kernels shipped in the model repositories:** in 2.5.0 the server's first,
+  metadata-only download brought a repository's `prepared/<key>/manifest.json` into the model's snapshot without its
+  `inductor.bin`; the server took that directory as found, never fetched the kernels and compiled as on a cold start.
+  Now no download takes `prepared/` along, and a prepared directory counts only when every file its manifest lists is
+  there, so the server fetches the missing ones (also into snapshots 2.5.0 left incomplete). The directories shipped
+  for 2.5.0 load in 2.5.1 (the compiled code is the same). On 2.5.0, download the directory once before the first
+  start: `hf download Remek/basal-omni-1.0-mini --include "prepared/*"`. Answers never changed: without the kernels
+  the server compiles them as before. Directories written by `basal-prepare` on your machine were not affected.
+
 # What is new in basal 2.5
 
 Released 2 November 2026. Default answers to decision requests are byte-identical to 2.4.1 (checked on an H100:
