@@ -353,8 +353,8 @@ is new is opt-in unless a line says otherwise.
   [#48](https://github.com/rkinas/basal/pull/48).
 - **Development commands:** `make help` lists them: `make setup`, `make test`, `make serve MODE=...`, `make bench`,
   `make run`, `make loadtest`, and `make check`, read-only pre-commit checks with pinned versions (Python syntax and
-  undefined names, merge markers, private keys, TOML / YAML / JSON / JSONL syntax), no Git hook installed. README
-  "Development commands". Contributed by Paweł Kiszczak (@pawelkiszczak),
+  undefined names, merge markers, private keys, TOML / YAML / JSON / JSONL syntax), no Git hook installed.
+  [CONTRIBUTING.md](../CONTRIBUTING.md#development-commands). Contributed by Paweł Kiszczak (@pawelkiszczak),
   [#46](https://github.com/rkinas/basal/pull/46).
 - **A Triton kernel for basal-omni's 512-wide global layers** (`--global-attn triton`, Hopper; opt-in, off by default:
   faster on long states, but the answers differ from the default FlexAttention path's): single prompts and the states

@@ -28,7 +28,7 @@ help:
 	  'MODEL empty uses the default model of basal-serve / basal-bench; HOST=0.0.0.0 listens on every interface' \
 	  'MODE: eager fast fast-nocompile fast-exit fp8 nvfp4 int8 vllm sglang mlx mlx-q8 mps gguf strix ollama llamacpp tpu' \
 	  'GGUF mode requires GGUF=<file>; Ollama mode requires OLLAMA_MODEL=<import name>' \
-	  'ARGS appends CLI options (shell quoting applies); see README for setup and examples.'
+	  'ARGS appends CLI options (shell quoting applies); see CONTRIBUTING.md for setup and examples.'
 
 setup:
 	"$$UV" pip install --python "$$PYTHON" -e ".[$$EXTRAS]"
