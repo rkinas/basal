@@ -35,7 +35,7 @@ answers, and triage with a confidence threshold that sends uncertain cases to a 
 
 ## What is new in basal 2.5
 
-Released 3 November 2026. Default answers to decision requests are byte-identical to 2.4.1 (checked on an H100:
+Released 2 November 2026. Default answers to decision requests are byte-identical to 2.4.1 (checked on an H100:
 basal-omni-1.0-mini, basal-omni-1.0-max and basal-omni-pico with `--mode fast`, mini and pico with `--mode eager`); what
 is new is opt-in unless a line says otherwise.
 
