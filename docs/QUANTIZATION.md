@@ -111,6 +111,45 @@ path. The automated decisions made no error on either path. `--mlx-packed` stays
 basal-2.0-4.5B-MLX-8bit the lower bound of the change in the automated share at 5% (-0.60 pt) is below our -0.5 pt
 bar for a change of path under a shipped calibration file.
 
+`--mlx-forward basal` (opt-in, 2.5; the default `mlx-lm` is the path above) runs Llama (basal-1.x, 2.x) and Gemma 4
+(basal-omni) through basal's own loop over mlx-lm's layers and weights. From the last layer with its own keys and
+values on, only the readout rows run (that layer still computes its keys and values at every position): for Llama
+the last layer, for Gemma 4 E2B / E4B the last 19 of 42 layers (the
+last 18 reuse the keys and values of earlier layers). A shared state stops after that layer's keys and values. The
+projections that read one input become one matrix where a self-check at load finds the same bits (on our models
+gate / up; q / k / v stays separate). With every layer at every position this forward equals mlx-lm's bit for bit;
+the readout rows only change the rounding. Our checks on an Apple M4 Pro (24 GB): 184 readouts per model (the 44
+bundled items in two orders, and four questions in two orders over 1,000- and 3,000-token states), against PyTorch
+eager on MPS, and the median of 7 (mini) or 5 (omni) interleaved runs:
+
+| | basal-2.0-mini-MLX-8bit | basal-omni-1.0-mini-MLX |
+|---|---|---|
+| top answer = eager bf16, `mlx-lm` -> `basal` | 178 -> 178 / 184 | 181 -> 181 / 184 |
+| top answer = default path | 184 / 184 | 184 / 184 |
+| mean / largest probability change vs the default path | 0.0001 / 0.0008 | 0.0019 / 0.070 |
+| one prompt (ms) | 93 -> 90 | 225 -> 131 |
+| one question, two orders (ms) | 126 -> 121 | 222 -> 179 |
+| four questions x two orders over 1,000 tokens (ms) | 972 -> 972 | 1,717 -> 1,462 |
+| one prompt over 3,000 tokens (ms) | 1,877 -> 1,922 | 5,341 -> 3,003 |
+
+In fp32 (basal-2.0-mini) both forwards give eager-fp32's top answer on all 184 readouts. The gain is where the skipped
+layers are: basal-omni at its readout rows, little for Llama (one layer of 32). The shipped `CALIBRATION.mlx.json`
+was fitted on the default path, so check `--mlx-forward basal` against it before relying on the calibrated
+thresholds; on basal-omni the probabilities move more (8-bit matmuls of a few rows round differently).
+
+basal-omni-pico (Qwen3.5, Gated DeltaNet) runs `--mode mlx` from its own repository's bf16 weights, computed in
+float32 (2.5). `--mlx-compute bf16` (opt-in, off by default) keeps the weights in bf16 and computes in bf16: faster,
+but further from float32. Apple M4 Pro, 1,700 held-out decisions, against CUDA eager float32:
+
+| | `--mlx-compute auto` (float32, the default) | `--mlx-compute bf16` |
+|---|---|---|
+| single prompts: same top answer / changed where float32's margin >= 0.05 | 100.00% / 0 | 99.41% / 1 |
+| five questions in two option orders (17,000 readouts) | 99.98% / 0 | 99.33% / 8 |
+
+`--mlx-compute bf16` read the 1,700 single prompts in 0.136 s each on a 48 GB M4 Pro, 1.25x the GGUF Q8_0 path's
+0.171 s on the same Mac. For comparison, CUDA's own bf16 path (eager) agrees with float32 on 99.48% of the 17,000
+readouts, with 3 changed at a margin >= 0.05.
+
 - `-MLX-8bit`: affine 8-bit decoder weights (group 64, a bf16 scale and bias per group);
 - `-MLX-fp4`: MLX `nvfp4` decoder weights (4-bit floating point E2M1, group 16, FP8 scales);
 - in both, the token embeddings and the output head stay in bf16, because the decision is read from the output head's
@@ -124,7 +163,7 @@ still the best MLX 4-bit format on mini.) Mini's `-MLX-fp4` ships its own temper
 thresholds are copied from bf16 and not certified for that port.
 
 ```bash
-uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-1.5-4.5B-MLX-8bit --mode mlx --port 8000
 ```
 
@@ -212,7 +251,66 @@ answers too, its decisions must agree with the bf16 model's at least as often as
 answer, is reported separately. The 4.5B export: agreement 0.950 overall and 0.991 at a margin of at least 0.2
 (basal-1.5 FP8: 0.947 / 0.991), accuracy −0.2 points, ECE 0.054 against 0.061; on 11–255 options agreement 0.90.
 
-## basal-1.5: the ModelOpt checkpoints
+## basal-omni-1.0-ultra quantised at load time (2.5)
+
+The CUDA graph engine can quantise ultra's bf16 weights (31B, 59 GB) as it loads them. Both modes are opt-in and
+serve basal-omni-1.0-ultra only: on basal-omni-1.0-max (12B) both lost too much accuracy against bf16, so basal-serve
+refuses them for every other basal-omni model before any weight is loaded.
+
+| | block FP8 | NVFP4 |
+|---|---|---|
+| command | `--mode fp8` (block scaling is the default for basal-omni) | `--mode nvfp4`, with the calibrated input amax (`--nvfp4-amax <file>` or the model's `NVFP4_AMAX.json`) and its own calibration (`CALIBRATION.nvfp4.json` or `--calibration`) |
+| GPUs | Hopper, Blackwell; 80 GB (the bf16 weights are loaded on the GPU before they are quantised) | Blackwell |
+| numbers | weights: one scale per 128 x 128 block; activations: one scale per 128 features of each token | e2m1 values, one FP8 scale per 16 inputs and a global scale per tensor; activations with a fixed global scale from calibration, block scales per token |
+| bf16 layers | the first and the last 2 decoder layers (`--fp8-bf16-layers`), embeddings and head | the same |
+| top answer as bf16 (calibration test) | 99.3% | 97.6% |
+| error of the answers accepted at the 1% target | 0.57% (bf16 0.47%) | 0.72% |
+| speed | H100: 8.1 decisions/s single (bf16 6.0, 1.35x), 5.9 questions/s with several per request (1.23x); 52.9 GB peak at 16 clients (bf16 74.1 GB) | RTX PRO 6000 Blackwell: scoring 2.3x faster than bf16 on the same GPU |
+
+Both kept the paired check against bf16 that a quantised mode has to pass (accepted answers at the 1% and 5% targets,
+with confidence bounds), NVFP4 by a narrow margin. Use block FP8 when ultra has to fit one 80 GB GPU with room for
+traffic; use NVFP4 when throughput on Blackwell matters more than the last half point of accuracy. `--nvfp4-scope mlp`
+quantises the MLP only (1.6x); it was not better than the full variant.
+
+The state cache is off in block FP8 until 2.5.1: `--state-cache-gb` is not used there (a warning at start-up), since
+continuing a cached state gave NaN answers on ultra (H100). Requests are then served as without the cache.
+
+### int8 for GPUs without FP8 (2.5)
+
+Ampere GPUs (A100, A6000, RTX 30xx) have no FP8 tensor cores. `--mode int8` gives ultra the block layout of block FP8
+with int8 values: weights in 128 x 128 blocks and activations in 128-feature tiles of each token, each with its own
+scale (largest value / 127). The GEMM multiplies int8 by int8 into int32 for each 128-deep slice, which is exact, and
+applies both scales in fp32. The first and the last 2 decoder layers stay bf16, as in FP8. It needs a GPU of compute
+capability 8.0 or newer and the model's own calibration (`CALIBRATION.int8.json`, or `--calibration`). The weights take
+about 31 GB.
+
+| ultra, calibration test (8,560 decisions) | bf16 | int8 |
+|---|---|---|
+| top answer as bf16 | - | 99.4% |
+| answers accepted at the 1% target | 56.8% | 56.7% (-0.16 points, 95% interval -0.40 to +0.08) |
+| error of those answers | 0.47% | 0.52% |
+
+It kept the same paired check as FP8 and NVFP4. On basal-omni-1.0-max (12B) the error of the accepted answers rose to
+1.13% (target 1%), so int8 serves ultra only. Speeds on Ampere cards will come from users' measurements.
+
+### Ultra on a 48 GB card: `--quant-load cpu` and `--graph-memory-gb` (2.5)
+
+`--quant-load gpu` (the default) puts ultra's bf16 weights on the GPU before they are quantised, which needs an 80 GB
+card. `--quant-load cpu` keeps them in host memory and moves one decoder layer at a time to the GPU, where it is
+quantised, so the GPU holds about the quantised size: ultra in `--mode fp8` or `--mode int8` fits a 48 GB card. The
+weights are the same as with the GPU load.
+
+A GPU with less free memory runs smaller CUDA graph shapes, and its answers then differ from an 80 GB card's in the last
+bits. `--graph-memory-gb N` sizes the shapes for N GiB of free memory after the weights instead of what is measured, so
+every GPU given the same N runs the same shapes and gives the same answers. Measured on an H100 with 32 GB taken by
+another process (about a 48 GB card): with `--mode fp8 --quant-load cpu --graph-memory-gb 10`, 1,700 of 1,700 answers
+bit-identical to the same flags on the unloaded card, start-up 276 s, 5.9 decisions/s at 16 clients (single questions)
+and 1.1 requests/s with five questions over long states, no errors.
+
+```bash
+basal-serve --model Remek/basal-omni-1.0-ultra --mode fp8 --quant-load cpu --graph-memory-gb 10 --port 8000
+```
+
 
 `Remek/basal-1.5-4.5B-FP8` / `-NVFP4`, `Remek/basal-1.5-max-FP8` / `-NVFP4` and `Remek/basal-1.5-mini-FP8` were produced with [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) post-training quantisation
 (`FP8_DEFAULT_CFG` / `NVFP4_DEFAULT_CFG`), calibrated on basal-1.5 calibration decisions, with the token embeddings and
@@ -221,7 +319,7 @@ NVFP4 needs Blackwell (B200, B300, RTX 50xx, RTX PRO 6000, DGX Spark). basal-1.5
 costs basal-1.5-mini about 6 accuracy points with almost no speed gain over FP8; use `-FP8`. Run them with vLLM in a separate environment:
 
 ```bash
-uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-1.5-4.5B-FP8 --mode vllm --port 8000
 ```
 
@@ -248,7 +346,7 @@ The `Remek/basal-1.0-4.5B-FP8` / `-NVFP4` and `Remek/basal-1.0-1.5B-FP8` / `-NVF
 ModelOpt Hugging Face exports and load in vLLM (tested):
 
 ```bash
-uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"   # separate environment: vLLM brings its own torch
+uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"   # separate environment: vLLM brings its own torch
 basal-serve --model Remek/basal-1.0-4.5B-NVFP4 --mode vllm --port 8000
 ```
 
@@ -260,6 +358,6 @@ H100, offline (`basal-bench`, 1,000 development decisions, both option orders), 
 calibration file for 1.5; both use `CALIBRATION.json`.
 
 SGLang runs in its own environment. Install it with `uv pip install --prerelease=allow "sglang[srt]==0.5.21"` (its kernels need a CUDA 12.9+ toolkit), then
-`uv pip install --no-deps "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"` and, if missing, `uv pip install starlette uvicorn httpx accelerate
+`uv pip install --no-deps "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"` and, if missing, `uv pip install starlette uvicorn httpx accelerate
 safetensors`. This is the setup the SGLang numbers were measured with; the basal engine's own modes (`fast`, `eager`)
 and vLLM use the default install.

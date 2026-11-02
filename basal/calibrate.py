@@ -1,7 +1,7 @@
 """Fit the calibration on your own labelled requests: one temperature per question type (for prompt-format-2 models
 also one per option-count bucket of choice questions), the certified confidence thresholds of act's max_error (1%
-and 5% by default), the calibration gates and, from labelled multi questions, the fallback_threshold of each label
-set, written as a calibration file for basal-serve.
+and 5% by default), the calibration gates, from labelled multi questions the fallback_threshold of each label set
+and, with --conformal, the answer-set thresholds of each coverage level, written as a calibration file for basal-serve.
 
   basal-calibrate labelled.jsonl --model Remek/basal-1.5-4.5B --mode mlx        # the engine in process
   basal-calibrate labelled.jsonl --url http://127.0.0.1:8000 --model Remek/basal-1.5-4.5B
@@ -61,6 +61,13 @@ Method (the one the shipped files were fitted with):
     mean IoU on FIT over a log grid (null = the default rule wins), with IoU, empty-set accuracy and false-empty rate
     on CERT next to the default. basal-serve uses it for a request with the same label set and fallback and no
     fallback_threshold of its own;
+  * --conformal 0.8,0.9,0.95 (off by default): split-conformal answer sets per type and coverage level L. The score
+    of a CERT decision is 1 - p(gold) under the fitted temperatures (CERT took no part in fitting them); p_min is the
+    k-th largest p(gold) of the type's CERT decisions, k = ceil((n + 1) L), and the set of an answer is every option
+    with p >= p_min (the top one always). The set then holds the correct answer with probability >= L, on average
+    over requests like the labelled ones. With n < L / (1 - L) CERT decisions of a type there is no p_min and the set
+    is every option. The FIT decisions report the coverage and mean size of the sets. basal-serve returns the set for
+    a choice / noul / score question with "coverage": L;
   * tasks: per task (classify, verify, extract; every claim and field is one decision) the certified threshold of each
     target error, by the same bound on FIT, with its coverage, error and bound on CERT ("task_thresholds" and
     "task_gates"). The task thresholds a shipped file holds are kept only when the temperatures are (no decision
@@ -86,9 +93,9 @@ from . import __version__
 from . import tasks as task_types
 from .engine import resolve
 from .prompt import max_options, model_format, model_layout
-from .server import (MODES, Server, _text, add_engine_args, calibration_file, calibration_name, calibration_orders,
-                     certified, default_mode, load_calibration, model_identity, refuse_lean_flex, temper, temperature,
-                     to_items)
+from .server import (MODES, Server, _text, add_engine_args, answer_set, calibration_file, calibration_name,
+                     calibration_orders, certified, default_mode, load_calibration, model_identity, refuse_lean_flex,
+                     temper, temperature, to_items)
 from .sets import label_set_id
 from .sets import select as select_set
 
@@ -100,6 +107,7 @@ MIN_BLEND = 10      # from this many FIT decisions (below --min-per-type) a temp
 RECOMMENDED = 200   # fewer labelled decisions: loose bounds
 T_GRID = (0.25, 8.0)  # temperatures searched (as for the shipped files)
 METHOD = "bound-controlled (one-sided 95% Clopper-Pearson on FIT)"
+CONFORMAL_METHOD = "split conformal on CERT (score 1 - p(gold), p_min = k-th largest p(gold), k = ceil((n + 1) L))"
 POOLED_NOTE = ("informational: \"confidence\" here is one threshold pooled over all types; basal-serve applies only "
                "per_type[type].confidence and defers a type without one")
 YES, NO = {"yes", "true", "tak"}, {"no", "false", "nie"}
@@ -475,15 +483,26 @@ def fit_temperature(rows):
     return float(grid[int(np.argmin(nll))])
 
 
-def served(rows, temps, buckets=None):
-    """(confidence, correct) of every row as basal-serve returns it with these temperatures (same float32 maths):
+def buckets_cover(buckets, prim="choice", lo=2, hi=255):
+    """Whether the bucket temperatures of `prim` cover every option count lo..hi, so that basal-serve never applies its
+    type temperature (server.temperature: the bucket first)."""
+    seen = set()
+    for b in (buckets or {}).get(prim) or {}:
+        a, z = (int(x) for x in b.split("-"))
+        seen.update(range(a, z + 1))
+    return seen >= set(range(lo, hi + 1))
+
+
+def served_p(rows, temps, buckets=None):
+    """The probabilities of every row as basal-serve returns them with these temperatures (same float32 maths):
     temps per type, buckets {type: {"lo-hi": T}} (calibration file 2) before them."""
     cal = dict(temperature_per_prim=temps, temperature_per_bucket=buckets or {})
-    out = []
-    for r in rows:
-        p = temper(torch.tensor(r["p"]), temperature(cal, r["prim"], len(r["p"]))).tolist()
-        out.append((float(max(p)), int(np.argmax(p)) == r["gold"]))
-    return out
+    return [temper(torch.tensor(r["p"]), temperature(cal, r["prim"], len(r["p"]))).tolist() for r in rows]
+
+
+def served(rows, temps, buckets=None):
+    """(confidence, correct) of every row as basal-serve returns it with these temperatures."""
+    return [(float(max(p)), int(np.argmax(p)) == r["gold"]) for r, p in zip(rows, served_p(rows, temps, buckets))]
 
 
 def ece(cs, bins=10):
@@ -582,7 +601,7 @@ def sample_size(decisions, units, targets):
             need = accepted_needed(risk)
             if n_fit >= need:
                 continue
-            falls = (f"its answers report automated: null at this max_error" if name in TASKS else
+            falls = ("its answers report automated: null at this max_error" if name in TASKS else
                      f"basal-serve defers the automatic actions of act and tool on {name} at this max_error")
             out.append(f"{name}: max_error {risk:g} needs >= {need} accepted FIT decisions without an error "
                        f"({accepted_needed(risk, 1)} with 1 error, {accepted_needed(risk, 2)} with 2); this file gives "
@@ -843,8 +862,57 @@ def type_threshold(entry, q_type):
     return ((((entry or {}).get("per_type") or {}).get(q_type)) or {}).get("confidence")
 
 
+def conformal_p_min(p_gold, level):
+    """Split conformal with the score 1 - p(gold): the k-th largest p(gold), k = ceil((n + 1) level); None when k > n
+    (too few decisions for the level: the set is every option)."""
+    k = math.ceil(round((len(p_gold) + 1) * level, 9))
+    return sorted(p_gold, reverse=True)[k - 1] if k <= len(p_gold) else None
+
+
+def conformal_needed(level):
+    """The fewest decisions of a type that give a coverage level a p_min (ceil((n + 1) level) <= n)."""
+    n = 1
+    while math.ceil(round((n + 1) * level, 9)) > n:
+        n += 1
+    return n
+
+
+def set_gate(rows, probs, p_min):
+    """Coverage (the gold answer in the set), mean size and singleton share of the answer sets at p_min."""
+    if not rows:
+        return dict(coverage=None, mean_size=None, singleton=None)
+    sets = [answer_set(p, p_min) for p in probs]
+    return dict(coverage=float(np.mean([r["gold"] in s for r, s in zip(rows, sets)])),
+                mean_size=float(np.mean([len(s) for s in sets])), singleton=float(np.mean([len(s) == 1 for s in sets])))
+
+
+def fit_conformal(fit_rows, cert_rows, temps, buckets, levels):
+    """--conformal: per coverage level and type, p_min on the type's CERT decisions (as served with the fitted
+    temperatures), with the coverage and size of the sets on CERT and, held out from p_min, on FIT."""
+    by_type = {}
+    for t in PRIMS:
+        rf, rc = [r for r in fit_rows if r["prim"] == t], [r for r in cert_rows if r["prim"] == t]
+        if rf or rc:
+            by_type[t] = (rf, served_p(rf, temps, buckets), rc, served_p(rc, temps, buckets))
+    out = {}
+    for level in levels:
+        per = {}
+        for t, (rf, pf, rc, pc) in by_type.items():
+            p_min = conformal_p_min([p[r["gold"]] for r, p in zip(rc, pc)], level)
+            e = dict(p_min=p_min, n=len(rc))
+            if p_min is None:
+                e["reason"] = (f"{len(rc)} CERT decisions of this type, coverage {level:g} needs >= "
+                               f"{conformal_needed(level)}: the set is every option")
+            g_c, g_f = set_gate(rc, pc, p_min), set_gate(rf, pf, p_min)
+            e.update(cert_coverage=g_c["coverage"], cert_mean_size=g_c["mean_size"], fit_coverage=g_f["coverage"],
+                     fit_mean_size=g_f["mean_size"], fit_singleton=g_f["singleton"], fit_n=len(rf))
+            per[t] = e
+        out[str(float(level))] = dict(per_type=per)
+    return dict(method=CONFORMAL_METHOD, levels=out)
+
+
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
-        min_blend=MIN_BLEND):
+        min_blend=MIN_BLEND, conformal=()):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
     with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set."""
     sets = [r for r in rows if r["prim"] == "multi"]
@@ -897,6 +965,8 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
                                   T_shipped=shipped_T.get(t), T=temps.get(t), source=source.get(t, "default 1.0"),
                                   ece_shipped=ece(served(cert, shipped_T, shipped_B)),
                                   ece=ece(served(cert, temps, buckets)))
+        if fmt == 2 and t == "choice":  # format 2: a choice question takes its bucket's temperature first
+            report["types"][t]["not_served"] = dict(shipped=buckets_cover(shipped_B), fitted=buckets_cover(buckets))
     gates = dict(ece_lofo=lofo(fit_rows, cert_rows, shipped_T, shipped_B, min_per_type, fmt, min_family, reference,
                                min_blend=min_blend),
                  automated_at=automated, automated_error=automated_error, automated_at_pooled=automated_pooled,
@@ -907,14 +977,22 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     extra = dict(gates=gates)
     if multi:
         extra["multi"] = {k: v for k, v in multi.items() if "reason" not in v}
+    if conformal:
+        extra["conformal"] = report["conformal"] = fit_conformal(fit_rows, cert_rows, temps, buckets, conformal)
     if fmt == 2:
         report["buckets"] = {}
         for name, lo, hi in BUCKETS:
             rs = [r for r in rows if r["prim"] == "choice" and lo <= len(r["p"]) <= hi]
             if rs:
                 cert = [r for r in rs if is_cert(r["group"])]
+                old = (shipped_B.get("choice") or {}).get(name)
+                new = (buckets.get("choice") or {}).get(name)
+                # as served: the bucket's temperature, else the type's (T_*_type: the type's stands in)
                 report["buckets"][name] = dict(n=len(rs), n_cert=len(cert),
-                                               T=(buckets.get("choice") or {}).get(name), source=bsource[name],
+                                               T_shipped=old if old is not None else shipped_T.get("choice"),
+                                               T_shipped_type=old is None,
+                                               T=new if new is not None else temps.get("choice"), T_type=new is None,
+                                               source=bsource[name],
                                                ece_shipped=ece(served(cert, shipped_T, shipped_B)),
                                                ece=ece(served(cert, temps, buckets)))
         cal = {"prompt": 2, "temperature_per_prim": temps, "temperature_per_bucket": buckets,
@@ -924,16 +1002,17 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     return dict(temperature_per_prim=temps, temperature_source=source, thresholds=thresholds, **extra), report
 
 
-def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"):
+def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical", adapter=None):
     """The calibration to compare with and keep, as basal-serve would apply it with these option orders
     (server.load_calibration: the model's file for those orders when it ships one; a file fitted on other orders
-    without its thresholds) -> (calibration, its file or None)."""
+    without its thresholds; with --adapter the adapter's file, else the model's without its thresholds) -> (calibration,
+    its file or None)."""
     if off or (md is None and not path):
         return {}, None
     if orders is None:  # a server that does not report its orders: the file as it is
         f = calibration_file(md, kind, path, quant, preset, layout)
         return (json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}), f
-    data, f, why = load_calibration(md, kind, path, quant, orders, preset=preset, layout=layout)
+    data, f, why = load_calibration(md, kind, path, quant, orders, preset=preset, layout=layout, adapter=adapter)
     if why:
         print(f"warning: {why}: its thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
     return data, f if f.exists() else None
@@ -1028,16 +1107,20 @@ def num(x, f="{:.3f}"):
 
 
 def table(report):
-    lines = ["", f"{'type':<7}{'n':>6}{'FIT':>6}{'CERT':>6}{'accuracy':>10}   {'temperature shipped -> fitted':<32}"
+    w = 52
+    lines = ["", f"{'type':<7}{'n':>6}{'FIT':>6}{'CERT':>6}{'accuracy':>10}   {'temperature shipped -> fitted':<{w}}"
                  f"ECE on CERT shipped -> fitted"]
     for t, r in report["types"].items():
-        temp = f"{num(r['T_shipped'])} -> {num(r['T'])}" + (
+        ns = r.get("not_served") or {}  # format 2, choice: buckets cover every option count
+        temp = (f"{num(r['T_shipped'])}{' (not served: buckets)' if ns.get('shipped') else ''} -> {num(r['T'])}"
+                f"{' (not served)' if ns.get('fitted') else ''}") + (
             "" if r["source"].startswith("fitted") else " (blended)" if r["source"].startswith("blended") else " (kept)")
-        lines.append(f"{t:<7}{r['n']:>6}{r['n_fit']:>6}{r['n_cert']:>6}{r['accuracy']:>10.3f}   {temp:<32}"
+        lines.append(f"{t:<7}{r['n']:>6}{r['n_fit']:>6}{r['n_cert']:>6}{r['accuracy']:>10.3f}   {temp:<{w}}"
                      f"{num(r['ece_shipped'])} -> {num(r['ece'])}")
     for name, r in (report.get("buckets") or {}).items():  # calibration file 2: choice per option-count bucket
-        lines.append(f"  {name:<9}{r['n']:>6}{'':>6}{r['n_cert']:>6}{'':>10}   "
-                     f"{('-> ' + num(r['T'])) if r['T'] is not None else '(type temperature)':<32}"
+        temp = (f"{num(r.get('T_shipped'))}{' (type)' if r.get('T_shipped_type') else ''} -> "
+                f"{num(r['T'])}{' (type)' if r.get('T_type') else ''}")
+        lines.append(f"  {name:<9}{r['n']:>6}{'':>6}{r['n_cert']:>6}{'':>10}   {temp:<{w}}"
                      f"{num(r['ece_shipped'])} -> {num(r['ece'])}")
     lines += ["", f"max_error on CERT   {'shipped: threshold':>18}{'coverage':>10}{'error':>8}   "
                   f"{'fitted: threshold':>17}{'coverage':>10}{'error':>8}{'bound':>8}"]
@@ -1092,6 +1175,17 @@ def table(report):
             lines.append(head + f"{thr:>11}   {num(c['iou_default']) + ' -> ' + num(c['iou']):<22}"
                                 f"{pct(c['empty_accuracy_default']) + ' -> ' + pct(c['empty_accuracy']):<17}"
                                 f"{pct(c['false_empty_default'])} -> {pct(c['false_empty'])}")
+    if report.get("conformal"):
+        lines += ["", f"answer sets        {'type':<7}{'CERT':>6}{'p_min':>9}{'CERT cover':>12}   {'FIT cover':>9}"
+                      f"{'mean size':>11}{'singleton':>11}   (p_min on CERT, checked on FIT)"]
+        for level, e in report["conformal"]["levels"].items():
+            for t, x in e["per_type"].items():
+                head = f"coverage {float(level):<9g} {t:<7}{x['n']:>6}"
+                if x["p_min"] is None:
+                    lines.append(head + f"   none: {x['reason']}")
+                    continue
+                lines.append(head + f"{x['p_min']:>9.4f}{pct(x['cert_coverage']):>12}   {pct(x['fit_coverage']):>9}"
+                                    f"{num(x['fit_mean_size'], '{:.2f}'):>11}{pct(x['fit_singleton']):>11}")
     return "\n".join(lines)
 
 
@@ -1214,7 +1308,7 @@ def refit(a, targets, reference, reference_name):
               "thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
         baseline = {k: v for k, v in baseline.items() if k not in ("thresholds", "multi", "task_thresholds")}
     cal, report = fit(rows, baseline, targets, a.min_per_type, head["fmt"], a.min_family, reference, a.min_per_set,
-                      a.min_blend)
+                      a.min_blend, a.conformal)
     cal["gates"]["ece_reference"] = reference_name
     cal["engine"] = engine_name(head["kind"], head["quant"], head.get("vllm_preset"))
     cal["fitted_on"] = dict(data=head["data"], decisions=sum(r["prim"] != "multi" for r in rows),
@@ -1253,6 +1347,9 @@ def parser():
     ap.add_argument("--no-calibration", dest="no_calibration", action="store_true",
                     help="no shipped calibration to compare with (types below --min-per-type keep temperature 1.0)")
     ap.add_argument("--targets", default="0.01,0.05", help="max_error targets (comma-separated)")
+    ap.add_argument("--conformal", default=None,
+                    help="coverage levels of the conformal answer sets (comma-separated, e.g. 0.8,0.9,0.95; default: "
+                         "none), fitted per type on CERT; basal-serve answers \"coverage\": L with \"answer_set\"")
     ap.add_argument("--min-per-type", dest="min_per_type", type=int, default=50,
                     help="FIT decisions needed to fit a type's temperature")
     ap.add_argument("--min-blend", dest="min_blend", type=int, default=MIN_BLEND,
@@ -1289,6 +1386,12 @@ def main(argv=None):
         raise SystemExit(f"--targets {a.targets!r}: give numbers such as 0.01,0.05") from None
     if not targets or not all(0 < r < 1 for r in targets):
         raise SystemExit("--targets must lie between 0 and 1")
+    try:
+        a.conformal = sorted({float(x) for x in (a.conformal or "").split(",") if x.strip()})
+    except ValueError:
+        raise SystemExit(f"--conformal {a.conformal!r}: give coverage levels such as 0.8,0.9,0.95") from None
+    if not all(0 < x < 1 for x in a.conformal):
+        raise SystemExit("--conformal levels must lie between 0 and 1")
     if a.calibration and not Path(a.calibration).exists():
         raise SystemExit(f"--calibration {a.calibration}: no such file")
     if a.strict and a.reference is None:
@@ -1322,7 +1425,7 @@ def main(argv=None):
             raise SystemExit("no decisions to fit")
         if rows:
             cal, report = fit(rows, baseline, targets, a.min_per_type, fmt, a.min_family, reference, a.min_per_set,
-                              a.min_blend)
+                              a.min_blend, a.conformal)
             cal["gates"]["ece_reference"] = reference_name
         else:  # task questions only: the temperatures and thresholds of the compared file stay as they are
             cal, report = {k: v for k, v in baseline.items() if k not in KEPT_OUT}, None
@@ -1340,12 +1443,13 @@ def main(argv=None):
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
             raise SystemExit(f"--url {a.url}: no basal server answers ({e})") from None
         mode = a.mode or entry.get("mode")
-        model, engine = a.model or entry.get("name"), f"{mode} at {base}"
+        adapter = entry.get("adapter")  # the server's --adapter identity (name@sha256)
+        engine = f"{mode} at {base}" + (f" --adapter {adapter.split('@')[0]}" if adapter else "")
         orders = entry.get("orders")  # the server's option orders (servers before this field: unknown)
         kind, quant = MODES.get(mode, ("", None, False))[:2]
         preset = entry.get("vllm_preset")  # --mode vllm: the server's preset (servers before 2.2.1: none)
         md = resolve(a.model, a.revision, metadata_only=True) if a.model else None
-        revision = model_identity(a.model, md)[1] if md is not None else None
+        model, revision = model_identity(a.model, md) if md is not None else (a.model or entry.get("name"), None)
         fmt = entry.get("prompt_format") or (model_format(md) if md is not None else 1)
         # the layout the server reads prompts in (servers before 2.4.1 and canonical ones do not say)
         a.layout = getattr(a, "layout", None) or entry.get("layout") or (model_layout(md) if md is not None
@@ -1363,10 +1467,12 @@ def main(argv=None):
         preset = getattr(srv.backend, "preset", None)
         a.layout = srv.layout  # --layout, else the model's basal.json "layout"
         baseline, base_file = compared(srv.md, srv.kind, a.calibration, quant, orders, a.no_calibration, preset,
-                                       a.layout)
-        model, revision = a.model, model_identity(a.model, srv.md)[1]
+                                       a.layout, srv.adapter)
+        model, revision = model_identity(a.model, srv.md)
         engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
-            + (f" --vllm-preset {preset}" if preset not in (None, "default") else "")
+            + (f" --vllm-preset {preset}" if preset not in (None, "default") else "") \
+            + (f" --adapter {srv.adapter.name}" if srv.adapter else "")
+        adapter = srv.adapter.identity if srv.adapter else None
         _, task_responses = asyncio.run(two_passes(srv, bodies, task_bodies, a.concurrency, settle))
     rows, failed, cal, report = fitted["rows"], fitted["failed"], fitted["cal"], fitted["report"]
     trows, tfailed = task_rows(units, task_responses) if units else ([], [])
@@ -1402,6 +1508,8 @@ def main(argv=None):
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__}")
     if revision:
         cal["fitted_on"]["revision"] = revision
+    if adapter:  # basal-serve applies the file only with this adapter (calibration_mismatch)
+        cal["fitted_on"]["adapter"] = adapter
     if task_report:
         cal["fitted_on"]["tasks"] = {t: e["n"] for t, e in task_report.items()}
         cal["fitted_on"]["task_requests"] = len(task_bodies) - len(tfailed)
@@ -1428,7 +1536,8 @@ def main(argv=None):
     else:
         Path(a.out).write_text(json.dumps(cal, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"\nwrote {a.out} (calibration file {fmt}, engine {cal['engine']})\n"
-              f"  basal-serve --model {a.model or '<model>'} --mode {mode} --calibration {a.out}")
+              f"  basal-serve --model {a.model or '<model>'} --mode {mode}"
+              + (f" --adapter {a.adapter}" if getattr(a, "adapter", None) else "") + f" --calibration {a.out}")
     summary(small + cert_notes(report, task_report, targets))
     if a.strict and report:
         strict_check(report, a.min_family)

@@ -7,7 +7,7 @@ question. They are trained on text; with `--media on` the server also takes imag
 ## Serve
 
 ```bash
-uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-omni-1.0-max --mode eager --media on --port 8000    # or Remek/basal-omni-1.0-mini
 ```
 
@@ -101,15 +101,46 @@ basal-serve --model Remek/basal-omni-1.0-max --mode eager --media on --port 8000
     compact rows (`--batches auto`: prompts back to back in one row, no padding). `math`: the kernel of `--mode
     eager`, uncompiled. Also `flex` (FlexAttention everywhere) and `fa3+math`. On Blackwell workstation GPUs
     (sm_120) `auto` is `flex`, compiled, with merged projections and smaller tiles for their 99 KB of shared memory
-    per block (no compact rows: those need FlashAttention 3). On an RTX PRO 6000 vLLM is faster for single
+    per block (no compact rows by default: below). On an RTX PRO 6000 vLLM is faster for single
     basal-omni-1.0-max questions (8.9 against 5.0 decisions per second), `fast` for five questions over a long state
     (5.3 against 4.9 per second). Elsewhere `auto` is `math`.
+  - **Compact rows with the flex kernels** (`--batches compact` on Blackwell workstation GPUs; 2.5, opt-in, off by
+    default): a flex block mask per prompt in every layer (a query block visits only the key blocks from its prompt's
+    start, and its window, on). Faster, but the answers differ from the default rows'. One RTX PRO 6000 Blackwell
+    Max-Q, 16 clients, against the default rows of `--mode fast` (each a fresh server):
+
+    | model | workload | questions/s | same top answer | changed where the default's margin >= 0.05 |
+    |---|---|---|---|---|
+    | basal-omni-1.0-mini | 2,000 development decisions, one per request | 126.6 -> 152.3 (1.20x) | 99.60% | 1 |
+    | | 600 single questions, ~1.5k-token states | 22.8 -> 26.6 (1.17x) | 98.67% | 0 |
+    | | 120 requests, five questions over 3k-10k tokens | 21.2 -> 21.3 (1.00x) | 100% (580 of 600 bit-identical) | 0 |
+    | basal-omni-1.0-max | 2,000 development decisions | 31.0 -> 39.5 (1.27x) | 99.75% | 2 |
+    | | 600 single questions | 5.09 -> 6.14 (1.21x) | 98.00% | 4 |
+    | | 120 requests, five questions | 5.33 -> 5.32 (1.00x) | 100% (580 of 600 bit-identical) | 0 |
+
+    Requests with several questions do not use compact rows. For comparison, two runs of the default rows agreed on
+    99.85-100% (mini) and 99.8-100% (max) of the same readouts, with 0-2 changes at a margin >= 0.05.
   - Text only: `--media on` needs `--mode eager`; the image and audio towers are not loaded. Each captured CUDA graph
     keeps its own cuBLAS workspace, so the engine sets `CUBLAS_WORKSPACE_CONFIG=:4096:2` for Gemma 4 unless you set it
     (1.1-max ran out of GPU memory in warm-up with the default; the smaller workspace did not change its forward
     time). On 31B the graph grid shrinks to fit (key / value buffers within 15% of the free memory). A state beyond the
     largest graph keeps only the last window of the sliding layers' keys and values (a question never reads further
     back), also in the state cache: a fifth of the memory per token on 31B.
+  - **A Triton kernel for the global layers** (`--global-attn triton`; 2.5, opt-in, off by default; Hopper): the
+    512-wide global layers of plain rows (single prompts and the state of a multi-question request) run basal's own
+    causal kernel for 512-wide heads instead of FlexAttention's 32 x 32 tiles; pass 2, compact rows and the readout
+    rows keep flex. Faster on long states, but the answers differ from flex's (the two kernels' outputs differ by up to
+    one bf16 step per layer, which moves near-ties on long states). One H100, `--mode fast`, against `--global-attn flex` (each a fresh server), 120
+    synthetic states of 24k-32k tokens with five questions each (600 readouts) at 4 clients, and 60 states of 15k-17k
+    tokens (300 readouts):
+
+    | model | 24k-32k: questions/s | same top answer | changed where flex's margin >= 0.05 | 15k-17k: speed, same top answer, changed |
+    |---|---|---|---|---|
+    | basal-omni-1.0-mini | 7.85 -> 8.62 (1.10x) | 99.67% | 0 | 1.07x, 99.0%, 0 |
+    | basal-omni-1.1-max | 2.22 -> 2.57 (1.16x) | 98.33% | 4 | 1.10x, 99.3%, 1 |
+    | basal-omni-1.0-ultra | 0.73 -> 0.75 (1.03x) | 99.0% | 2 | 1.10x, 99.0%, 0 |
+
+    Not measured on shorter states, other GPUs or with `--deterministic`.
   - `--mode fp8` / `nvfp4` (quantisation at load time) are refused for basal-omni: torchao FP8 on 1.1-max missed the
     port gate (0.9892 at margin >= 0.2 on 2-10 options, bar 0.9893). Serve an `-FP8` checkpoint instead.
 
@@ -149,6 +180,12 @@ The vLLM path of 2.2 is unchanged by default (vLLM 0.31.0). Added in 2.3, each m
 `--mode eager` bf16 on dev v2 (10,606 decisions, 32 in flight) and with the calibration file the mode loads on the
 calibration test split:
 
+- **How close to eager (2.5 check, H100, 27 Oct 2026, the default preset):** `--mode vllm` reads in vLLM's own kernels,
+  so its answers are close to `--mode eager`'s, not equal. Of 361 readouts per model, the same top answer on 98.3%
+  (basal-omni-1.0-mini), 98.3% (basal-omni-pico), 98.6% (basal-omni-1.0-max) and 97.6% (basal-omni-1.1-max); answers can
+  differ on near-ties, and the default preset can vary from run to run. With `--vllm-preset deterministic` (below) the
+  answers are reproducible and bit-identical to 2.4.1's on these models but basal-omni-pico, for which basal-serve
+  refuses that preset before vLLM starts (vLLM has no batch-invariant kernel for its Gated DeltaNet layers).
 - **KV-sharing fast prefill** (`--vllm-fast-prefill auto`, the default; `off` restores 2.2): Gemma 4 E2B / E4B (mini)
   run their last 18 of 42 layers, which reuse earlier layers' keys and values, at the answer position only during
   prefill (vLLM's `kv_sharing_fast_prefill`). The generated token, the only one basal reads, is computed the same way.
@@ -170,13 +207,47 @@ calibration test split:
   `CALIBRATION.vllm.deterministic.json` only if its own file fails there; none does.
 - **Images and audio** (`--media on`, as with `--mode eager`, below): the prompts of a media request go to vLLM in one
   call with the chat-template text of the eager media path, and vLLM's Gemma 4 processor expands the media
-  placeholders to the same tokens. Checked on basal-omni-1.0-mini only: on the omni media check set (310 images and
-  285 audio clips with their text twins) the same top answer as `--mode eager --media on` on 96.5% of images and 98.3%
-  of clips (all where eager's margin is at least 0.2), accuracy +0.3 / +0.7 points, every prompt of the same length;
-  6.0x / 7.9x the requests per second at 8 in flight (75.7 vs 12.7 images, 84.9 vs 10.8 clips) and 17.7 / 42.6 ms
-  per request one at a time (eager 102 / 104 ms). basal-omni-1.1-max (Gemma 4 Unified, no image or audio encoder) is
-  refused: through vLLM its images got the eager answer on 94.2% only (accuracy -1.3 points) and 19 of 285 clips other
-  token counts. Ultra (images) is not checked yet.
+  placeholders to the same tokens. On the omni media check set (310 images and 285 audio clips with their text twins),
+  against `--mode eager --media on`: basal-omni-1.0-mini the same top answer on 96.5% of images and 98.3% of clips
+  (all where eager's margin is at least 0.2), accuracy +0.3 / +0.7 points, every prompt of the same length; 6.0x /
+  7.9x the requests per second at 8 in flight (75.7 vs 12.7 images, 84.9 vs 10.8 clips) and 17.7 / 42.6 ms per request
+  one at a time (eager 102 / 104 ms).
+- **basal-omni-1.1-max** (Gemma 4 Unified: no image or audio encoder) since 2.5: vLLM 0.31 reads such a model with the
+  rules of the encoder models (an image's soft tokens see each other only in the sliding-window layers, within the
+  window; audio counted in mel frames), so the engine patches both in vLLM's worker to the model's own (every layer,
+  past the window; one token per 640 samples) and refuses to start if the patch did not take. Same check set: the same
+  top answer on 97.4% of images and 95.8% of clips (all where eager's margin is at least 0.2), accuracy +0.3 / +0.4
+  points, every prompt of the same length; 2.7x / 2.9x the requests per second at 8 in flight (47.5 vs 17.6 images,
+  46.7 vs 16.3 clips) and 25.9 / 23.4 ms per request one at a time (eager 70 / 62 ms). `"detail": "high"` is refused
+  for it on `--mode vllm` (the eager answer on 54.8% of images only); use `--mode eager --media on` for it. Ultra
+  (images) is not checked yet.
+- **`--vllm-overlap on`** (2.5, opt-in, off by default): the backend drives vLLM's async engine and keeps up to four
+  engine calls in flight, so vLLM's scheduler batches their prompts together (off: one `LLM.generate` call at a time).
+  A little faster, and the answers differ from off's. One RTX PRO 6000 Blackwell Max-Q, `--max-len 12288`, 16
+  clients, against off (each a fresh server):
+
+  | model | workload | questions/s | same top answer | changed where off's margin >= 0.05 |
+  |---|---|---|---|---|
+  | basal-omni-1.0-mini | 2,000 development decisions, one per request | 125.5 -> 151.3 (1.21x) | 99.45% | 3 |
+  | | 600 single questions, ~1.5k-token states | 25.2 -> 26.9 (1.07x) | 98.17% | 3 |
+  | | 120 requests, five questions over 3k-10k tokens | 12.1 -> 12.9 (1.07x) | 99.0% | 2 |
+  | basal-omni-1.0-max | 2,000 development decisions | 44.8 -> 47.6 (1.06x) | 99.65% | 6 |
+  | | 600 single questions | 5.71 -> 5.79 (1.01x) | 99.17% | 2 |
+  | | 120 requests, five questions | 3.25 -> 3.31 (1.02x) | 98.5% | 5 |
+
+  Two runs with off differed from each other about as much (98.17-99.7% the same top answer, 1-6 changes at a margin
+  >= 0.05): vLLM's default preset varies from run to run under load.
+
+  With `--media on`, requests with media are batched the same way (off: each one is its own call, one at a time).
+  basal-omni-1.1-max, one H100, the media items of the check set above (310 images, 285 clips, detail "default"), 8
+  clients, against off (fresh servers: off three times, on twice):
+  - media new to the server: images 7.6-9.2 vs 6.2-6.5 requests per second (1.18-1.49x; p50 170 vs 420 ms), audio
+    clips 15.1-20.7 vs 16.8-16.9 (0.89-1.23x);
+  - the same requests again (served from vLLM's caches): images 49.2-49.5 vs 33.0-33.7 (1.46-1.50x), audio 44.7-45.1
+    vs 33.3-33.7 (1.33-1.35x);
+  - answers: the same top answer as off on 99.68% of the images and 99.65-100% of the clips (at most one change, at a
+    margin under 0.05), accuracy -0.32 / 0.00 to -0.35 points. With off, the answers are bit-identical between fresh
+    starts and with 1 or 8 clients.
 - **Not in 2.3:** FP8 weights quantised at load time (automation at 1% -0.5 to -9.5 points on the three tiers) and an
   FP8 KV cache (on mini -0.36 points [-0.57, -0.15] at 1% with the shipped file; on 12B / 31B it needs Triton attention
   and is slower than 2.2's path). The `-FP8` checkpoints are served as they are.

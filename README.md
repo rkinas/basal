@@ -1,4 +1,4 @@
-# basal 2.4.1
+# basal 2.5
 
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-basal--2.0%20models-yellow)](https://huggingface.co/collections/Remek/basal-20-6acd1712a8e443c86cd576fc)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-basal--omni--1.0%20models-yellow)](https://huggingface.co/collections/Remek/basal-omni-10-6acea28e8b5baed2db475c1f)
@@ -24,7 +24,7 @@ answers, and triage with a confidence threshold that sends uncertain cases to a 
 
 ## Contents
 
-- [What is new in basal 2.4.1](#what-is-new-in-basal-241) · [What is new in basal 2.4](#what-is-new-in-basal-24) · [What is new in basal 2.3.5](#what-is-new-in-basal-235) · [What is new in basal 2.3.4](#what-is-new-in-basal-234) · [What is new in basal 2.3.3](#what-is-new-in-basal-233) · [What is new in basal 2.3.2](#what-is-new-in-basal-232) · [What is new in basal 2.3.1](#what-is-new-in-basal-231) · [What is new in basal 2.3](#what-is-new-in-basal-23) ·
+- [What is new in basal 2.5](#what-is-new-in-basal-25) · [What is new in basal 2.4.1](#what-is-new-in-basal-241) · [What is new in basal 2.4](#what-is-new-in-basal-24) · [What is new in basal 2.3.5](#what-is-new-in-basal-235) · [What is new in basal 2.3.4](#what-is-new-in-basal-234) · [What is new in basal 2.3.3](#what-is-new-in-basal-233) · [What is new in basal 2.3.2](#what-is-new-in-basal-232) · [What is new in basal 2.3.1](#what-is-new-in-basal-231) · [What is new in basal 2.3](#what-is-new-in-basal-23) ·
   [What is new in basal 2.2](#what-is-new-in-basal-22) · [What is new in basal 2.1](#what-is-new-in-basal-21) · [What is new in basal-2.0](#what-is-new-in-basal-20)
 - [Models](#models) · [Results](#results)
 - [Quick start](#quick-start) · [API](#api)
@@ -32,6 +32,43 @@ answers, and triage with a confidence threshold that sends uncertain cases to a 
 - [Documentation](#documentation): install paths, serving, API reference, results, formats, hardware
 - [Limitations](#limitations) · [Previous releases](#previous-releases) · [Citation](#citation) ·
   [Contributors](#contributors) · [License](#license)
+
+## What is new in basal 2.5
+
+Released 2 November 2026. Default answers to decision requests are byte-identical to 2.4.1 (checked on an H100:
+basal-omni-1.0-mini, basal-omni-1.0-max and basal-omni-pico with `--mode fast`, mini and pico with `--mode eager`); what
+is new is opt-in unless a line says otherwise.
+
+- **Changes on the default path**: in a request with task questions, a question named `<task>::<part>` is refused (HTTP
+  422, #59); error bodies gain `code` (and `detail` on 422), `error` keeps its text (#62); `GET /v1/models` lists the
+  certified thresholds and the context (#64); every response carries an `x-request-id` header (#68).
+- **basal-router**: several replicas behind one port, routed by state so that each replica's state cache keeps working;
+  `--gpus 0,1` starts one replica per GPU. Cascades from a small to a bigger model (`--escalate`, also several levels,
+  such as basal-omni-pico -> mini -> ultra), `--blend` (a weighted mean of several models' probabilities) and an LLM
+  fallback for questions that stay unsure (`--fallback`). [SERVING](docs/SERVING.md).
+- **Retrieval without an index** (*experimental*): the `rank` question type ranks thousands of candidates in one
+  request (yes / no screening in shared-context requests of 50, then one choice over the top 20), and `basal-navigate`
+  searches a document tree (topics, pages, passages) with it. [NAVIGATE](docs/NAVIGATE.md).
+- **Operations**: `GET /metrics` (Prometheus), a live web page of the server (`--ui on`, one page at a time) and one
+  page for a router and all its replicas (`basal-router --ui on`), HTTP 503 while the model warms up, `--api-keys` and
+  `--cors-origins`, `x-request-id` on every response.
+- **Faster start-up**: `basal-prepare` and `--prepared auto` load the kernels prepared for your GPU (basal-omni-1.0-mini
+  290 -> 172 s on an H100 with empty caches, the same answers), and torch.compile's cache survives a reboot.
+- **Answers you can rely on**: answer sets (`"coverage"`), an abstain flag with `max_error`, a second read (`--reread`),
+  and an option-order check and average (`basal-bench --order-check`, `--order-average`).
+- **basal-omni-1.0-ultra on more GPUs**: block FP8 and NVFP4 (`--mode fp8`, `--mode nvfp4`), int8 for GPUs without FP8
+  (`--mode int8`), and FP8 / int8 on a 48 GB card (`--quant-load cpu`). `--state-cache-bits 8` keeps cached states in 8
+  bits (about 1.7x as many per GB).
+- **More engines**: basal-omni-pico in the fast engine with the prefix cache and on `--mode mlx`; `--mlx-forward basal`
+  and the state cache on Apple Silicon; basal-omni-1.1-max images and audio through `--mode vllm`; LM Studio as a host
+  for basal decision models (`basal-export-gguf --systemone`).
+- **APIs and clients**: OpenAI's Decisions API (`POST /v1/decisions`), a Python client for every question type with
+  `AsyncBasal`, a TypeScript client, presets (triage, moderation, compliance, guard, route), LangChain / LlamaIndex /
+  CrewAI tools and MCP model selection.
+- **Tools**: `basal-attach` (serve a chat model that was never trained on basal), `basal-agree`, `basal-finetune`,
+  `basal-selfcheck` and `basal-interpolate`.
+- Thank you to Miłosz Kucharski, Paweł Kiszczak, Marcin Brzeżański, Dariusz Koryto, Grzegorz Stark and Michał Kardyś for
+  their pull requests. All changes and the known limits: [WHATS_NEW](docs/WHATS_NEW.md).
 
 ## What is new in basal 2.4.1
 
@@ -273,7 +310,7 @@ NVIDIA GPU, with [uv](https://docs.astral.sh/uv/) in a fresh environment:
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --port 8000
 ```
 
@@ -286,7 +323,7 @@ Apple Silicon:
 
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-mlx && source ~/basal-mlx/bin/activate
-uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000
 ```
 
@@ -319,6 +356,7 @@ Each answer has a probability for every option, the chosen key and the confidenc
 | FP8 checkpoints (Hopper, Blackwell) | [docs/INSTALL.md](docs/INSTALL.md#fp8-checkpoints-basal-engine) |
 | vLLM or SGLang with bf16 weights | [docs/INSTALL.md](docs/INSTALL.md#vllm-or-sglang-with-bf16-weights) |
 | Ollama and llama.cpp (GGUF) | [docs/INSTALL.md](docs/INSTALL.md#ollama-and-llamacpp-gguf) |
+| LM Studio (GGUF as a decision model) | [docs/INSTALL.md](docs/INSTALL.md#lm-studio-gguf-as-a-decision-model) |
 | Apple Silicon in detail, CPU | [docs/INSTALL.md](docs/INSTALL.md#apple-silicon-mlx) |
 | images and audio (basal-omni) | [below](#images-and-audio-basal-omni-experimental) |
 | all seven engines compared | [docs/INSTALL.md](docs/INSTALL.md#engines) |
@@ -329,7 +367,9 @@ Each answer has a probability for every option, the chosen key and the confidenc
 
 `POST /v1/systemone` with a `state` (text or JSON) and named, typed `questions`; every answer has a calibrated
 probability for each option and a `confidence`. Up to 255 options per question (basal-1.x models: 10); several
-questions over one state are answered in one pass.
+questions over one state are answered in one pass. `POST /v1/decisions` takes OpenAI's Decisions API (the OpenAI
+SDK's `client.decisions.create`) for predicate, choice and score questions
+([docs/API.md](docs/API.md#openais-decisions-api-post-v1decisions)).
 
 | type | answer | example |
 |---|---|---|
@@ -344,6 +384,19 @@ To send uncertain decisions to a person, use `act` or `tool` with `"max_error": 
 `"deferred": true` below the certified confidence threshold. Request and response fields, every question type,
 using the confidence, calibrating on your own data and how to ask: [docs/API.md](docs/API.md).
 
+### TypeScript client
+
+`clients/typescript/` is a `fetch`-based client with no runtime dependencies and types for every question and answer
+type, answer sets (`coverage`), abstain (`max_error`), `ask_if` / `depends_on`, images and errors. It sends the same
+requests as the Python client (`basal/client.py`). It is not on npm yet; build it with `npm install && npm run build`
+in that directory. See [clients/typescript/README.md](clients/typescript/README.md).
+
+```ts
+import { Basal } from "basal-client";
+const basal = new Basal({ url: "http://127.0.0.1:8000" });
+const a = await basal.choice(ticket, "Which department?", { billing: "Billing", tech: "Technical support" });
+```
+
 ## Images and audio: basal-omni (experimental)
 
 The basal-omni models answer the same questions, and with `--media on` a request may also carry images and audio
@@ -352,7 +405,7 @@ The basal-omni models answer the same questions, and with `--media on` a request
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-omni-1.0-mini --mode eager --media on --port 8000   # or Remek/basal-omni-1.0-max
 ```
 
@@ -368,29 +421,42 @@ calibration, so validate them on your own media. Request format and limits:
 `decide_many`; `basal-mcp` is a stdio bridge for hosts that start local processes.
 
 ```bash
-uv pip install "basal[fp8,mcp] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[fp8,mcp] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --host 127.0.0.1 --port 8000 --mcp on
 claude mcp add --transport http basal http://127.0.0.1:8000/mcp     # Claude Code; other hosts take the same URL
 ```
 
-No authentication, like the HTTP API: bind `--host 127.0.0.1` or put a gateway in front. Details:
-[docs/MCP.md](docs/MCP.md).
+Use `--api-keys PATH` to protect HTTP and MCP requests (except `GET /health`), or bind to `127.0.0.1`. Details:
+[`docs/SERVING.md`](docs/SERVING.md#api-access) and [`docs/MCP.md`](docs/MCP.md).
+
+For LangChain, LlamaIndex and CrewAI agents, `from basal.adapters import langchain_tool, llamaindex_tool,
+crewai_tool` gives a tool over a running server, with ready question sets (`preset="triage"`, `"moderation"`,
+`"compliance"`; also `basal-run --preset`). Install the framework yourself; see
+[SERVING.md](docs/SERVING.md#agent-frameworks-and-ready-question-sets-25).
 
 ## Documentation
 
 | | |
 |---|---|
 | [INSTALL](docs/INSTALL.md) | engines, the model files and every install path: NVIDIA (bf16, FP8), vLLM, SGLang, Apple Silicon, Ollama / llama.cpp, CPU, basal-omni |
+| [BACKEND](docs/BACKEND.md) | use basal-serve as the local backend of code that asked a hosted LLM for decisions |
 | [API](docs/API.md) | request, response, question types, using the confidence, how to ask |
+| [FINETUNE](docs/FINETUNE.md) | adapt a model to your own labelled decisions with LoRA (`basal-finetune`), then calibrate it |
+| [OLD_GPUS](docs/OLD_GPUS.md) | GTX 10xx, RX 480 / 580, Iris Xe: GGUF with llama.cpp's Vulkan backend, and `basal-selfcheck` |
 | [SERVING](docs/SERVING.md) | serving modes and flags, inference on a JSONL file, benchmarking your GPU |
 | [RESULTS](docs/RESULTS.md) | results against basal-1.5: Werdykt, other benchmarks, speed |
 | [MCP](docs/MCP.md) · [THINKING](docs/THINKING.md) · [OMNI](docs/OMNI.md) | MCP server and bridge; the experimental thinking mode; basal-omni on the engine |
 | [FEATURES](docs/FEATURES.md) · [CALIBRATION](docs/CALIBRATION.md) | `multi`, `act`, `tool` and evidence in detail; calibrating on your own data |
 | [QUESTION_TYPES](docs/QUESTION_TYPES.md) | all question types on one page: what each asks and answers, with an example |
 | [TASKS](docs/TASKS.md) | *experimental*: `classify`, `verify`, `compress`, `extract` (JSON schema) on the same API |
+| [NAVIGATE](docs/NAVIGATE.md) | *experimental*: `rank` (thousands of candidates in one request) and `basal-navigate` (retrieval by navigating a document tree) |
 | [FORMATS](docs/FORMATS.md) · [FORMAT2](docs/FORMAT2.md) · [SOAM](docs/SOAM.md) | prompt formats, option orders and calibration files; the runtime contract; shared-state packing |
 | [HARDWARE](docs/HARDWARE.md) · [PORTS](docs/PORTS.md) · [GGUF](docs/GGUF.md) · [QUANTIZATION](docs/QUANTIZATION.md) | which mode on which GPU; MLX and GGUF ports; FP8 and other low precision |
 | [WHATS_NEW](docs/WHATS_NEW.md) · [basal-1.0 report](docs/basal-1.pdf) | the full list of changes in 2.0; the basal-1.0 technical report |
+
+**Community projects:** [basal-lite](https://github.com/lukaszpodgorski-pl/basal-lite) by @lukaszpodgorski-pl serves basal
+models from a stock `vllm serve` through a thin client (community-maintained, not verified by us; see its README for the
+models it covers).
 
 ## Limitations
 
@@ -430,6 +496,86 @@ README, with the full Werdykt board of that release: [v1.5.0](https://github.com
 The engine serves basal-1.0 models unchanged; `fast-exit` and the `vllm` mode with the ModelOpt checkpoints work as
 before. The Apple Silicon engine modes (`mps`, `gguf`, `mlx-q8`) and the Apple Silicon engine study were contributed
 by Paweł Kiszczak ([#4](https://github.com/rkinas/basal/pull/4)).
+
+## Development commands
+
+Run `make` or `make help` to list commands. The Makefile uses `.venv/bin/python` by default; override `PYTHON` to
+use another prepared environment. Create it with `uv venv --python 3.12 .venv`, then install the hardware-specific
+PyTorch build described in [Quick start](#quick-start) before installing the app. For example:
+
+```bash
+make setup                         # editable app plus test dependencies
+make setup EXTRAS=test,mlx,gguf     # Apple Silicon; install only the backends you need
+make check                         # read-only pre-commit checks, no Git hook installation
+make test                          # app tests; requires dependencies and applicable backend hardware
+```
+
+`setup` uses `uv pip install` in that environment and may install required dependencies. Launch and test targets
+call Python directly: they never sync the environment, remove extras, or replace your selected PyTorch build.
+Use `EXTRAS=test,fp8` or `EXTRAS=test,nvfp4` for the matching CUDA modes; keep vLLM in its own environment because
+it brings its own PyTorch requirements. MLX requires Apple Silicon; MPS requires a supported Mac; CUDA graph and
+torchao modes require compatible NVIDIA hardware. See [Serving modes](#serving-modes) for backend limitations.
+
+```bash
+make serve                                      # automatic backend selection
+make serve MODE=mlx MODEL=Remek/basal-2.0-mini-MLX-8bit
+make serve MODE=fast-nocompile PORT=8001
+make serve MODE=fast-exit ARGS='--early-exit 0.99'
+make serve MODE=gguf GGUF='/path with spaces/model.gguf'
+make serve MODE=ollama OLLAMA_MODEL=basal         # existing Ollama safetensors import
+make run INPUT=basal/examples/questions.jsonl OUTPUT=answers.jsonl
+make bench                                      # CLI-selected reference and serving modes
+make bench ARGS='--modes eager-fp32 mps mlx --n 44'
+make loadtest INPUT=basal/examples/questions.jsonl ARGS='--n-seq 20 --n-conc 100'
+```
+
+`MODE` selects one backend for `serve` or `bench`; omit it to retain the CLI's automatic defaults, as an empty `MODEL`
+keeps their default model. The benchmark
+also accepts its native modes such as `eager-fp32` and `fast-exit@0.99`. For multiple benchmark modes, use `ARGS`
+as above; provide `GGUF` and `OLLAMA_MODEL` when the list includes those backends. GGUF still uses `MODEL` for
+tokenizer/calibration, and Ollama requires a running service and a compatible import; see [hardware docs](docs/HARDWARE.md).
+Required GGUF/Ollama values are checked early when selected through `MODE`; flags supplied through `ARGS` are
+handled by the application. Serving or benchmarking can download and load models.
+
+`INPUT` and `OUTPUT` are required for `run`; they are optional for `bench` and `loadtest` (which otherwise use
+bundled simple questions). Output files are overwritten by the CLI; an `OUTPUT` that is the `INPUT` file is refused
+before anything runs. HTTP clients use
+`URL=http://127.0.0.1:8000/v1/systemone` by default, follow `PORT` overrides, and require a running server.
+`make serve` listens on `HOST=127.0.0.1` (this machine only); `HOST=0.0.0.0` exposes the unauthenticated server on
+every interface.
+Quote variable values containing spaces. `ARGS` is appended as shell command text for additional CLI options, so
+pass only trusted text (as with any Make variable, it runs in the shell); use shell quoting inside it when an option
+value contains spaces. Inspect commands without launching with `make -n`.
+
+## Development checks
+
+The [pre-commit configuration](.pre-commit-config.yaml) provides fast, read-only checks for Python syntax and
+critical errors (Ruff `E9`, `F63`, `F7`, `F82`), merge conflicts, private keys, TOML, YAML, JSON, and JSONL.
+It covers the engine, server, clients, benchmarks, examples, tests, and figure scripts. JSON checks include the
+checked-in OpenAPI fixture; JSONL checks parse each nonblank line, matching the batch runner. These are syntax
+checks, not request or response schema validation; the latter remains in `tests/test_server.py`.
+
+Use [uv's isolated tools](https://docs.astral.sh/uv/guides/tools/) without installing basal or its ML dependencies:
+
+```bash
+uvx pre-commit==4.7.0 validate-config
+uvx pre-commit==4.7.0 run --all-files
+python3 -m unittest discover -s tests -p test_check_jsonl.py
+```
+
+Hook versions are pinned in the configuration. The first run downloads the hook tools into isolated environments;
+subsequent runs reuse them. The hooks do not format files, start a server, download models, or run inference tests.
+Run the application tests separately when changing application behavior.
+
+To opt into checks on staged files before each commit, install the tool persistently and then install the Git hook:
+
+```bash
+uv tool install pre-commit==4.7.0
+pre-commit install
+```
+
+Git worktrees share their hooks directory: installing the hook affects sibling worktrees too. Use manual commands
+above if that is unwanted. To remove the installed Git hook, run `pre-commit uninstall`.
 
 ## Citation
 
@@ -472,7 +618,8 @@ Thank you to the people whose work is in this repository, by pull request:
 - Paweł Kiszczak ([@pawelkiszczak](https://github.com/pawelkiszczak)): the Apple Silicon engines `--mode mlx` /
   `mlx-q8` and `--mode mps`, the in-process GGUF engine `--mode gguf` (llama-cpp-python) and `--mode ollama`, and the
   comparison of Apple Silicon engines and quantised formats (MLX, oMLX oQ, GGUF) with its figures in
-  [HARDWARE.md](docs/HARDWARE.md#apple-silicon) ([#4](https://github.com/rkinas/basal/pull/4)).
+  [HARDWARE.md](docs/HARDWARE.md#apple-silicon) ([#4](https://github.com/rkinas/basal/pull/4)); the development
+  commands (`make`) and read-only pre-commit checks ([#46](https://github.com/rkinas/basal/pull/46)).
 - Piotr Durlej ([@pdurlej](https://github.com/pdurlej)): `basal-export-gguf`, which converts a basal model to GGUF, or
   repairs an existing GGUF file, so that its tokenizer matches the Hugging Face one, as in the official `-GGUF` files
   ([#8](https://github.com/rkinas/basal/pull/8)).
@@ -480,7 +627,8 @@ Thank you to the people whose work is in this repository, by pull request:
   its Colab notebook ([#15](https://github.com/rkinas/basal/pull/15)).
 - Michał Kardyś ([@kardysm](https://github.com/kardysm)): the experimental `--mode strix`, a basal-1.5 / basal-2.0
   forward with Triton kernels for AMD Strix Halo, and its benchmarks
-  ([#14](https://github.com/rkinas/basal/pull/14)).
+  ([#14](https://github.com/rkinas/basal/pull/14)); a start-up that compiles every Triton kernel copy, so no request
+  waits for one ([#51](https://github.com/rkinas/basal/pull/51)).
 - [@lukaspoloki](https://github.com/lukaspoloki): `basal-viz`, a local page that shows every step of a decision, from
   the prompt to the per-layer readout, the calibration and the decision
   ([#2](https://github.com/rkinas/basal/pull/2)).
@@ -498,7 +646,10 @@ Thank you to the people whose work is in this repository, by pull request:
   ([#40](https://github.com/rkinas/basal/pull/40), the same change as 2.3.4's, written in parallel); the questions over
   a long state on CUDA without dense masks, so `compress` runs up to 1.5x faster
   ([#39](https://github.com/rkinas/basal/pull/39)); and basal-2.0-4.5B on 16 GB cards, with pass-2 graphs captured only
-  while GPU memory stays free ([#41](https://github.com/rkinas/basal/pull/41)).
+  while GPU memory stays free ([#41](https://github.com/rkinas/basal/pull/41)); torch.compile's cache kept across
+  reboots ([#47](https://github.com/rkinas/basal/pull/47)), less host work in the CUDA cascade
+  ([#44](https://github.com/rkinas/basal/pull/44)) and `--compile-scope layer`
+  ([#49](https://github.com/rkinas/basal/pull/49)).
 - Grzegorz Brzezinka ([@agentGreg](https://github.com/agentGreg)): the calibration report's per-type ECE as
   `basal-serve` applies the temperatures ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count
   for the 1% target in CALIBRATION.md ([#25](https://github.com/rkinas/basal/pull/25)), the Apple M5 Max
@@ -511,6 +662,12 @@ Thank you to the people whose work is in this repository, by pull request:
   bit-identical edge cases and a similar speed-up ([#21](https://github.com/rkinas/basal/pull/21)).
 - [@lukaszpodgorski-pl](https://github.com/lukaszpodgorski-pl): basal on Windows: kernel checks for torch builds without
   FlashAttention or Triton, and UTF-8 for every text file ([#38](https://github.com/rkinas/basal/pull/38)).
+- Marcin Brzeżański ([@marcinbrzezanski](https://github.com/marcinbrzezanski)): Prometheus metrics: the engine version,
+  the state cache's evictions and prefix hits, and a cache read that never waits for the engine
+  ([#48](https://github.com/rkinas/basal/pull/48)).
+- Grzegorz Stark ([@gstark0](https://github.com/gstark0)): `--state-cache-gb` and `--prefix-cache` on Apple Silicon
+  (`--mode mlx`), with the guard against MLX's fused attention losing precision for a few queries over a cache
+  ([#50](https://github.com/rkinas/basal/pull/50)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),

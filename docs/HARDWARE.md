@@ -256,6 +256,14 @@ Serve with `basal-serve --model Remek/<model>-MLX-8bit --mode mlx` ([QUANTIZATIO
 
 For Ollama (GGUF), see [QUANTIZATION.md](QUANTIZATION.md#gguf-for-ollama-and-llamacpp).
 
+basal-omni on a Mac: `--mlx-forward basal` (2.5, opt-in) runs the last 19 of 42 layers at the readout rows only; on an
+Apple M4 Pro basal-omni-1.0-mini-MLX answers one question in two orders in 179 instead of 222 ms
+([QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon)).
+
+basal-omni-pico on a Mac (`--mode mlx`) computes in float32 from its bf16 weights (unless `--mlx-compute bf16`). MLX
+runs float32 matmuls in TF32 on an M5's GPU by default, so basal-serve sets `MLX_ENABLE_TF32=0` when it loads pico for
+float32 compute, unless the variable is already set (`MLX_ENABLE_TF32=1` keeps TF32). Not yet verified on M5 hardware.
+
 **`mps`, `mlx-q8` and `gguf`** (Apple M4 Pro, 24 GB, basal-1.5-mini, `basal-bench` on the 44 bundled examples, which
 are shorter than the 500-decision sample above; reference: bf16 `eager` on MPS; GB: MLX allocator peak, MPS memory held
 by the Metal driver):
@@ -562,15 +570,123 @@ cool-down; *TV*: mean / max total-variation distance to fp32, *changed*: decisio
 
 Figures: `python docs/figures/make_figures.py` (matplotlib) from the measurements in `docs/figures/apple_engines.json`.
 
+### Apple M4 (state cache on `--mode mlx`)
+
+`--state-cache-gb N` and `--prefix-cache on` work on `--mode mlx` the same way as on the CUDA graph engine. The keys
+and values of a request's state (or of the template prefix) are kept across requests. A state that begins with a cached
+one computes only its new tokens.
+
+Measured on a MacBook Air (Apple M4, 8-core GPU, 16 GB, fanless), macOS 26.5.2, MLX 0.32.4, mlx-lm 0.32.2, mains power.
+Setup: the `-MLX-8bit` ports, two option orders, served over HTTP, one client, requests in dataset order after a
+warm-up. Every workload ran in ABBA order (off, cache, cache, off), because the fanless M4 slows down within a long run.
+Four public datasets:
+
+- **BAN-PL** (NASK, CC BY 4.0, `BAN-PL_1`): a moderation policy of 2,083 tokens, then one short Wykop.pl comment
+  (median 113 characters), and one `choice`: remove or keep. Every state begins with the same policy, so each comment
+  continues the cached entry of the previous one. 100 comments, half of them harmful.
+- **MultiRC** (SuperGLUE, validation): one request per question about a paragraph, with its candidate answers as
+  `noul` questions over the paragraph, so the state repeats across requests. 4.5B: 10 paragraphs, 100 requests, 451
+  decisions. mini: 20 paragraphs, 222 requests, 1,153 decisions.
+- **MultiWOZ 2.2** (dev): one request per user turn. The state is the dialogue so far, so each state begins with the
+  previous one (an agent trace or chat history). One `choice` of the service the last message concerns. 4.5B: 10
+  dialogues, 79 requests. mini: 15 dialogues, 120 requests.
+- **MASSIVE pl-PL** (test): short Polish voice-assistant commands, one `choice` of the scenario (18 options). Only the
+  template prefix repeats. 4.5B: 100 requests. mini: 200.
+
+p50 of the client's wall time per request (the median over both runs of each configuration):
+
+| model | workload | off | cache | speed-up | top answers same | at margin >= 0.2 | \|dp\| median / p99 / max |
+|---|---|---|---|---|---|---|---|
+| basal-2.0 (4.5B) | BAN-PL `--state-cache-gb 1` | 13,724 ms | **907 ms** | **15.1x** | 100 / 100 | 1.000 | 0.002 / 0.029 / 0.034 |
+| | MultiRC `--state-cache-gb 1` | 4,217 ms | **1,601 ms** | **2.6x** | 451 / 451 | 1.000 | 0.002 / 0.019 / 0.115 |
+| | MultiWOZ `--state-cache-gb 1` | 2,697 ms | **1,748 ms** | **1.5x** | 79 / 79 | 1.000 | 0.000 / 0.012 / 0.023 |
+| | MASSIVE pl `--prefix-cache on` | 980 ms | 873 ms | 1.12x | 100 / 100 | 1.000 | 0.000 / 0.015 / 0.047 |
+| basal-2.0-mini | BAN-PL `--state-cache-gb 1` | 3,995 ms | **292 ms** | **13.7x** | 100 / 100 | 1.000 | 0.002 / 0.019 / 0.022 |
+| | MultiRC `--state-cache-gb 1` | 1,376 ms | **509 ms** | **2.7x** | 1,147 / 1,153 | 1.000 | 0.002 / 0.018 / 0.037 |
+| | MultiWOZ `--state-cache-gb 1` | 831 ms | **571 ms** | **1.5x** | 119 / 120 | 1.000 | 0.000 / 0.013 / 0.022 |
+| | MASSIVE pl `--prefix-cache on` | 316 ms | 278 ms | 1.13x | 196 / 200 | 1.000 | 0.000 / 0.016 / 0.058 |
+
+The speed-up follows the share of a request's work that comes from the cache. In BAN-PL the policy is almost the whole
+prompt, so only the comment and the question are computed. In MultiRC the 4-7 questions of a request, in two orders,
+are about half the work of the request even without the state: five of these requests with the state replaced by "."
+took 44-60% of their full time on 4.5B. The cache cannot remove that half.
+
+MultiWOZ by the length of the dialogue so far (state tokens). A state shares a cached prefix only from one full block of
+the prefix index (256 tokens) on. Shorter dialogues cannot hit, and they pay the cache's extra work (the state stored, a
+second forward over it): 0.96x. Above that, a cached step costs about the same whatever the length of the dialogue,
+while without the cache it grows with it:
+
+| model | state tokens | turns | off | cache | speed-up |
+|---|---|---|---|---|---|
+| basal-2.0 (4.5B) | < 256 | 36 | 1,970 ms | 2,056 ms | 0.96x |
+| | 256-511 | 36 | 3,125 ms | 1,711 ms | 1.83x |
+| | >= 512 | 7 | 4,368 ms | 1,605 ms | **2.7x** |
+| basal-2.0-mini | < 256 | 56 | 619 ms | 641 ms | 0.96x |
+| | 256-511 | 53 | 1,002 ms | 530 ms | 1.89x |
+| | >= 512 | 11 | 1,382 ms | 554 ms | **2.5x** |
+
+- Each configuration is deterministic: its two runs give bit-identical probabilities. A cached state gives the same
+  probabilities as its first, uncached request with the cache on, in any order of the requests.
+- **Against the server without the cache (2.5): bit-identical.** The tables above were measured on the contributed
+  version, where the probabilities differed from the uncached server by rounding (the top answers that changed were
+  near ties, margin below 0.08 without the cache). MLX picks its matmul and attention kernels by the shape of the
+  call, and each sums in its own order, so a row's bits depend on how many rows and keys its forward runs:
+  - a quantised matmul runs a vector kernel for a few rows, split-K while the output tiles are few, plain tiles above.
+    On basal-2.0-mini's k / v projections the rows of a call of up to 1,024 rows differ from those of a longer call;
+  - attention gives a row the same bits from 16 queries on; on basal-omni (head size 256 / 512) a row's attention also
+    depends on the number of keys.
+
+  The cached path splits the prompt into forwards of other shapes: the state, then the rest over it, and for a single
+  question its last token alone. It now runs each of them at the uncached forward's shapes: every linear layer padded
+  with zero rows to the uncached row count (or only up to the row count from which its kernel no longer depends on
+  it, probed once per weight shape), attention over the uncached number of keys, at least 16 tokens per continuation,
+  and a single question's whole rest in one forward. A state computed for a request then gives the uncached
+  probabilities bit for bit, cold and from the cache. Checked on an Apple M4 Pro (48 GB, macOS 15.5, MLX 0.32.3,
+  mlx-lm 0.32.0) with basal-2.0-mini-MLX-8bit and basal-omni-1.0-mini-MLX, both `--mlx-forward` paths, 1,032
+  readouts per run (640 in five-question requests over ~1.5k-token states, 200 single questions, 192 in growing
+  states), cache off, then on (cold), then on again: every readout bit-identical to the cache off in all four runs,
+  cold and cached (the contributed version: the same top answer on 98.84-99.42%). p50 per request, cache off / state
+  from the cache:
+
+  | model | `--mlx-forward` | five questions | one question |
+  |---|---|---|---|
+  | basal-2.0-mini-MLX-8bit | mlx-lm | 1,103 / 330 ms | 509 / 89 ms |
+  | | basal | 1,114 / 327 ms | 493 / 87 ms |
+  | basal-omni-1.0-mini-MLX | mlx-lm | 1,917 / 698 ms | 1,284 / 162 ms |
+  | | basal | 1,544 / 425 ms | 682 / 104 ms |
+
+  Running at the uncached shapes costs a little: on basal-2.0-mini (mlx-lm) a cached five-question request took
+  261 ms and a single question 64 ms before. Growing states: basal-2.0-mini 674 -> 570 ms (mlx-lm), basal-omni
+  computes them afresh, 897 -> 929 ms (mlx-lm) and 794 -> 859 ms (basal).
+- A state reused by a request of another length (other questions about the same state) gives the same bits where both
+  lengths pick the same kernels (basal-2.0-mini: states over about 1,024 tokens), else it can differ in the last bits.
+  A state that grows from a cached one continues it only where that gives the uncached bits, and is computed afresh
+  otherwise: on basal-2.0-mini from about 1,024 tokens on, on basal-omni never (its attention depends on the number
+  of keys). So the MultiWOZ speed-ups above (dialogues of up to about 1k tokens) do not carry over to 2.5; BAN-PL's
+  states (a 2.1k-token policy) are past that length.
+- **Short continuations.** A state that continues a cached entry by fewer than 16 tokens starts its forward earlier
+  (`MIN_CONTINUE`). For 2-8 queries MLX's fused attention (`mx.fast.scaled_dot_product_attention`, MLX 0.32.4) also
+  loses bf16 precision when the queries times the query heads per KV head exceed 32. Against an fp32 reference the max
+  error is 4-6e-2 instead of 5-8e-3, for 6-8 queries on basal-2.0-mini (6 query heads per KV head) and 5-8 on 4.5B (8
+  per KV head). Before this guard, one BAN-PL decision on mini went from 0.46 to 0.16 when a comment continued the
+  cached policy by 8 tokens, and BAN-PL's max |dp| was 0.30 (mini) and 0.14 (4.5B).
+- `--prefix-cache` helps little on MLX, because the template prefix of prompt format 2 is 34-45 tokens. On the CUDA
+  graph engine it also keeps short requests on pass-2 graphs. The state cache is the one worth turning on.
+- Memory: an entry is a copy of the state's keys and values (`mx.contiguous`, not a slice of mlx-lm's 256-token cache
+  buffers), counted against the budget. One 2.1k-token BAN-PL state is about 126 MB on 4.5B (60 layers, 2 KV heads of
+  128). The wired limit is raised by the budget.
+
 
 ## AMD Strix Halo (experimental, community-maintained)
 
 `--mode strix` ([basal/strix.py](../basal/strix.py)) was contributed and is maintained by
-[@kardysm](https://github.com/kardysm) ([#14](https://github.com/rkinas/basal/pull/14)), not by the core team. It runs
+[@kardysm](https://github.com/kardysm) ([#14](https://github.com/rkinas/basal/pull/14)), not by the core team:
+community-maintained, not yet verified on our hardware. It runs
 the Llama-architecture models basal-1.5 and basal-2.0 only, and was measured with the 4.5B ones. Shapes its kernels
 cannot run are refused at start-up with a message naming what does not fit: the mini models (hidden size 1,536, 6 query
 heads per kv head) and basal-omni (Gemma 4) are not supported; the 11B max models pass the checks but have not been
-measured. ROCm only, bf16, tile configs tuned on the Radeon 8060S. **Every number in this section was measured by
+measured. ROCm only, bf16, tile configs tuned on the Radeon 8060S. It needs a C compiler at start-up: Triton builds its
+launcher there (`sudo apt install build-essential`). **Every number in this section was measured by
 @kardysm** on the machine below, except the last bullet (a second machine, measured by @piotrkowski); we have not
 reproduced them. The benchmark scripts and raw results are in the author's fork,
 [kardysm/basal#3](https://github.com/kardysm/basal/pull/3).

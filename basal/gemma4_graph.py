@@ -36,11 +36,30 @@ from collections import namedtuple
 import torch
 import torch.nn.functional as F
 
+from . import attn512
+
 
 def text_model(model):
     """The decoder of a Gemma 4 model: Gemma4(Unified)ForConditionalGeneration -> model.language_model,
     Gemma4ForCausalLM -> model. (The same helper as basal/gemma4.py of the eager backend.)"""
     return getattr(model.model, "language_model", model.model)
+
+
+@torch.no_grad()
+def move_except(model, dev, skip):
+    """Moves the parameters and buffers of model's modules to dev in place, except those of the modules under `skip`
+    (a module whose submodules stay where they are). Parameters keep their identity (.data is replaced), so tied ones
+    stay tied."""
+    out = {id(m) for m in skip.modules()}
+    for m in model.modules():
+        if id(m) in out:
+            continue
+        for p in m._parameters.values():
+            if p is not None:
+                p.data = p.data.to(dev)
+        for k, b in m._buffers.items():
+            if b is not None:
+                m._buffers[k] = b.to(dev)
 
 
 def is_gemma4(model):
@@ -114,6 +133,15 @@ def _rot(x, cos, sin):
     return x * cos + torch.cat((-x[..., h:], x[..., :h]), -1) * sin
 
 
+def _pack(sel):
+    """Block lists of a FlexAttention block mask from a [query blocks, key blocks] selection: the count per query
+    block and the selected key blocks first, ascending ([1, 1, ...] for every row and head)."""
+    n = sel.shape[1]
+    cols = torch.arange(n, device=sel.device)[None]
+    idx = torch.where(sel, cols, n).sort(1).values.clamp(max=n - 1)
+    return sel.sum(1).to(torch.int32)[None, None], idx.to(torch.int32)[None, None]
+
+
 def _pre(h, P, C, cos, sin, kb=None, vb=None, pk=None, pv=None):
     """A decoder layer up to attention: the input norm and the projections -> (q [b, L, heads x d] as projected,
     k, v [b, kv heads, P + L, d]: normed, keys rotated, written to kb / vb and after the prefix pk / pv; None for a
@@ -167,8 +195,10 @@ class Gemma4Graph:
     SCORES = 2 ** 26
     BLOCK = 128   # "flex": block size of the block masks
     SMEM = None   # shared memory per block of the GPU (flex's tiles, _flex)
+    global_attn = "flex"  # the kernel of the global layers' plain rows (--global-attn)
 
-    def __init__(self, model, kernels="math", compile=False, merge=False):
+    def __init__(self, model, kernels="math", compile=False, merge=False, fp8=None, fp8_bf16_layers=0, nvfp4_amax=None,
+                 nvfp4_scope="all", stream=None, global_attn="flex"):
         lm = self.lm = text_model(model)
         cfg = self.cfg = lm.config
         n = cfg.num_hidden_layers
@@ -203,8 +233,44 @@ class Gemma4Graph:
         if kernels.get("full_attention") == "fa3":
             raise ValueError("fa3 runs the sliding-window layers only (FlashAttention 3 takes heads up to 256 wide)")
         self.flex = any(k != "math" for k in kernels.values())  # fa3 is flex where a mask is needed
+        # --global-attn triton: the global layers' plain rows (single prompts, the roots of pass 1) through
+        # basal/attn512.py instead of flex; pass 2, compact rows and the readout rows keep flex
+        if global_attn not in ("flex", "triton"):
+            raise ValueError(f"unknown --global-attn {global_attn!r} (flex or triton)")
+        if global_attn == "triton":
+            dims = {layer.self_attn.head_dim for t, layer in zip(self.types, self.layers) if t == "full_attention"}
+            why = attn512.available()
+            if not why and dims != {512}:
+                why = f"the global layers' heads are {sorted(dims)} wide, not 512"
+            if not why and kernels.get("full_attention") != "flex":
+                why = "the global layers run the math kernel here (--gemma-attn math / fa3+math, eager, two-way rows)"
+            if why:
+                raise ValueError(f"--global-attn triton: {why}")
+            attn512.prepare()
+        self.global_attn = global_attn
         self.qkv, self.gu = {}, {}  # merged projections per layer: (linear, output sizes)
-        self.merged = self._merge() if merge else 0
+        if stream is None:
+            self.merged = self._merge() if merge else 0
+            # after merging: a merged weight's parts are its blocks
+            self.fp8 = self._fp8_block(fp8_bf16_layers) if fp8 == "block" else 0
+            if fp8 == "int8":
+                self.fp8 = self._fp8_block(fp8_bf16_layers, int8=True)
+            if fp8 == "nvfp4":
+                self.fp8 = self._nvfp4(nvfp4_amax, fp8_bf16_layers, nvfp4_scope)
+        else:  # the decoder layers come from host memory (--quant-load cpu): each one to `stream` (the GPU), merged and
+            # quantised there before the next, the same operations on the same weights as above
+            self.merged = self.fp8 = 0
+            if fp8 == "nvfp4" and not isinstance(nvfp4_amax, dict):
+                import json
+                with open(nvfp4_amax) as f:
+                    nvfp4_amax = json.load(f)
+            for i, layer in enumerate(self.layers):
+                layer.to(stream)
+                self.merged += self._merge([i]) if merge else 0
+                if fp8 in ("block", "int8"):
+                    self.fp8 += self._fp8_block(fp8_bf16_layers, [i], int8=fp8 == "int8")
+                elif fp8 == "nvfp4":
+                    self.fp8 += self._nvfp4(nvfp4_amax, fp8_bf16_layers, nvfp4_scope, [i])
         if compile or self.flex:  # flex: uncompiled code calls one compiled flex_attention (_flex_attention), an
             # entry per mask kind, head size and rows-only pass: 13 for mini's long states, past the default 8, after
             # which flex_attention runs its unfused reference (fast-nocompile, 2026-10-20)
@@ -233,15 +299,16 @@ class Gemma4Graph:
         return lin, [x.out_features for x in mods]
 
     @torch.no_grad()
-    def _merge(self):
+    def _merge(self, layers=None):
         """One q / k / v GEMM per layer with its own keys and values (q / k with attention_k_eq_v) and one gate / up
-        GEMM per layer, for plain bf16 / fp32 linears without bias (FP8 and torchao linears keep theirs). -> the
-        number of layers merged."""
+        GEMM per layer, for plain bf16 / fp32 linears without bias (FP8 and torchao linears keep theirs); layers: their
+        indices (default every layer). -> the number of layers merged."""
         def plain(mods):
             return all(type(x) is torch.nn.Linear and x.bias is None for x in mods) \
                 and len({x.weight.dtype for x in mods}) == 1
         n = 0
-        for i, layer in enumerate(self.layers):
+        for i in range(len(self.layers)) if layers is None else layers:
+            layer = self.layers[i]
             a, m = layer.self_attn, layer.mlp
             if self.own[i]:
                 qkv = [a.q_proj, a.k_proj] + ([a.v_proj] if a.v_proj is not None else [])
@@ -252,6 +319,120 @@ class Gemma4Graph:
             n += i in self.qkv or i in self.gu
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        return n
+
+    @torch.no_grad()
+    def _fp8_block(self, keep=0, layers=None, int8=False):
+        """Block-scaled FP8 weights (basal/fp8block.py: 128 x 128 blocks, activations in 1 x 128 tiles) for the
+        projections the layers run: q / k / v / o and gate / up / down, merged or not (every size is a multiple of 128,
+        so a merged weight's blocks are its parts' blocks; the parts become views of it and transformers' forward of
+        the model still runs). The per-layer input projections (E2B / E4B), the embeddings and the head stay as loaded.
+        Layer by layer, so the bf16 weights are freed as it goes (31B: 59 GB -> 31 GB). The first `keep` and the last
+        `keep` layers stay bf16 (--fp8-bf16-layers). layers: their indices (default every layer). int8: block-scaled
+        int8 instead (basal/int8block.py, --mode int8; the same blocks). -> the number of GEMMs."""
+        from .fp8block import BLOCK, BlockFP8Linear, fits, sm90
+        if int8:
+            from .int8block import Int8BlockLinear as BlockFP8Linear, build
+            build()  # the Triton kernel, before any layer is compiled
+        else:
+            sm90()  # which GEMM the layers run, decided before they are compiled
+        n = 0
+
+        def ok(merged):
+            return merged is not None and fits(merged[0]) and all(k % BLOCK == 0 for k in merged[1])
+
+        def merged(lin, sizes, mod, names):
+            f, o = BlockFP8Linear.of(lin), 0
+            for name, k in zip(names, sizes):
+                setattr(mod, name, f.part(o, k))
+                o += k
+            return f
+
+        for i in range(len(self.layers)) if layers is None else layers:
+            if i < keep or i >= len(self.layers) - keep:
+                continue
+            layer = self.layers[i]
+            a, m = layer.self_attn, layer.mlp
+            names = ["q_proj"] + (["k_proj"] + (["v_proj"] if a.v_proj is not None else []) if self.own[i] else [])
+            if ok(self.qkv.get(i)):
+                self.qkv[i] = (merged(self.qkv[i][0], self.qkv[i][1], a, names), self.qkv[i][1])
+                n += 1
+            elif i not in self.qkv:  # (a merged weight that does not fit stays bf16, as one GEMM)
+                for name in names:
+                    if fits(getattr(a, name)):
+                        setattr(a, name, BlockFP8Linear.of(getattr(a, name)))
+                        n += 1
+            if ok(self.gu.get(i)):
+                self.gu[i] = (merged(self.gu[i][0], self.gu[i][1], m, ["gate_proj", "up_proj"]), self.gu[i][1])
+                n += 1
+            elif i not in self.gu:
+                for name in ("gate_proj", "up_proj"):
+                    if fits(getattr(m, name)):
+                        setattr(m, name, BlockFP8Linear.of(getattr(m, name)))
+                        n += 1
+            for mod, name in ((a, "o_proj"), (m, "down_proj")):
+                if fits(getattr(mod, name)):
+                    setattr(mod, name, BlockFP8Linear.of(getattr(mod, name)))
+                    n += 1
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return n
+
+    @torch.no_grad()
+    def _nvfp4(self, amax, keep=0, scope="all", layers=None):
+        """NVFP4 weights (basal/nvfp4.py) for q / k / v / o and gate / up / down (scope "all") or gate / up / down only
+        ("mlp": attention stays bf16), merged or not, with the input global scales of `amax` (a JSON file or dict
+        {"<layer>.<projection>": the calibrated largest |input|}). The first and the last `keep` layers stay bf16, as
+        do the embeddings and the head. Layer by layer, the bf16 weights freed as it goes; layers: their indices
+        (default every layer). -> the number of GEMMs."""
+        import json
+        from .nvfp4 import NVFP4Linear, build, fits
+        if scope not in ("all", "mlp"):
+            raise ValueError(f"--nvfp4-scope {scope!r}: all or mlp")
+        if not isinstance(amax, dict):
+            with open(amax) as f:
+                amax = json.load(f)
+        build()
+        n = 0
+
+        def one(i, mod, name):
+            lin = getattr(mod, name)
+            if fits(lin):
+                setattr(mod, name, NVFP4Linear.of(lin, amax[f"{i}.{name}"]))
+                return 1
+            return 0
+
+        def merged(i, pair, mod, names):
+            lin, sizes = pair
+            if not (fits(lin) and all(k % 128 == 0 for k in sizes)):
+                return pair, 0
+            f, o = NVFP4Linear.of(lin, max(amax[f"{i}.{x}"] for x in names)), 0
+            for name, k in zip(names, sizes):
+                setattr(mod, name, f.part(o, k))
+                o += k
+            return (f, sizes), 1
+
+        for i in range(len(self.layers)) if layers is None else layers:
+            if i < keep or i >= len(self.layers) - keep:
+                continue
+            layer = self.layers[i]
+            a, m = layer.self_attn, layer.mlp
+            if scope == "all":
+                names = ["q_proj"] + (["k_proj"] + (["v_proj"] if a.v_proj is not None else []) if self.own[i] else [])
+                if i in self.qkv:
+                    self.qkv[i], k = merged(i, self.qkv[i], a, names)
+                    n += k
+                else:
+                    n += sum(one(i, a, x) for x in names)
+                n += one(i, a, "o_proj")
+            if i in self.gu:
+                self.gu[i], k = merged(i, self.gu[i], m, ["gate_proj", "up_proj"])
+                n += k
+            else:
+                n += one(i, m, "gate_proj") + one(i, m, "up_proj")
+            n += one(i, m, "down_proj")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         return n
 
     # -- the layer --------------------------------------------------------------------------------------------------
@@ -363,9 +544,11 @@ class Gemma4Graph:
 
     @staticmethod
     def _attend(q, k, v, m):
-        """Attention with the kernel the mask is for: a boolean mask (math), a block mask (flex), ("fa3", window) or
-        ("fa3v", window, cu) (compact rows)."""
+        """Attention with the kernel the mask is for: a boolean mask (math), a block mask (flex), ("fa3", window),
+        ("fa3v", window, cu) (compact rows) or ("t512",) (plain causal rows of 512-wide heads, basal/attn512.py)."""
         if isinstance(m, tuple):
+            if m[0] == "t512":
+                return attn512.attention(q, k, v, 1.0).transpose(1, 2).reshape(q.shape[0], q.shape[2], -1)
             if m[0] == "fa3v":
                 return Gemma4Graph._fa3_varlen(q, k, v, m[1], m[2])
             return Gemma4Graph._fa3(q, k, v, m[1])
@@ -385,15 +568,20 @@ class Gemma4Graph:
         sliding layer's last window + MARGIN only, as later rows see window - 1 tokens back at most."""
         return [min(L, self.window + self.MARGIN) if t == "sliding_attention" else L for t in self.types[: self.n_kv]]
 
-    def _plain_masks(self, L, qpos, dev):
+    def _plain_masks(self, L, qpos, dev, twl=None):
         """Boolean masks [b, 1, Lq, L] per layer type of plain causal rows (keys at positions 0..L-1) for queries at
-        qpos [b, Lq] (all positions, or the readout rows)."""
+        qpos [b, Lq] (all positions, or the readout rows). twl [b]: two-way rows (a model trained with two-way
+        reading): in the global layers every query of row b also sees the keys up to twl[b], its last real token
+        (-1: a row read one way); the sliding-window layers stay causal."""
         k = torch.arange(L, device=dev)[None, None, :]
         causal = k <= qpos[:, :, None]
         out = {}
         for t in set(self.types):
             W = self._window(t)
-            out[t] = (causal & (k > qpos[:, :, None] - W) if W else causal)[:, None]
+            if W:
+                out[t] = (causal & (k > qpos[:, :, None] - W))[:, None]
+            else:
+                out[t] = (causal if twl is None else causal | (k <= twl[:, None, None]))[:, None]
         return out
 
     def _suffix_masks(self, mask, pos, lens):
@@ -427,13 +615,32 @@ class Gemma4Graph:
         full = (d >= 1) & (d <= (W - Bk) // Bk) if W else d >= 1
         part = vis & ~full
 
-        def pack(sel):  # selected key blocks first, ascending
-            idx = torch.where(sel, cols, n).sort(1).values.clamp(max=n - 1)
-            return sel.sum(1).to(torch.int32)[None, None], idx.to(torch.int32)[None, None]
-
         def mod(b, h, q, kv):
             return (q >= kv) & (q - kv < W) if W else q >= kv
-        return BlockMask.from_kv_blocks(*pack(part), *pack(full), BLOCK_SIZE=Bk, mask_mod=mod, seq_lengths=(L, L))
+        return BlockMask.from_kv_blocks(*_pack(part), *_pack(full), BLOCK_SIZE=Bk, mask_mod=mod, seq_lengths=(L, L))
+
+    def _compact_window_block(self, T, cu, W, mod):
+        """FlexAttention block mask of compact rows when every layer runs flex (Blackwell workstation GPUs: no varlen
+        FlashAttention): query block i visits only the key blocks from its first query's prompt start (and window, W
+        not None) on, up to i; a key block is full (no mask evaluated) when it and the query block lie in one prompt
+        and every pair is within the window. mod: the mask inside the partial blocks."""
+        from torch.nn.attention.flex_attention import BlockMask
+        Bk, dev = self.BLOCK, cu.device
+        n = -(-T // Bk)
+        first = torch.arange(n, device=dev) * Bk                        # each block's first token
+        doc = torch.bucketize(torch.stack([first, first + Bk - 1]).clamp(max=T - 1), cu[1:], right=True)  # [2, n]:
+        # the prompt of a block's first / last token (no host tensor: this runs inside graph captures)
+        lo = cu[doc[0]] // Bk                                           # first key block a query block needs
+        if W:
+            lo = torch.maximum(lo, (first - W + 1).clamp(min=0) // Bk)
+        cols = torch.arange(n, device=dev)[None]
+        d = torch.arange(n, device=dev)[:, None] - cols                 # [n, n]: query block - key block
+        vis = (cols >= lo[:, None]) & (d >= 0)
+        full = (d >= 1) & (doc[0][None] == doc[1][:, None])
+        if W:
+            full = full & (d <= (W - Bk) // Bk)
+        return BlockMask.from_kv_blocks(*_pack(vis & ~full), *_pack(full), BLOCK_SIZE=Bk, mask_mod=mod,
+                                        seq_lengths=(T, T))
 
     def _dense_block(self, B, Lq, Lk, mod, dev):
         """A block mask that visits every (query block, key block) pair, each evaluated with mod: its block lists do
@@ -492,10 +699,11 @@ class Gemma4Graph:
 
     # -- the forward --------------------------------------------------------------------------------------------------
     def _compact_masks(self, kernels, T, cu, ro, pads):
-        """Masks of compact rows: each prompt attends to itself only. Sliding layers: FlashAttention 3's varlen kernel
-        with the window; global layers: a flex block mask that visits, for each query block, the key blocks from the
-        start of its first query's prompt on (the prompts are contiguous); the readout rows: a dense block mask over
-        the row (one query per prompt)."""
+        """Masks of compact rows: each prompt attends to itself only. With the fa3 kernels: FlashAttention 3's varlen
+        kernel with the window in the sliding layers and in the global layers a flex block mask that visits, for each
+        query block, the key blocks from the start of its first query's prompt on (the prompts are contiguous); with
+        flex in every layer, _compact_window_block. The readout rows: a dense block mask over the row (one query per
+        prompt)."""
         from torch.nn.attention.flex_attention import BlockMask
         Bk, dev = self.BLOCK, cu.device
         tok = torch.arange(T, device=dev)
@@ -517,6 +725,8 @@ class Gemma4Graph:
                 return ok & (q - kv < W) if W else ok
             if kernels[t] == "fa3":
                 m_all[t] = ("fa3v", W, cu)
+            elif "fa3" not in kernels.values():  # (fa3: the global layers' mask below, as gated on Hopper)
+                m_all[t] = self._compact_window_block(T, cu, W, same)
             else:
                 m_all[t] = BlockMask.from_kv_blocks(num[None, None], idx[None, None].contiguous(), BLOCK_SIZE=Bk,
                                                     mask_mod=same, seq_lengths=(T, T))
@@ -528,21 +738,28 @@ class Gemma4Graph:
             m_ro[t] = self._dense_block(1, ro.shape[1], T, rows, dev)
         return m_all, m_ro
 
-    def _masks(self, kernels, L, pos, prefix, mask, ro, pads):
+    def _masks(self, kernels, L, pos, prefix, mask, ro, pads, twl=None):
         """The attention masks of one forward per layer type, for every query and for the readout rows ro: boolean
         masks for "math", block masks for "flex" (reading pads), ("fa3", window) for FlashAttention 3 over plain
-        rows."""
+        rows. twl: the two-way rows of plain rows (_plain_masks; the global layers then need the math kernel)."""
         from .lean import TreeMask
         dev, types = pos.device, set(self.types)
         math = [t for t in types if kernels[t] == "math"]
         flex = [t for t in types if kernels[t] != "math"]  # fa3: FlashAttention 3 for every query of plain rows
         m_all, m_ro = {}, {}
         if prefix is None:
+            if twl is not None and any(kernels[t] != "math" for t in types if self._window(t) is None):
+                raise ValueError("two-way rows need the math kernel in the global layers")
             if math:
-                m_all = self._plain_masks(L, pos, dev)
-                m_ro = self._plain_masks(L, ro, dev) if ro is not None else {}
+                m_all = self._plain_masks(L, pos, dev, twl)
+                m_ro = self._plain_masks(L, ro, dev, twl) if ro is not None else {}
             for t in flex:
-                m_all[t] = ("fa3", self._window(t)) if kernels[t] == "fa3" else self._plain_block(L, t, dev)
+                if kernels[t] == "fa3":
+                    m_all[t] = ("fa3", self._window(t))
+                elif self.global_attn == "triton" and self._window(t) is None:
+                    m_all[t] = ("t512",)
+                else:
+                    m_all[t] = self._plain_block(L, t, dev)
                 if ro is not None:
                     m_ro[t] = self._rows_block(pads["ro"], ro.shape[1], L, t)
             return m_all, m_ro
@@ -565,20 +782,20 @@ class Gemma4Graph:
         return m_all, m_ro
 
     def _run(self, kernels, ids, pos, kv=None, prefix=None, mask=None, ro=None, between=None, pads=None,
-             compiled=False, cu=None):
+             compiled=False, cu=None, twl=None):
         """kernels: per layer type; ids / pos [b, L]; kv: per own layer (K, V) buffers [b, kv heads, L, d] that receive
         this pass's keys and values (pass 1; a shorter buffer receives the last ones: kv_lens); prefix: per own layer
         (K, V) [b, kv heads, P, d] (sliding layers: the last kv_lens of the root may be all there is) the rows continue
         (pass 2) with mask (the trie: additive, or a TreeMask for flex); ro [b, R]: readout positions -> final hidden states
         [b, R, D] (None: every position, [b, L, D]); between(i) is called before layer i (the long lane); pads: the
-        padded index tensors of the flex masks (_pads); compiled: the compiled layer functions. The masks of every
+        padded index tensors of the flex masks (_pads); compiled: the compiled layer functions; twl: two-way rows (_plain_masks). The masks of every
         query and of the readout rows are built here (_masks; the kernel follows the mask). A layer is two functions
         (_pre, _post), so the rows-only layers can split after the keys and values; a shared layer's keys and values
         are those its source layer kept."""
         if cu is not None:  # compact rows (forward_compact)
             m_all, m_ro = self._compact_masks(kernels, ids.shape[1], cu, ro, pads)
         else:
-            m_all, m_ro = self._masks(kernels, ids.shape[1], pos, prefix, mask, ro, pads or {})
+            m_all, m_ro = self._masks(kernels, ids.shape[1], pos, prefix, mask, ro, pads or {}, twl)
         pre, post, embed = (self.pre, self.post, self.embed) if compiled else (_pre, _post, self._embed)
         h, pli = embed(ids)
         types = set(self.types)
@@ -619,20 +836,22 @@ class Gemma4Graph:
         return {t: "math" for t in self.kernels}
 
     @torch.no_grad()
-    def forward(self, ids, kv=None, ro=None, between=None, compiled=True):
+    def forward(self, ids, kv=None, ro=None, between=None, compiled=True, twl=None):
         """Plain causal rows [b, L] from position 0 (right padding cannot reach a real token); kv: per own layer
         (K, V) buffers [b, kv heads, L, d] that receive the keys and values (pass 1); ro [b, R]: readout positions ->
         [b, R, D] (None: [b, L, D]); between(i) before layer i (the long lane: uncompiled, one layer at a time).
-        compiled: through the compiled forward (when the engine compiles; shapes without a graph run uncompiled)."""
+        compiled: through the compiled forward (when the engine compiles; shapes without a graph run uncompiled).
+        twl [b]: per row its last real token when it is read two-way, else -1 (a model trained with two-way
+        reading; the global layers' kernel is then math)."""
         L = ids.shape[1]
         pos = torch.arange(L, device=ids.device)[None].expand(ids.shape[0], L)
         compiled = compiled and between is None
         return self._run(self.kernels, ids, pos, kv=kv, ro=ro, between=between, pads=self._pads(pos, None, ro),
-                         compiled=compiled and self.compiled)
+                         compiled=compiled and self.compiled, twl=twl)
 
     @torch.no_grad()
     def forward_compact(self, ids, pos, cu, ro, compiled=True):
-        """Compact rows (--batches compact, with the fa3 kernels): single prompts packed back to back in one row
+        """Compact rows (--batches compact, with the fa3 or flex kernels): single prompts packed back to back in one row
         [1, T] (positions from 0 per prompt, cu: cumulative token counts [prompts + 2], int32; the padding after the
         last prompt is one more prompt nobody reads) -> final hidden states at ro [R] (one readout per prompt): [R, D].
         No padding of rows to graph lengths or of row counts."""

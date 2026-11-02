@@ -1,0 +1,7 @@
+{
+  "name": "basal",
+  "owner": {"name": "Remek Kinas"},
+  "plugins": [
+    {"name": "basal", "source": "./", "description": "Typed decisions with calibrated confidence from a local basal server.", "version": "2.5.0"}
+  ]
+}

@@ -141,6 +141,33 @@ The thresholds hold for the mix of question types and prompts you calibrated on.
 how well one temperature carries over to a kind of decision it was not fitted on, such as a new question in
 production.
 
+## Answer sets (coverage)
+
+`--conformal 0.8,0.9,0.95` (off by default) also fits answer sets, by split conformal prediction:
+
+1. For each type and coverage level *L*, the CERT decisions (not used for the temperatures) are scored with the
+   probabilities as served: the score of a decision is 1 − p(gold).
+2. `p_min` is the *k*-th largest p(gold) of the type's *n* CERT decisions, *k* = ⌈(*n* + 1) *L*⌉. The answer set of a
+   question is every option with p ≥ `p_min`, the most probable first and always in.
+3. For a new request like the labelled ones, the set then holds the correct answer with probability ≥ *L*. This holds
+   on average over requests, not for each one, and only for decisions like those you calibrated on.
+4. With fewer than *L* / (1 − *L*) CERT decisions of a type (9 at 0.9, 19 at 0.95) there is no `p_min`, and the set
+   is every option.
+
+The FIT decisions, held out from `p_min`, report the coverage, mean set size and singleton share of the sets (the
+`answer sets` table, and `conformal.levels[L].per_type[type]` in the file). A question asks for its set with
+`"coverage": L`, a level the file has. A file fitted on other option orders or another layout keeps no levels, as it
+keeps no thresholds.
+
+```jsonc
+"conformal": {"method": "split conformal on CERT ...",
+              "levels": {"0.9": {"per_type": {"choice": {"p_min": 0.142, "n": 512, "cert_coverage": 0.902,
+                                                         "fit_coverage": 0.897, "fit_mean_size": 1.61, ...}}}}}
+```
+
+A question with `"max_error": r` on a `choice`, `noul` or `score` question gets `"abstain": true` when its
+confidence is below the type's certified threshold for *r* (step 3 of the method), or when the type has none.
+
 ## `multi`: the fallback threshold of a label set
 
 A `multi` question with a `fallback` label (see [FEATURES.md](FEATURES.md#label-constraints-exclusive-and-fallback))
@@ -224,11 +251,20 @@ classify    ...
 ## Which model a file belongs to
 
 The probabilities, and so the temperatures and thresholds, belong to one model. `fitted_on` records the model as given
-to `basal-calibrate` and, for a Hugging Face model, its revision (commit). `basal-serve --calibration FILE` compares
+to `basal-calibrate`, except that a Hugging Face cache snapshot path is recorded as its repository ID in
+`fitted_on.model` and its commit in `fitted_on.revision`. A repository ID likewise records its resolved commit;
+plain local directories keep their path without a revision. `basal-serve --calibration FILE` compares
 them with the served model: on another model, or another revision, it warns at start-up and reports
 `"calibration_warning"` in `GET /v1/models`; with `--strict-calibration` it refuses to start. A local copy of a model
 matches its Hugging Face name by the last part of the path (`/data/basal-omni-1.0-max` = `Remek/basal-omni-1.0-max`).
 The files that ship in a model's directory are not checked.
+
+With `--adapter`, `basal-calibrate` records the adapter as `fitted_on.adapter` (`<name>@<sha256 of its
+adapter_config.json and weights>[:12]`, so a rescaled adapter is another one)
+and basal-serve compares it like the model: a file fitted with another adapter, or with one when none is served (or
+the reverse), warns or, with `--strict-calibration`, refuses. Without `--calibration`, a `CALIBRATION[.<engine>].json`
+in the adapter directory is loaded first (and checked); the model's own file is the base model's, so it is loaded for
+its temperatures only, without thresholds, and the answers are marked `"calibration": "unvalidated"`.
 
 ## How many items
 
@@ -298,3 +334,6 @@ how the file you would otherwise serve does on your data.
 *ECE* is the expected calibration error of the top answer (10 bins), with the temperatures as basal-serve applies them
 (in calibration file 2, a `choice` question gets its option-count bucket temperature, so the `choice` row covers all
 its buckets); *bound* is the one-sided 95% upper bound of the error on CERT.
+The temperatures in the table are also the ones basal-serve applies: a bucket row shows the bucket's temperature, or
+the `choice` type temperature marked `(type)` when the file has no such bucket, and when the buckets cover every option
+count (2–255) the `choice` row marks its type temperature `(not served: buckets)`.

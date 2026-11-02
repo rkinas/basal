@@ -18,6 +18,9 @@ these task formats. Measured quality is in [Results](#results); check it on your
 Inputs may be structured: a state, instructions, a claim or a label description that is a JSON object or array is
 written into the prompt as compact JSON (this has been true for every question type since 1.5).
 
+A task question is expanded into decision questions named `<name>::<part>`, so in a request with task questions no
+question's name may contain `::` (HTTP 422).
+
 ## classify
 
 ```json

@@ -89,13 +89,18 @@ def stack_params(w, c, dtype="bfloat16"):
     return dict(embed=embed, norm=get("model.norm.weight"), lm_head=head, layers=lay)
 
 
-def load_params(model_dir, dtype="bfloat16", device=None):
-    """Checkpoint directory -> (config, parameter pytree on `device`, default: JAX's default device)."""
+def load_params(model_dir, dtype="bfloat16", device=None, adapter=None):
+    """Checkpoint directory -> (config, parameter pytree on `device`, default: JAX's default device). adapter: a LoRA
+    adapter (basal.adapter) merged into the checkpoint's weights before they are stacked."""
     import jax
+
+    from .adapter import merge_numpy
     c = model_config(model_dir)
     w = {}
     for f in sorted(Path(model_dir).glob("*.safetensors")):
         w.update(load_safetensors(f))
+    if adapter:
+        merge_numpy(w, adapter)
     return c, jax.device_put(stack_params(w, c, dtype), device)
 
 
@@ -200,7 +205,8 @@ class TPUBackend(GraphBackend):
     READOUTS = 64  # positions per readout call (padded; a forward with more readouts reads them in several calls),
     #               so the readout has one shape per bucket whatever the questions x option orders of its rows
 
-    def __init__(self, model_dir, dtype="bfloat16", shared=True, warm=True, max_len=4096, platform="tpu"):
+    def __init__(self, model_dir, dtype="bfloat16", shared=True, warm=True, max_len=4096, platform="tpu",
+                 adapter=None):
         import jax
         self.jax = jax
         if dtype not in DTYPES:
@@ -224,7 +230,8 @@ class TPUBackend(GraphBackend):
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
         self.shared = shared
-        self.cfg, self.params = load_params(model_dir, dtype, self.device)
+        self.cfg, self.params = load_params(model_dir, dtype, self.device, adapter)
+        self.adapter_modules = len(adapter.deltas) if adapter else 0
         full, qb, kvb = self.LENS[-1], self.Q_BLOCK, self.KV_BLOCK
         self._fwd = jax.jit(lambda p, ids, pos, end: forward(
             p, ids, pos, end, c=c, **(dict(q_block=qb, kv_block=kvb) if ids.shape[1] > full else {})))

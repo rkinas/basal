@@ -51,7 +51,7 @@ matches the GGUF file. In this mode `--model` is downloaded without its weights.
 # llama-cpp-python builds with Metal on macOS arm64; on Linux the default build runs on the CPU. For CUDA, build it
 # first, without uv's cache (a cached CPU build would be reused silently; checked on an RTX 4090: --mode gguf on the GPU):
 #   CMAKE_ARGS="-DGGML_CUDA=on" uv pip install --no-cache llama-cpp-python --no-binary llama-cpp-python
-uv pip install "basal[gguf] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[gguf] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-bench --model ./basal-1.5-4.5B-GGUF --modes gguf@basal-1.5-4.5B-GGUF/basal-1.5-4.5B-Q8_0.gguf \
             gguf@basal-1.5-4.5B-GGUF/basal-1.5-4.5B-Q4_K_M.gguf
 ```
@@ -135,6 +135,43 @@ ids, not for Ollama, which takes text. With the fix, `llama-tokenize` splits the
 orders exactly like the Hugging Face tokenizer (stock conversions: none of them). The fixed tokenizer fields of a
 stock conversion equal those of the `-GGUF` files for all three basal-2.0 and basal-1.5 models, and fixing a `-GGUF`
 file leaves it unchanged, byte for byte.
+
+## Decision metadata for LM Studio and llama-server (`--systemone`)
+
+llama.cpp's server answers `POST /v1/systemone` itself for a GGUF file that carries decision metadata; LM Studio 0.4.26
+and newer serves such a file as a decision model on its own `/v1/systemone` and on `/v1/decisions` (OpenAI's Decisions
+API). `basal-export-gguf --systemone` writes that metadata into a copy of a basal `-GGUF` file (the tensors are not
+touched; [INSTALL.md](INSTALL.md#lm-studio-gguf-as-a-decision-model) has the LM Studio steps):
+
+```bash
+basal-export-gguf ./basal-2.0-4.5B-GGUF lmstudio/basal-2.0-4.5B-Q8_0.gguf \
+    --gguf basal-2.0-4.5B-GGUF/basal-2.0-4.5B-Q8_0.gguf --systemone
+```
+
+| key | value |
+|---|---|
+| `<arch>.decision.type` | `openjev`: one prompt per question, the logits of the option codes `A`-`Z` at the last prompt token, a softmax divided by the temperature. This is basal's prompt-format-2 readout for up to 26 options |
+| `tokenizer.chat_template.systemone` | basal's prompt as a template: the fixed system prompt, `State:` / `Question:` / `Options:` with the codes, in the model's chat template, plus the answer prefill `{"answer": "`. Polish or English, as `basal-serve` picks; JSON states and descriptions as compact JSON. LM Studio's `/v1/decisions` hands OpenAI choices over as `{"value", "description"}` objects and score levels as `{"label", "description"}`: they are shown as the System One request `{value: description}` would be |
+| `<arch>.decision.temperature.<type>.<bucket>` | the temperatures of `CALIBRATION.llamacpp.json` (else `CALIBRATION.gguf.json`, else `CALIBRATION.json`; or `--calibration`) on llama.cpp's option-count buckets 2, 3-5, 6-10 and 11+. basal's buckets 2-10 and 11-26 map onto them exactly; a calibration that would need two temperatures in one bucket is refused |
+
+Before writing, the tool renders a fixed set of requests with the template and with `basal-serve`'s own prompt code
+and stops if one differs, or if the codes `A`-`Z` are not the single tokens llama.cpp reads. The tokenizer fields get
+the fix above as well (for the basal-omni files: the token types of a few added tokens as `tokenizer.json` has them);
+on 620 prompts per model, llama.cpp's tokens of the rendered prompt equal the Hugging Face ones. Prompt-format-1 models
+(basal-1.x: two option orders), other layouts and two-way models are refused. Limits of this route:
+
+- **26 options per question.** llama.cpp labels options 27-52 `a`-`z`, basal codes them `AA`, `AB`, ...; the template
+  refuses a question with more than 26 options (or fewer than 2) with an HTTP error, never with a wrong answer.
+- **choice, noul and score only**, one option order, the keys always shown (no `option_keys: "hide"`), the language
+  picked from the text. `act`, `multi`, `tool`, `coverage`, `max_error`, the certified thresholds, `facts` and
+  `ask_if` need `basal-serve` (`--mode gguf` or `--mode llamacpp` on the same file).
+- **Calibration**: the temperatures above, nothing else. For your own data, fit them with `basal-calibrate` on the same
+  file in process (`--model ./basal-2.0-4.5B-GGUF --mode gguf --gguf <file>`) or against
+  `basal-serve --mode gguf --no-calibration` with `--url`, then write them with `--systemone --calibration
+  CALIBRATION.custom.json`.
+
+llama-server serves the same file: `llama-server -m lmstudio/basal-2.0-4.5B-Q8_0.gguf -c 16384`, then
+`POST /v1/systemone` with `state` and `questions` as for `basal-serve`.
 
 ## Other llama.cpp front ends: send token ids
 

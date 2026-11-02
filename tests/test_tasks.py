@@ -184,6 +184,15 @@ def test_extract_line_without_candidates_is_not_stated():
 def test_task_name_separator_refused():
     with pytest.raises(ValueError, match="may not contain"):
         tasks.expand({"state": "x", "questions": {"a::b": {"type": "classify", "labels": ["p", "q"]}}})
+    # a decision question named like one of a task's expanded questions took its answer: classify "task" read the
+    # choice "task::labels" (its label "red") and the choice's own answer was dropped
+    with pytest.raises(ValueError, match="may not contain"):
+        tasks.expand({"state": "x", "questions": {
+            "task": {"type": "classify", "labels": ["invoice", "letter"]},
+            "task::labels": {"type": "choice", "instructions": "Which colour?", "criteria": ["red", "blue"]}}})
+    # without task questions nothing is expanded, and "::" stays allowed in names
+    out = run(FakeServer([0.6, 0.4]), {"state": "x", "questions": {"a::b": {"type": "noul", "instructions": "?"}}})
+    assert list(out["answers"]) == ["a::b"]
 
 
 def test_task_language_from_state_then_instructions():

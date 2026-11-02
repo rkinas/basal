@@ -1,0 +1,181 @@
+"""Prepared start-up (basal/prepared.py): the key of a prepared directory, where --prepared auto finds one, and what
+saving and loading write and read (torch's cache-artifact calls stubbed: the compiled kernels themselves are checked on
+a GPU)."""
+import argparse
+import json
+
+import pytest
+import torch
+
+from basal import gdn_graph, prepared
+from basal.server import add_engine_args
+
+ENV = dict(basal="2.5.0", torch="2.11.0", cuda="12.8", python="3.13.0", triton="3.5.0", fla="0.5.2", gpu="NVIDIA H100",
+           capability=[9, 0])
+
+
+def model(d, **cfg):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.json").write_text(json.dumps({"model_type": "qwen3_5", "hidden_size": 1024, **cfg}))
+    return d
+
+
+def test_key_covers_what_compiled_code_depends_on(tmp_path):
+    m = model(tmp_path / "m")
+    f = prepared.key_fields(m, "fast", env=ENV)
+    assert prepared.key(f) == prepared.key(prepared.key_fields(m, "fast", env=dict(ENV)))
+    # the weights' location and the transformers version that wrote config.json do not change the compiled code
+    same = model(tmp_path / "m2", _name_or_path="elsewhere", transformers_version="5.17.0")
+    assert prepared.key(prepared.key_fields(same, "fast", env=ENV)) == prepared.key(f)
+    for other in (prepared.key_fields(m, "fp8", env=ENV), prepared.key_fields(m, "fast", "float16", env=ENV),
+                  prepared.key_fields(m, "fast", attn="fa3", env=ENV),
+                  prepared.key_fields(m, "fast", env=dict(ENV, gpu="NVIDIA RTX PRO 6000")),
+                  prepared.key_fields(m, "fast", env=dict(ENV, torch="2.12.0")),
+                  prepared.key_fields(model(tmp_path / "m3", hidden_size=2048), "fast", env=ENV)):
+        assert prepared.key(other) != prepared.key(f)
+
+
+def write(d, fields):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "manifest.json").write_text(json.dumps(dict(fields=fields, key=prepared.key(fields))))
+    return d
+
+
+def test_locate_model_dir_then_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    m = model(tmp_path / "m")
+    f = prepared.key_fields(m, "fast", env=ENV)
+    assert prepared.locate(m, f) is None
+    c = write(tmp_path / "cache" / prepared.key(f), f)
+    assert prepared.locate(m, f) == c
+    shipped = write(m / "prepared" / prepared.key(f), f)
+    assert prepared.locate(m, f) == shipped  # shipped with the model first
+    assert prepared.locate(m, f, "off") is None
+    assert prepared.locate(m, f, str(c)) == c
+    other = prepared.key_fields(m, "fast", env=dict(ENV, gpu="NVIDIA A100"))
+    assert prepared.locate(m, other) is None  # another GPU: nothing
+    write(tmp_path / "x", other)
+    assert prepared.locate(m, f, str(tmp_path / "x")) is None  # a directory for other fields is not loaded
+
+
+def test_save_and_load(tmp_path, monkeypatch):
+    """Loading writes the artifacts into the compile cache the engine then reads: ~/.cache/basal/torchinductor when
+    TORCHINDUCTOR_CACHE_DIR holds Inductor's /tmp default (engine.persist_compile_cache, which the engine calls only
+    when it is built, after the load)."""
+    import os
+
+    from torch._inductor.runtime.cache_dir_utils import default_cache_dir
+
+    import basal
+    calls = {}
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", default_cache_dir())  # as Inductor sets it on import
+    # basal-serve's case: nothing given before basal was imported (a test that loads Triton first sets the default)
+    monkeypatch.setattr(basal, "INDUCTOR_CACHE_DIR_GIVEN", False)
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"kernels", None))
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts",
+                        lambda b: calls.setdefault("loaded", (b, os.environ["TORCHINDUCTOR_CACHE_DIR"])))
+    monkeypatch.setattr(gdn_graph, "fla_record", lambda p: (p.write_text("{}"), 3)[1])
+    f = dict(ENV, architecture="a", mode="fast", dtype="bfloat16", attn="auto")
+    man = prepared.save(tmp_path / "p", f, fla=True)
+    assert man["key"] == prepared.key(f) and man["saved"] == {"inductor": 0, "inductor_bytes": 7, "fla_kernels": 3}
+    assert sorted(p.name for p in (tmp_path / "p").iterdir()) == sorted(prepared.FILES)
+    monkeypatch.setattr(gdn_graph, "FLA_CONFIGS", gdn_graph.FLA_CONFIGS)  # restored after the test
+    out = prepared.load(tmp_path / "p")
+    assert calls["loaded"] == (b"kernels", str(tmp_path / "home" / ".cache" / "basal" / "torchinductor"))
+    assert out["fla"] == str(tmp_path / "p" / "fla_configs.json")
+    assert gdn_graph.FLA_CONFIGS == tmp_path / "p" / "fla_configs.json"  # fla_pin() reads the prepared table
+    from torch._inductor.utils import clear_caches
+    monkeypatch.undo()
+    clear_caches()  # Inductor's memoised paths follow the restored environment again (later tests compile)
+
+
+def test_server_flag():
+    ap = add_engine_args(argparse.ArgumentParser())
+    assert ap.parse_args([]).prepared == "auto"
+    assert ap.parse_args(["--prepared", "off"]).prepared == "off"
+
+
+def test_prepare_needs_a_gpu(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(SystemExit, match="CUDA GPU"):
+        prepared.main(["--model", "x"])
+
+
+def gdn_model(d):
+    return model(d, layer_types=["linear_attention", "full_attention"])
+
+
+def test_key_of_a_shipped_directory(tmp_path, monkeypatch):
+    """What a directory built on the release machine must share with a user's start: the Python minor version only
+    (patch releases do not change compiled code); fla's version only for Qwen3.5 models, whose kernels it runs."""
+    monkeypatch.setattr("platform.python_version_tuple", lambda: ("3", "12", "13"))
+    assert prepared.environment()["python"] == "3.12"
+    m, g = model(tmp_path / "m"), gdn_model(tmp_path / "g")
+    assert "fla" not in prepared.key_fields(m, "fast", env=ENV)
+    assert prepared.key(prepared.key_fields(m, "fast", env=ENV)) == prepared.key(
+        prepared.key_fields(m, "fast", env=dict(ENV, fla=None)))  # a Gemma 4 / Llama start with or without fla
+    assert prepared.key_fields(g, "fast", env=ENV)["fla"] == "0.5.2"
+    assert prepared.key(prepared.key_fields(g, "fast", env=ENV)) != prepared.key(
+        prepared.key_fields(g, "fast", env=dict(ENV, fla="0.5.3")))
+
+
+def test_fetch_from_the_model_repository(tmp_path, monkeypatch):
+    """--prepared auto with a Hugging Face model: prepared/<key>/ of its repository only (the files its manifest
+    lists), next to the snapshot; none when the repository has no such key, its fields differ or the Hub fails."""
+    import huggingface_hub
+    snap = gdn_model(tmp_path / "snap")
+    f = prepared.key_fields(snap, "fast", env=ENV)
+    k = prepared.key(f)
+    repo = {f"prepared/{k}/manifest.json": json.dumps(dict(fields=f, key=k, files=["inductor.bin", "manifest.json"])),
+            f"prepared/{k}/inductor.bin": "kernels"}
+    asked = []
+
+    def download(name, filename, revision=None):
+        asked.append((name, filename, revision))
+        if filename not in repo:
+            raise FileNotFoundError(filename)
+        p = snap / filename
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(repo[filename])
+        return str(p)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    d = prepared.fetch("Remek/x", "main", f)
+    assert d == snap / "prepared" / k and (d / "inductor.bin").read_text() == "kernels"
+    assert [a[1] for a in asked] == [f"prepared/{k}/manifest.json", f"prepared/{k}/inductor.bin"]
+    assert prepared.locate(snap, f) == d  # the next start finds it in the snapshot
+    other = prepared.key_fields(snap, "fast", env=dict(ENV, gpu="NVIDIA A100"))
+    assert prepared.fetch("Remek/x", "main", other) is None  # not in the repository
+    repo[f"prepared/{prepared.key(other)}/manifest.json"] = json.dumps(dict(fields=f, key=prepared.key(other)))
+    assert prepared.fetch("Remek/x", "main", other) is None  # a manifest for other fields is not used
+
+
+def test_download_leaves_prepared_out(monkeypatch, tmp_path):
+    import huggingface_hub
+    from basal.engine import resolve
+    seen = {}
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda name, **kw: (seen.update(kw), str(tmp_path))[1])
+    resolve("Remek/x-not-local")
+    assert seen["ignore_patterns"] == ["prepared/*"] and seen["allow_patterns"] is None
+    resolve("Remek/x-not-local", metadata_only=True)
+    assert seen["ignore_patterns"] is None
+
+
+def test_broken_inductor_file_is_left_out(tmp_path, monkeypatch):
+    def broken(b):
+        raise EOFError("truncated")
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", broken)
+    (tmp_path / "inductor.bin").write_bytes(b"x")
+    assert prepared.load(tmp_path)["inductor"] == "not loaded (EOFError)"
+
+
+def test_save_lists_its_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"kernels", None))
+    man = prepared.save(tmp_path / "p", dict(ENV, architecture="a", mode="fast", dtype="bfloat16", attn="auto"))
+    assert man["files"] == ["inductor.bin", "manifest.json"]
+
+
+def test_prepare_into_model_needs_a_local_directory(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    with pytest.raises(SystemExit, match="local model directory"):
+        prepared.main(["--model", "Remek/not-a-dir", "--into-model"])

@@ -125,6 +125,40 @@ def test_gemma_flex_refused_before_loading(tmp_path, monkeypatch):
         engine_module.GraphBackend(str(tmp_path), gemma_attn="flex")
 
 
+@pytest.mark.parametrize("gemma_attn, refused", [("flex", False), ("math", True), ("auto", False)])
+def test_gemma_compact_rows_need_fa3_or_flex(tmp_path, monkeypatch, gemma_attn, refused):
+    """--batches compact for basal-omni without FlashAttention 3: with the flex kernels (sm_120's auto) it loads; with
+    the math kernel it is refused before anything is loaded."""
+    import basal.engine as engine_module
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "gemma4"}), encoding="utf-8")
+
+    def loaded(*_):
+        raise RuntimeError("loading")
+    monkeypatch.setattr("basal.engine.AutoTokenizer.from_pretrained", loaded)
+    monkeypatch.setattr("basal.engine.set_attention", lambda *_, **__: "fa2")
+    monkeypatch.setattr(engine_module, "attention_available", lambda impl: None)
+    monkeypatch.setattr(engine_module, "gemma_fast_kernels", lambda: "flex")
+    with pytest.raises(ValueError if refused else RuntimeError, match="fa3 \\(Hopper\\) or flex" if refused else "loading"):
+        engine_module.GraphBackend(str(tmp_path), gemma_attn=gemma_attn, batches="compact", compile=True)
+
+
+def test_gemma_flex_compact_rows_are_off_by_default():
+    """Compact rows with the flex kernels are opt-in: --batches auto (the default) keeps basal-omni's padded rows on
+    them, only --batches compact packs them. FlashAttention 3 takes compact rows under auto, and other models need
+    --batches compact for torch's varlen attention, as before."""
+    from basal.engine import GEMMA_COMPACT, compact_rows
+    flex = {"sliding_attention": "flex", "full_attention": "flex"}
+    assert parser().parse_args(["--model", "m"]).batches == "auto"
+    assert compact_rows("auto", False, flex, None, True) == (None, None)
+    assert compact_rows("compact", False, flex, None, True) == ("flex", None)
+    assert compact_rows("compact", False, flex, None, False) == (None, None)
+    assert compact_rows("auto", True, {"sliding_attention": "fa3", "full_attention": "flex"}, None, True)[0] == "fa3"
+    assert compact_rows("compact", False, {"sliding_attention": "math", "full_attention": "math"}, None, True) == \
+        (None, GEMMA_COMPACT)
+    assert compact_rows("auto", False, None, None, True) == (None, None)
+    assert compact_rows("compact", False, None, None, True) == ("torch varlen", None)
+
+
 def test_default_mode_requires_both_mlx_packages_on_mps(monkeypatch):
     monkeypatch.setattr(server_module.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(server_module.torch.backends.mps, "is_available", lambda: True)
@@ -261,6 +295,22 @@ def test_model_list_conforms_to_official_schema():
     m = models_payload("basal-1.5-4.5B", "mlx", {}, {"noul": 1.56})["models"][0]   # basal-calibrate checks it
     assert m["temperature_per_prim"] == {"noul": 1.56}
     assert models_payload("basal-1.5-4.5B", "mlx", {})["models"][0]["temperature_per_prim"] == {}
+
+
+def test_certified_model_metadata():
+    cal = {"thresholds": {
+        "0.01": {"per_type": {"choice": {"confidence": 0.99}, "noul": {"confidence": None},
+                              "score": {"confidence": 0.95}, "act": {"confidence": 0.9}}},
+        "0.05": {"per_type": {"choice": {"confidence": 0.9}, "noul": {"confidence": 0.8}}},
+    }}
+    assert server_module.certified_table(cal) == {"0.01": {"choice": 0.99, "score": 0.95},
+                                                   "0.05": {"choice": 0.9, "noul": 0.8}}
+    assert server_module.certified_table({}) == {}
+    entry = models_payload("m", "fast", {}, certified=server_module.certified_table(cal),
+                           context={"limit": 8192, "overflow": "refuse", "truncate_head": 1 / 3})["models"][0]
+    assert entry["certified"] == server_module.certified_table(cal)
+    assert entry["context"]["limit"] == 8192
+    assert "certified" not in models_payload("m", "fast", {}, certified=None)["models"][0]
 
 
 def swapped_prompts_differ(crit_a, crit_b, t="choice"):
@@ -489,6 +539,13 @@ def test_max_len_flag_for_vllm_and_sglang():
     assert parser().parse_args(["--mode", "sglang", "--max-len", "32768"]).max_len == 32768
 
 
+def test_api_key_and_cors_flags():
+    defaults = parser().parse_args([])
+    assert defaults.api_keys is None and defaults.cors_origins == ""
+    args = parser().parse_args(["--api-keys", "keys.json", "--cors-origins", "https://a.example,https://b.example"])
+    assert args.api_keys == "keys.json" and args.cors_origins == "https://a.example,https://b.example"
+
+
 def test_viz_segments_rebuild_the_prompt():
     from basal.prompt import render
     from basal.viz import segments
@@ -526,6 +583,23 @@ def test_viz_packing_and_served_comparison():
     assert abs(out["questions"][1]["served_max_diff"] - 0.025) < 1e-9 and out["served"] is served["answers"]
 
 
+def test_viz_refuses_a_prompt_over_the_context():
+    """The lens runs the whole prompt through every layer: a prompt over the server's context limit is refused (HTTP
+    422) before any forward, in every mode."""
+    import types
+    from basal.prompt import RequestError
+    from basal.server import http_status
+    from basal.viz import Explainer
+    ex = Explainer.__new__(Explainer)
+    ex.fmt, ex.tok = 2, lambda p, add_special_tokens=False: types.SimpleNamespace(input_ids=list(range(len(p))))
+    ex.srv = types.SimpleNamespace(context=(16, "the model's context"),
+                                   jobs_for=lambda q, question, options: [((0, 1), "x" * 20, [1, 2])])
+    ex.lens = lambda *_: pytest.fail("no forward for a prompt over the context")
+    with pytest.raises(RequestError) as e:
+        ex.explain_branch({"type": "choice", "branches": [("Q?", ["a", "b"])], "state": "s"}, 0)
+    assert "the model's context (16 tokens); this prompt has 20" in str(e.value) and http_status(e.value) == 422
+
+
 def test_out_of_memory_frees_the_failed_forward():
     """An out-of-memory error's frames are cleared before the requests get it: the failed forward's tensors are freed at
     once, not at a later garbage collection (until then the next requests ran out of memory too; ultra eager, 20 Oct)."""
@@ -550,3 +624,10 @@ def test_out_of_memory_frees_the_failed_forward():
         with pytest.raises(torch.OutOfMemoryError):
             await fut
     asyncio.run(main())
+
+
+def test_help_renders_every_option():
+    """argparse %-formats help texts: a measured share like "99.4%" must be written "99.4%%" or --help fails (or
+    prints the action's fields)."""
+    text = parser().format_help()
+    assert "option_strings" not in text and "+1.6% at best" in " ".join(text.split())

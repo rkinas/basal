@@ -21,10 +21,11 @@ class Tok:
     pad_token, eos_token, pad_token_id = "<pad>", "</s>", 0
 
 
-def tiny():
+def tiny(layers=2):
     torch.manual_seed(0)
-    cfg = LlamaConfig(vocab_size=64, hidden_size=128, intermediate_size=256, num_hidden_layers=2, num_attention_heads=4,
-                      num_key_value_heads=2, max_position_embeddings=1024, attention_bias=True, mlp_bias=True)
+    cfg = LlamaConfig(vocab_size=64, hidden_size=128, intermediate_size=256, num_hidden_layers=layers,
+                      num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=1024, attention_bias=True,
+                      mlp_bias=True)
     m = LlamaForCausalLM(cfg).eval()
     m.config._attn_implementation = "sdpa"
     with torch.no_grad():  # random biases (zero by default), so that a missing bias shows
@@ -60,7 +61,7 @@ def request(state, n_q, first=20):
 def packed(be, groups):
     """Units of groups concatenated as one sequence: ids, positions, sub_end, and the ancestor mask of the packed
     tries (GraphBackend's block mask, rows of different units see nothing of each other)."""
-    ids, pos, sub, seg_g, par_g, unit = [], [], [], [], [], []
+    ids, pos, sub, seg_g, par_g = [], [], [], [], []
     off = nb = 0
     for u, (pk, *_rest) in enumerate(be._units(groups)):
         t, pp, sg, last, par = pk
@@ -235,6 +236,40 @@ def test_warmup_with_a_small_vocabulary():
     assert make(tiny(), warm=True).run_shared(groups_mixed()[:1])
 
 
+@gpu
+def test_warmup_compiles_every_kernel_copy():
+    """After the start-up warmup no row count compiles a kernel. Triton compiles one copy per tile config and per class
+    of each integer argument (1, a multiple of 16, other), and the request that needs a new one waits for it (the first
+    timed pass of S with 1 question and of M with 2 in the request matrix, before the warmup covered them). Three
+    layers: the warmup forwards skip the middle one, and the forwards below run all three."""
+    from basal import strix
+    runtime = getattr(getattr(triton, "knobs", None), "runtime", None)
+    if not hasattr(runtime, "jit_cache_hook"):
+        pytest.skip("Triton without knobs.runtime.jit_cache_hook")
+    # The hook runs at every miss of a kernel's in-process cache, before Triton looks in its disk cache, so a copy the
+    # disk cache holds counts as built too.
+    for k in (strix._attn_fwd, strix._swiglu_mm, strix._linear, strix._rmsnorm, strix._rope):
+        k.device_caches.clear()  # the copies other tests compiled in this process
+    be = make(tiny(layers=3), warm=True)
+    assert len(be.layers) == 3
+    built = []
+
+    def hook(*, repr, **_):
+        built.append(repr)
+        return False  # compile as usual
+
+    old, runtime.jit_cache_hook = runtime.jit_cache_hook, hook
+    try:
+        for L in (1, 20, 48, 208, 512, 513, 720, 1536, 1537, 2160, 2304, 2305, 2320, 4609, 5000):
+            for nq in (1, 2, 7, 16, 48, 513, 528):
+                if nq <= L:
+                    be.forward(*be._warm_row(L, nq))
+        be._wait()
+    finally:
+        runtime.jit_cache_hook = old
+    assert built == []
+
+
 def llama(**kw):
     base = dict(hidden_size=2048, intermediate_size=11008, num_attention_heads=16, num_key_value_heads=2,
                 head_dim=128, num_hidden_layers=1, vocab_size=64)  # basal-1.5 / basal-2.0 4.5B shapes
@@ -283,6 +318,27 @@ def test_mode_selects_the_backend(monkeypatch, tmp_path):
     assert type(srv.backend).__name__ == "StrixHaloFastBackend"
     assert type(bench_module.build("strix", "md")).__name__ == "StrixHaloFastBackend"
     assert server_module.MODES["strix"][0] == "strix" and "strix" in server_module.DETERMINISTIC_KINDS
+
+
+def test_wait_spins_then_polls(monkeypatch):
+    """_wait queries the event without sleeping for the first SPIN_S seconds of a forward, then sleeps between queries."""
+    from basal.strix import StrixHaloFastBackend as B
+    import basal.strix as strix_module
+
+    class Event:
+        def __init__(self): self.left = 5
+        def record(self): pass
+        def query(self):
+            self.left -= 1
+            return self.left < 0
+    sleeps = []
+    monkeypatch.setattr(strix_module.torch.cuda, "Event", Event)
+    monkeypatch.setattr(strix_module.time, "sleep", sleeps.append)
+    B._wait()
+    assert sleeps == []
+    monkeypatch.setattr(B, "SPIN_S", -1.0)
+    B._wait()
+    assert sleeps == [0.0005] * 5
 
 
 def test_graph_backend_untouched():

@@ -1,3 +1,378 @@
+# What is new in basal 2.5
+
+Released 2 November 2026. Default answers to decision requests are byte-identical to 2.4.1 (checked on an H100:
+basal-omni-1.0-mini, basal-omni-1.0-max and basal-omni-pico with `--mode fast`, mini and pico with `--mode eager`); what
+is new is opt-in unless a line says otherwise.
+
+- **`rank`: thousands of candidates in one request (experimental):** yes / no screening in shared-context requests of
+  50 candidates, then one choice question over the top 20, beyond the 255 options of a choice question (at most
+  10,000 candidates per request, `--rank-max-candidates`). The choice reads the screening state again, a state-cache
+  hit with `--state-cache-gb`. [NAVIGATE.md](NAVIGATE.md)
+- **`basal-navigate`: retrieval by navigating a document tree (experimental):** topics, pages and passages judged level
+  by level with `rank` questions, no index; a tree builder for Markdown, HTML, text and JSONL documents, optional
+  k-means topics (`basal[navigate]`), budgets, pinned pages and extra candidates from your own retriever. Measured
+  with basal-omni-1.0-max on one H100 against a dense 8B embedder: MultiDoc2Dial R@1 44.27 vs 34.70, ConditionalQA
+  Hit@1 63.47 vs 44.28; the final choice helped on the first and lowered Hit@1 by 1.48 on the second (`top` 0 turns
+  it off); 24-64 s per query (median, 8 concurrent clients). [NAVIGATE.md](NAVIGATE.md#measured-results)
+- **`basal-navigate search --split-at N`: very large collections (experimental, off by default):** a level with more
+  than N candidates goes out as several requests of at most N, so a tree whose levels exceed basal-serve's
+  `--rank-max-candidates` (10,000) is searched without refused requests and without raising the limit; `--per-page`
+  sets the last stage's passages per page from the command line. Not faster: on Natural Questions (2.68 million
+  paragraphs, page levels of ~11,700 candidates, one H100) 51.6 s per question against 51.4 s with one request per
+  level. Scores can differ slightly from one-request runs (at most 0.045); the first passage and the top 10 were the
+  same on every measured question. [NAVIGATE.md](NAVIGATE.md#very-large-collections-experimental)
+- **Tokenize once (default):** the prompts of a request share the template and the state; the server now tokenizes
+  that shared part once and each prompt's own tail after it, cut after a newline where whole-prompt tokenization
+  always ends a token, so the engine reads the same ids as before. For the tokenizers of the basal models (Gemma 4,
+  Qwen3.5, Bielik v3), checked token for token against whole-prompt tokenization on the release request sets, `rank`
+  and `basal-navigate` requests and 12,000 fuzzed state / question splits each; other tokenizers tokenize each prompt
+  whole as before. A `rank` request of 300 candidates over a 12,514-token state takes 0.14 s of CPU instead of 5.77 s
+  on one thread of an H100 server (0.08 s instead of 3.4 s on an Apple M4 Pro).
+- **basal-viz reads Gemma 4 basal-omni text decisions:** the logit lens runs over basal-omni's text decoder with the
+  output head's bias and the final logit softcap, so every layer's code distribution ends at the probabilities the
+  eager engine serves. Requests with media are refused with a message (basal-viz explains text only). Gemma 4
+  inspection is limited to 2,048 tokens per rendered prompt; concurrent HTTP inspections are serialized together
+  with their served comparisons so layer hooks cannot capture another request's activations.
+  [SERVING.md](SERVING.md#see-how-a-decision-is-made)
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#75](https://github.com/rkinas/basal/pull/75).
+- **basal-viz with `"facts": "auto"`:** the explained state carries the computed facts block (dates, gaps, VAT), as
+  basal-serve reads it, so the page explains the prompt the served answer came from and the comparison with
+  basal-serve's probabilities holds for such requests.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#73](https://github.com/rkinas/basal/pull/73).
+- **basal-viz on the MLX engine (`--mode mlx` / `mlx-q8`):** on a Mac the page reads the layers of the engine basal-serve
+  runs there (the `-MLX-8bit` / `-MLX-fp4` exports, bf16 weights, or 8-bit weights made at load with `mlx-q8`), with the
+  codes read as that engine reads them, so it shows where a quantised model's decision forms or moves (Llama-architecture
+  models; Gemma 4 basal-omni stays on the PyTorch modes). A prompt over the context is refused with HTTP 422 in every mode
+  instead of running untruncated. [SERVING.md](SERVING.md#see-how-a-decision-is-made)
+  Contributed by Grzegorz Brzezinka (@agentGreg), [#78](https://github.com/rkinas/basal/pull/78).
+- **basal-calibrate on a Hugging Face cache snapshot:** `--model <cache>/models--<org>--<name>/snapshots/<commit>`
+  records `fitted_on.model` as the repo id and `fitted_on.revision` as the commit, as basal-serve names the model, so
+  the file is applied when that snapshot is served (before, the path was recorded and `--strict-calibration` refused
+  the file as fitted on another model). The same holds with `--url` and `--model`; repo ids and plain directories are
+  recorded as before. Contributed by Paweł Kiszczak (@pawelkiszczak), [#71](https://github.com/rkinas/basal/pull/71).
+- **LoRA adapters at load** (`--adapter DIR` on basal-serve, basal-calibrate and basal-bench): an mlx-lm or PEFT LoRA
+  adapter (rsLoRA too) is merged into the weights at load, with the arithmetic of PEFT's `merge_and_unload`;
+  `--mode vllm` and `sglang` serve a merged copy, and `basal-fuse-adapter` writes the merged checkpoint (for GGUF,
+  Ollama or llama.cpp, or to ship it). The answers equal the fused checkpoint's and PEFT's merge's bit for bit
+  (Gemma 4 E4B and 31B adapters on an H100 in `fast`, `eager`, `fp8` and `vllm`, E4B in `mlx` on a Mac, and a
+  basal-finetune adapter of basal-omni-pico). Calibration files record the adapter
+  (`fitted_on.adapter`) and the adapter directory's own file comes first. Refused with a message: GGUF, Ollama and
+  llama.cpp, FP8 checkpoints, `fast-exit`, `nvfp4`, `int8`, `vllm` for Qwen3.5 models, DoRA.
+  [SERVING.md](SERVING.md#serving-modes),
+  [CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to). Contributed by Paweł Kiszczak (@pawelkiszczak),
+  [#52](https://github.com/rkinas/basal/pull/52).
+- **Tests on Apple M5**: the float32 MLX tests set `MLX_ENABLE_TF32=0` (`tests/conftest.py`), since MLX runs float32
+  matmuls in TF32 on an M5's GPU by default; served bf16 models are not affected. Contributed by Grzegorz Brzezinka
+  (@agentGreg), [#76](https://github.com/rkinas/basal/pull/76).
+- **basal-omni-pico keeps float32 on an Apple M5** (`--mode mlx`): pico's float32 compute (the default; not
+  `--mlx-compute bf16`) sets `MLX_ENABLE_TF32=0` at load unless the variable is already set, so an M5's GPU does not
+  run its matmuls in TF32. Not yet verified on M5 hardware; on an Apple M4 Pro the answers are byte-identical to before
+  (200 prompts, and 2,000 readouts of five questions in two orders over one state).
+  [HARDWARE.md](HARDWARE.md#apple-silicon)
+- **basal-router: several replicas behind one port.** `basal-router --replicas URL ...`, or `--gpus 0,1` to start one
+  basal-serve per GPU (stopped with the router, also when the router is killed). Requests over the same state go to the
+  same replica (state-hash routing with bounded load), so its state cache keeps working; a replica that answers 503 or
+  not at all gets no requests until it is ready again. On two H100s the router served 1.58x the requests of one GPU
+  (twice the clients); scaling is not linear yet. [SERVING.md](SERVING.md#several-gpus-metrics-and-health-25).
+- **Cascades in basal-router** (`--escalate URL --escalate-below P`): questions whose top probability is under P are
+  asked again of a bigger model, and every answer says which model answered (`answered_by`). Repeat both for ordered
+  levels (for example basal-omni-pico -> mini -> ultra), each with its own threshold; with two or more levels every
+  answer names its level and model, /metrics counts answers per level, and a level that is down leaves the previous
+  answer. On a held-out half, mini -> ultra at 0.95 served about 1.5x the requests of ultra alone on one H100 at the
+  same accuracy (within 0.5 pt); at 16 clients its p95 latency is higher than ultra's. `--route SCRIPT=URL` sends states
+  mostly in one script (such as Cyrillic) to their own replicas. [RESULTS.md](RESULTS.md#cascade-pico-mini-ultra).
+- **`--blend` in basal-router**: the weighted mean of several models' probabilities (`--blend URL ... --blend-weights
+  ...`). 0.6 ultra + 0.2 mini + 0.2 pico scored +0.45 pt above ultra alone on a held-out half (95% interval +0.09 to
+  +0.81). A quality option, not a speed option: every question goes to every model. Blended answers are not calibrated;
+  refit thresholds with basal-calibrate before automating them.
+- **LLM fallback in basal-router** (`--fallback URL --fallback-model NAME --fallback-below T`): after the last level, a
+  choice question whose top probability is still under T goes to a chat model you serve behind an OpenAI-compatible
+  endpoint, which must pick one of the options; its answer (`"answered_by": "fallback"`, `"calibrated": false`) replaces
+  the basal one, and the basal one stays when the endpoint fails or is late. With basal-omni-1.0-ultra and, as an
+  example, Gemma 4 31B-it with thinking at T = 0.8, on a held-out half: +1.40 pt over ultra alone (95% interval +0.90 to
+  +1.89; 8.4% of the questions sent), when no call is cut by the timeout. One call took 54 s at the median and 308 s at
+  p95 (one H100, one request at a time); with the default `--fallback-timeout 60`, 46 of 100 calls kept the basal
+  answer, about three quarters of the gain on that sample (`--fallback-timeout 600` for offline or review use). Fallback
+  answers repeat only with the endpoint settings in [SERVING.md](SERVING.md#several-gpus-metrics-and-health-25)
+  (batch-invariant vLLM, no prefix cache, no chunked prefill).
+- **A live web page for basal-serve** (`--ui on`, default off): at `/ui`, the server's status, traffic since start
+  (requests, failures, rates, p50 / p95 / p99, per endpoint), the state cache, GPU and host telemetry, the configuration
+  as parsed and resolved (secrets redacted) and the last 200 requests' metadata, never their text; `--ui full` also
+  shows each of those requests and its answer on a click (kept in memory; use `--api-keys` on a shared host). A request
+  pays one append to a ring in memory; the rest is computed when a page polls, at most once a second. Open one page at a
+  time: on one H100 (basal-omni-1.0-mini, `--mode fast`) the throughput stayed within 1% of `--ui off` with 0, 1 or 2
+  pages open, and the p50 latency at 8 clients rose 0.4-2.2% with 1-2 pages and 5.2% with `--ui full` and one page
+  (`--ui off`'s own p50 varied by up to 9% between passes); at 1 client the latency stayed within 0.9% and the answers
+  byte-identical. A fresh server's first pass at 8 clients is slower with or without the UI. With `--api-keys` the page
+  asks for a key. [SERVING.md](SERVING.md#live-web-page-25)
+- **One page for basal-router and all its replicas** (`basal-router --ui on`, default off): at the router's `/ui`,
+  the replicas, readiness, routing by state and by load, requests in flight, failures, the cascade / blend / fallback
+  counters, traffic through the router since start and its last 200 requests (with the replica that answered), next to
+  one card per replica with its own status, traffic, state cache and GPU telemetry, read from that replica's `/ui/state`
+  (start the replicas with `--ui on`; one without it shows what the router knows). A request pays one append to a ring
+  in memory; the replicas are read only while a page polls, at most once a second. On 2 H100 (basal-omni-1.0-mini,
+  `--mode fast`, one page open) the answers at 1 client stayed byte-identical to `--ui off`, and the p50 latency at 8
+  clients rose 1.3%, within `--ui off`'s own spread between passes.
+  [SERVING.md](SERVING.md#one-page-for-basal-router-and-its-replicas)
+- **`GET /metrics` (Prometheus) and start-up states**: basal-serve and basal-router export their counters and gauges;
+  basal-serve answers HTTP 503 `{"status": "starting"}` while the model loads and warms up, and a failed start-up exits
+  instead of hanging. [SERVING.md](SERVING.md#prometheus-metrics).
+- **Prepared start-up** (`basal-prepare`, `--prepared auto`): the kernels tuned for this GPU and engine version are
+  saved once and loaded at start-up, and the answers are byte-identical to a cold start. The model repositories carry
+  `prepared/<key>/` for the H100 (basal-2.0-mini, basal-omni-pico, basal-omni-1.0-mini, basal-omni-1.0-max); `--prepared
+  auto` fetches only the directory for your GPU and versions. First start on an H100 with empty caches:
+  basal-omni-1.0-mini 290 -> 172 s, basal-omni-1.0-max 259 -> 164 s, basal-omni-pico 105 -> 81 s.
+- **basal-omni-pico starts the same every time** on the H100 (default path): fla's kernel configs are pinned, so empty,
+  warm and long-used caches give bit-identical answers. 2.4.1's pico fast answers could differ between starts (kernel
+  autotuning); 2.5's do not.
+- **basal-omni-1.0-ultra on a 48 GB card**: `--quant-load cpu` quantises one layer at a time on the GPU, so ultra in
+  `--mode fp8` or `int8` fits a 48 GB card, and `--graph-memory-gb N` sizes the CUDA graphs for N GiB, so every GPU
+  given the same N answers the same: on an H100 with 32 GB taken, 1,700 of 1,700 answers bit-identical to the unloaded
+  card ([QUANTIZATION.md](QUANTIZATION.md)). Also fixed: with little free GPU memory, a prompt just past the largest
+  compact graph no longer fails (HTTP 500).
+- **Answer sets and abstain** (per question): `"coverage": 0.9` returns the set of options that holds the right one with
+  that probability; with `"max_error"`, a choice, yes/no or score answer gets `"abstain": true` below the certified
+  threshold for its type. [API.md](API.md#using-the-confidence).
+- **Second read** (`--reread T`): answers below T are read again (the state twice) and the two reads combined;
+  `--reread-image` reads an image again at more soft tokens.
+- **Two-way models** (trained to read the state in both directions) in the fast engine, and **isolated options**
+  (basal.json `"option_isolation"`) for models trained to read the options as a set.
+- **Compact rows for basal-omni on Blackwell workstation GPUs** (`--batches compact`; opt-in, off by default: faster,
+  but the answers differ from the default rows'): with the flex kernels (sm_120, such as the RTX PRO 6000) compact rows
+  run with a flex block mask per prompt in every layer; before, they needed FlashAttention 3. One RTX PRO 6000
+  Blackwell Max-Q, 16 clients, one question per request, against the default rows: basal-omni-1.0-mini 1.17-1.20x the
+  questions per second, the same top answer on 98.67-99.60% of the readouts and 0-1 changed where the default's margin
+  was at least 0.05; basal-omni-1.0-max 1.21-1.27x, 98.00-99.75%, 2-4 such changes (600-2,000 readouts per workload).
+  Five questions over a long state are not faster. [OMNI.md](OMNI.md#what-the-engine-does-differently-for-gemma-4)
+- **basal-omni-pico in the fast engine with the caches**: the state cache, several questions over one state,
+  `--prefix-cache on` and `--batches compact` (with `--readout-layer on`), with answers as close to fp32 as `--mode
+  eager`'s (1,700 held-out decisions, H100); compact rows serve 1.11-1.16x the short single questions per second at 16
+  clients (no speed-up on long states).
+- **`--long-lane` for basal-omni-pico** (`--long-lane-gdn on`; opt-in, off by default: its answers are a little further
+  from float32 than `--mode eager`'s): without the option `--long-lane` stays refused for Qwen3.5 models, and the
+  message names it. One H100, 1,700 held-out decisions against eager float32: with five questions per state the same
+  top answer on 99.39% of 8,500 readouts against eager bf16's 99.51% (0.12 pt fewer); single questions, two option
+  orders and both within 0.1 pt of eager bf16's (99.71%, 99.65%, 99.46%). No speed was measured for it.
+  [SERVING.md](SERVING.md#serving-modes)
+- **basal-omni-pico on a Mac**: `--mode mlx` serves it from its own Hugging Face repository (bf16 weights, computed in
+  float32); on 1,700 held-out prompts its answers match CUDA eager float32 (top-1 100%). `--mode mps` stays refused for
+  it.
+- **basal-omni-pico on a Mac in bf16** (`--mode mlx --mlx-compute bf16`; opt-in, off by default: faster, but further
+  from float32 than the default float32 compute): Apple M4 Pro, 1,700 held-out single prompts: 0.136 s per prompt
+  against 0.171 s for the GGUF Q8_0 path on the same Mac (1.25x); the same top answer as CUDA eager float32 on 99.41%,
+  1 changed where float32's margin was at least 0.05 (the default: 100%, 0); five questions in two option orders
+  (17,000 readouts): 99.33%, 8 changed (the default: 99.98%, 0). [QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon)
+- **basal-omni-1.1-max images and audio through `--mode vllm --media on`**: the same top answer as the eager media path
+  on 97.4% of images and 95.8% of clips (every one where eager's margin is at least 0.2), 2.7x / 2.9x the requests per
+  second at 8 in flight; `"detail": "high"` stays on `--mode eager`. [OMNI.md](OMNI.md#vllm---mode-vllm).
+- **`--mode vllm` against `--mode eager`**: vLLM reads in its own kernels, so its answers are close to eager's, not
+  equal: the same top answer on 98.3% of 361 readouts (basal-omni-1.0-mini), 98.3% (basal-omni-pico), 98.6%
+  (basal-omni-1.0-max) and 97.6% (basal-omni-1.1-max) on an H100; answers may differ on near-ties, and vLLM's default
+  preset varies from run to run. `--vllm-preset deterministic` gives reproducible answers, bit-identical to 2.4.1's on
+  four models; it is refused for basal-omni-pico before vLLM starts (vLLM has no batch-invariant kernel for its Gated
+  DeltaNet layers).
+- **`--vllm-overlap on`** (`--mode vllm`; opt-in, off by default: a little faster, and the answers differ from off's):
+  up to four engine calls in flight through vLLM's async engine, batched together by its scheduler. One RTX PRO 6000
+  Blackwell Max-Q, 16 clients, basal-omni-1.0-mini and 1.0-max: 1.01-1.07x the questions per second (1.21x for mini on
+  2,000 development decisions, one per request), the same top answer as off on 98.17-99.65% of the readouts, 2-6
+  changed where off's margin was at least 0.05 (600-2,000 readouts per workload); two runs with off differed about as
+  much. With `--media on` it batches requests with media too (off: one call per request): basal-omni-1.1-max on one
+  H100 at 8 clients, new images 1.18-1.49x the requests per second; audio clips about the same as off (0.89-1.23x);
+  the same requests again 1.35-1.50x. The same top answer as off on 99.68% of 310 images and 99.65-100% of 285 clips
+  (no change where off's margin was at least 0.05), accuracy -0.32 / 0.00 to -0.35 points.
+  [OMNI.md](OMNI.md#vllm---mode-vllm)
+- Experimental `--deterministic --lanes N` (still behind `BASAL_EXPERIMENTAL_LANES`): now exact, not yet faster.
+- **Ready question sets and agent frameworks**: presets (triage, moderation, compliance) in `basal-run --preset` and
+  `Basal.preset`; `guard_input`, `guard_output` and `route_intent` (Python and TypeScript), strict or permissive, whose
+  default thresholds are hand-picked, not certified (with `max_error` they use the served model's own calibration per
+  question type); thin LangChain, LlamaIndex and CrewAI tools over the HTTP API (`basal.adapters`).
+  [SERVING.md](SERVING.md#agent-frameworks-and-ready-question-sets-25).
+- **TypeScript client** (`clients/typescript`, no runtime dependencies): typed questions and answers, answer sets,
+  abstain, `ask_if` / `depends_on`, images and errors; build it from the repository (not on npm yet).
+- **Other /v1/systemone servers and clients**: the Python client talks to other servers of the same request shape (a
+  bearer key, list criteria, noul answers that carry only `noul`); basal-serve takes `ask_if` / `depends_on`, an
+  `images` alias and `--error-format openai`. [API.md](API.md#requests-from-other-v1systemone-servers-clients).
+- **basal-attach**: serve a chat model that was never trained on basal (Gemma 4, Qwen, ...) as a decision model; it
+  starts uncalibrated and basal-calibrate fits it on your labelled requests.
+  [SERVING.md](SERVING.md#attach-a-model-that-was-not-trained-on-basal).
+- **basal-agree**: any backend against the native engine: top-answer agreement with a 95% interval, |Δp|, paired
+  accuracy, and whether each question gets the same answer alone as in a request.
+- **basal-finetune**: LoRA on your own labelled decisions ([FINETUNE.md](FINETUNE.md); tested on Apple Silicon with
+  basal-omni-pico, other GPUs not yet). **basal-selfcheck** compares your setup with shipped reference answers, and
+  [OLD_GPUS.md](OLD_GPUS.md) runs basal-omni-pico on older GPUs (GTX 10xx, RX 480 / 580, Intel Iris Xe) through
+  llama.cpp's Vulkan backend.
+- **basal as the local backend of your decision code** ([BACKEND.md](BACKEND.md), a one-function example) and a basal
+  skill for coding agents (`skills/basal`).
+- **Accuracy by document length**: [RESULTS.md](RESULTS.md#accuracy-by-document-length) and each model card show
+  accuracy per document-length bucket, with the number of items in each. The calibration report shows the temperatures
+  as served.
+- **The state cache keeps branches**: cached states that share a history are all kept, and a request continues from the
+  longest one it can extend. On branching agent histories (H100) it reused 1.6-1.7x the prefix tokens of the cache
+  before it, with answers as close to the uncached ones. Contributed by Marcin Brzeżański (@marcinbrzezanski),
+  [#56](https://github.com/rkinas/basal/pull/56).
+- **Continuous integration**: every pull request runs ruff and the CPU tests on Linux and macOS. Contributed by Dariusz
+  Koryto (@dkoryto), [#53](https://github.com/rkinas/basal/pull/53).
+- **`basal-interpolate`: linear weight interpolation of two checkpoints** that share a base model (WiSE-FT, model
+  soups), streamed tensor by tensor; quantized or mismatched pairs (tensors, config, tokenizer) are refused before
+  anything is written. [INTERPOLATION.md](INTERPOLATION.md). Contributed by Dariusz Koryto (@dkoryto),
+  [#60](https://github.com/rkinas/basal/pull/60).
+- **API keys, CORS and request IDs for `basal-serve`:** opt-in `--api-keys` protects HTTP and MCP routes (except
+  `GET /health`), `--cors-origins` enables browser access from listed origins, and every response carries an
+  `x-request-id` header (also without these flags). Contributed by Paweł Kiszczak (@pawelkiszczak),
+  [#68](https://github.com/rkinas/basal/pull/68).
+- **basal-router passes API keys on:** a client's `Authorization` / `X-API-Key` header goes, as it came, to every
+  replica its request reaches (never to `--fallback`), so replicas started with `--api-keys` (the same key file on
+  each) check it as when called directly. The router checks no key itself. Requests without a key are sent as before.
+  [SERVING.md](SERVING.md#api-access)
+- **A Python client for every question type** (`basal.client`): methods for `multi`, `act`, `tool`, `classify`,
+  `verify`, `compress` and `extract` next to `choice`, `yes_no` and `score`; `decide` with question builders for several
+  questions in one request; `AsyncBasal` for asyncio; the server's status codes as `InvalidRequest` (422),
+  `OutOfMemory` (503, retried with `retries=`) and `ServerError` (500), all still a `RuntimeError`; `models()`,
+  `health()` and your own httpx client (`http=`). Existing calls are unchanged.
+  [INSTALL.md](INSTALL.md#nvidia-gpu-the-basal-engine-recommended). Contributed by Dariusz Koryto (@dkoryto),
+  [#58](https://github.com/rkinas/basal/pull/58).
+- **MCP model selection:** servers configured with a model list expose `list_models` and optional `model` arguments on
+  `decide` and `decide_many`; `basal-mcp --model NAME` forwards that model on each request.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#66](https://github.com/rkinas/basal/pull/66).
+- **`GET /v1/models` reports certified thresholds and context.** Calibration thresholds are listed per question type when
+  the calibration matches the served model; context metadata includes its limit, overflow policy and truncation head share.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#64](https://github.com/rkinas/basal/pull/64).
+- **Serving errors:** invalid `max_error` and set bounds are rejected before inference; error responses include a `code`
+  (`INVALID_REQUEST`, `OUT_OF_MEMORY` or `INTERNAL_ERROR`) and 422 responses include `detail`.
+  Contributed by Paweł Kiszczak (@pawelkiszczak), [#62](https://github.com/rkinas/basal/pull/62).
+- **Fix: task questions next to a question named `<task>::<part>`**: such a name is one of the task's expanded
+  questions, so the task read that question's answer as its own (a `classify` named `task` answered with the label of a
+  `choice` named `task::labels`) and the other answer was dropped. In a request with task questions a name with `::`
+  is now refused (HTTP 422), as a task question's own name already was. Reported by Sourcery's review of #58.
+  Contributed by Dariusz Koryto (@dkoryto), [#59](https://github.com/rkinas/basal/pull/59).
+- **Fix: replicas that basal-router starts listen on 127.0.0.1** (`--gpus`): they took basal-serve's default host,
+  0.0.0.0, so the network could reach them past the router (and past its `--host`). A `--host` after `--` still
+  applies.
+- **Fix: a request with an empty `"questions"` object** is refused with HTTP 422 (`INVALID_REQUEST`, "must name at
+  least one question"); before, it reached the engine and failed with HTTP 500 (2.4.1 too).
+- **`POST /v1/decisions`: OpenAI's Decisions API on basal-serve.** `client.decisions.create` of the OpenAI Python SDK
+  works against basal-serve: predicate, choice and score questions are decided as the System One request they stand
+  for (predicate as noul), with the same probabilities as `/v1/systemone`, and answered in OpenAI's shape; errors in
+  OpenAI's error shape. [API.md](API.md#openais-decisions-api-post-v1decisions).
+- **LM Studio serves basal as a decision model** (GGUF, prompt-format-2 models): `basal-export-gguf --systemone`
+  writes llama.cpp's decision metadata into a copy of a `-GGUF` file: basal's prompt as a template and the calibrated
+  temperatures; the weights are not touched. LM Studio 0.4.26 or newer then answers choice, yes/no and score questions
+  on its own `/v1/systemone` and `/v1/decisions`, up to 26 options, without `basal-serve` in front (`llama-server`
+  too). Against `basal-serve --mode gguf` on the same files (Apple M4 Pro, 620 questions per model): the same prompts
+  token for token and the same top answer on every question answered, probabilities within 0.0041; LM Studio stops a
+  request after 30 s, which 5 long requests of the 4.5B hit (split long states or send fewer questions per request; for
+  long documents `basal-serve --mode gguf` has no such limit). `act`, `multi`, `tool`, the certified thresholds and more
+  than 26 options stay with `basal-serve`. [INSTALL.md](INSTALL.md#lm-studio-gguf-as-a-decision-model).
+- **`--mlx-forward basal` on Apple Silicon** (opt-in; the default `mlx-lm` is unchanged): basal's own forward over
+  mlx-lm's layers for Llama and Gemma 4. The layers from the last one with its own keys and values on run at the
+  readout rows only, the GPU starts early, and the projections that read one input become one matrix where a check at
+  load finds the same bits. basal-omni-1.0-mini-MLX on an Apple M4 Pro: one prompt 225 -> 131 ms, one question in two
+  orders 222 -> 179 ms, one prompt over 3,000 tokens 5.3 -> 3.0 s; basal-2.0-mini-MLX-8bit 2-4% faster on short
+  prompts. Top answers equal the default path on 184 of 184 readouts per model. Details in
+  [QUANTIZATION.md](QUANTIZATION.md#mlx-apple-silicon).
+- **basal-omni-1.0-ultra in int8 for GPUs without FP8** (opt-in, ultra only): `--mode int8` uses block FP8's layout
+  with int8 values (128 x 128 weight blocks, 128-feature activation tiles, exact int32 sums per block) for Ampere and
+  newer, with its own `CALIBRATION.int8.json`. 99.4% of top answers as bf16; the answers accepted at the 1% target
+  0.52% wrong (bf16 0.47%). Max failed the same check. Details in
+  [QUANTIZATION.md](QUANTIZATION.md#int8-for-gpus-without-fp8-25).
+- **`--state-cache-bits 8`** (opt-in, with `--state-cache-gb` / `--prefix-cache`): cached states kept as 8-bit integers
+  with a scale per group (keys per channel, values per token), about 1.7x as many states per GB. On
+  basal-omni-1.0-max, answers over cached states agree with uncached ones on 99.45% of top answers. The accepted
+  answers' error at the 1% target is 0.85%, against 0.81% with the 16-bit cache. 4 bits failed the same check.
+- **basal-omni-1.0-ultra in block FP8 or NVFP4** (opt-in, ultra only): `--mode fp8` quantises ultra's bf16 weights as
+  they load (128 x 128 block scales, the first and last 2 layers in bf16): one 80 GB H100 at 1.35x the decisions/s of
+  bf16 and 53 instead of 74 GB at 16 clients; the state cache is off in block FP8 until 2.5.1 (`--state-cache-gb` is
+  not used, with a warning at start-up). `--mode nvfp4` with ultra's calibrated input scales and its own calibration
+  file: 2.3x bf16's scoring speed on Blackwell, 2.4% of top answers change. Other basal-omni models are refused in both
+  modes; they failed the accuracy check. Details in
+  [QUANTIZATION.md](QUANTIZATION.md#basal-omni-10-ultra-quantised-at-load-time-25).
+- **Fix: FP8 checkpoints load without a bf16 copy on the GPU** (`-FP8` repositories, `--mode fast` and `--mode fp8`):
+  the loader built the whole bf16 model on the GPU before it read the checkpoint, so basal-omni-1.0-ultra-FP8 needed
+  about 95 GB and ran out of CUDA memory on an 80 GB H100. The model is now built without its weights and the
+  checkpoint's tensors become its parameters: ultra-FP8 serves on one 80 GB H100 in both modes (44.8 GB after
+  start-up). Checkpoints that fitted before load the same tensors bit for bit and give the same answers.
+- **Fix: edited chat states with the state cache** (`--mode fast --state-cache-gb`): a state whose last turn was
+  replaced, continued from a cached one inside a sliding layer's window, could read GPU memory that was never zeroed,
+  and the request failed with HTTP 500 ("Out of range float values": NaN answers). On basal-omni-1.0-ultra (one H100,
+  `--graph-memory-gb 4 --state-cache-gb 5`) 27 of 1,248 edited-chat requests failed before the fix and 0 after; 2.4.1
+  had the same bug (2 of 624). Those buffers are zeros now; at 1 client every other answer is byte-identical to before.
+- **Option-order check and averaging** (opt-in): `basal-bench --order-check` measures how often the top answer flips
+  when the options are reversed or rotated, and what averaging gains; `basal-serve --order-average K` serves the mean
+  over K option orders, every order reading the request's state once. Off by default: answers are unchanged.
+  [SERVING.md](SERVING.md#serving-modes).
+- **No first-request stalls in `--mode strix`** (AMD Strix Halo): start-up compiles every Triton kernel copy a request
+  can need. Triton compiles a kernel once per tile config and per class of each length argument (1, a multiple of 16,
+  other); the start-up of 2.4.1 and earlier ran two lengths only, so the first request that needed a new copy waited
+  0.2-0.3 s for each (in the request matrix, with an empty Triton cache, the first S request with 1 question took
+  1.82 s instead of 0.18 s). basal-2.0-4.5B on the contributor's Radeon 8060S: no kernel compiled during 152 requests of 90-16,000
+  tokens (before: 13 copies in 4 requests, 2.7 s), the same probabilities to the bit on 2,362 prompts; start-up about
+  5 s longer at the first start on a machine, about the same once Triton's disk cache holds the copies. Details in
+  [STRIX_HALO.md](benchmarks/STRIX_HALO.md#what---mode-strix-does). Contributed by Michał Kardyś (@kardysm),
+  [#51](https://github.com/rkinas/basal/pull/51); the stall was first seen by @piotrkowski in
+  [#21](https://github.com/rkinas/basal/pull/21). `--mode strix` stays community-maintained, not yet verified on our
+  hardware ([HARDWARE.md](HARDWARE.md#amd-strix-halo-experimental-community-maintained)).
+- **Starts after a reboot reuse the compiled code** (`--mode fast`): torch.compile's cache moves from Inductor's default
+  `/tmp/torchinductor_<user>`, which a reboot empties on most systems, to `~/.cache/basal/torchinductor`
+  (`TORCHINDUCTOR_CACHE_DIR` still takes precedence), as `--mode tpu` keeps JAX's in `~/.cache/basal/jax`. RTX 4060 Ti,
+  the first start after a reboot: basal-2.0-mini 417 -> 238 s, basal-2.0-4.5B 823 -> 519 s; every probability
+  bit-identical to a cold start; the cache takes about 55 MB for both models. Contributed by Miłosz Kucharski
+  (@Butterski), [#47](https://github.com/rkinas/basal/pull/47).
+- **Less host work in the CUDA cascade** (`--mode fast`, basal-2.0): the pass 2 without a CUDA graph runs kernel by
+  kernel and waits on the CPU; the cascade (2.3.5) now merges its two attentions in one compiled kernel per layer
+  instead of ~15 small ones and calls FlashAttention's op directly, not through torch's `varlen_attn` (a Python
+  custom op that also allocated a random-number state per call). A100, basal-2.0-mini, one client, against the dense
+  pass: 40 questions over a 1.5k-token state 1.07x -> 1.11x, compress 1.15-1.37x -> 1.19-1.44x; pass 2 alone for 40
+  questions 62.4 -> 48.6 ms (basal-2.0-4.5B: 117 -> 99 ms); every probability bit-identical to 2.3.5.
+  `fast-nocompile` keeps the merge op by op. Contributed by Miłosz Kucharski (@Butterski),
+  [#44](https://github.com/rkinas/basal/pull/44).
+- **`--compile-scope layer`** (`--mode fast`, the Llama-based basal-2.0 models; opt-in, off by default: a much shorter
+  start-up, but the answers differ from the whole-model compile's): torch.compile compiles one decoder layer, called
+  for every layer, instead of the whole model, so start-up compiles a layer instead of 32-60. The same transformers
+  layers as the whole-model compile; kernels fuse within a layer only, so probabilities move by bf16 rounding. One
+  H100, basal-2.0-mini, cold compile caches, 840 readouts: start-up 47 s against 228 s; the same top answer as a
+  whole-model cold start on 98.69% (829) and as another on 98.33% (826), the changed ones near-ties (margins up to
+  0.044 against the first, one at 0.058 against the second). Two whole-model cold starts agreed with each other on
+  98.3-98.5% there. RTX 4060 Ti (the contributor's measurement): graph warm-up basal-2.0-mini 235 -> 95 s,
+  basal-2.0-4.5B 515 -> 251 s, single questions 2-3% slower on mini. bf16 Llama weights only (FP8 / NVFP4, Gemma 4,
+  Qwen3.5 and --lean are refused). Contributed by Miłosz Kucharski (@Butterski),
+  [#49](https://github.com/rkinas/basal/pull/49).
+- **State cache on Apple Silicon** (`--mode mlx`, opt-in): `--state-cache-gb N` and `--prefix-cache on` work on the
+  Mac as on the CUDA graph engine, with both `--mlx-forward` paths. A request whose state (or template prefix) is
+  cached computes only its questions. The probabilities equal the server without the cache bit for bit: MLX picks its
+  matmul and attention kernels by the shape of the call, so the cached path runs its forwards at the uncached
+  forward's row and key counts (zero rows and keys added). A state that begins with a cached one (a growing agent
+  trace or chat) computes only its new tokens where that keeps the bits (basal-2.0-mini: from about 1,024 tokens on;
+  basal-omni: never, it is computed afresh). Apple M4 Pro, basal-2.0-mini-MLX-8bit and basal-omni-1.0-mini-MLX, both
+  forwards, 1,032 readouts per run: every probability equal to the cache off. p50 on basal-2.0-mini: five questions
+  about a ~1.5k-token state 1.10 -> 0.33 s, one question 0.51 -> 0.09 s.
+  [HARDWARE.md](HARDWARE.md#apple-m4-state-cache-on---mode-mlx). Contributed by Grzegorz Stark (@gstark0),
+  [#50](https://github.com/rkinas/basal/pull/50).
+- **`GET /metrics` additions:** the engine version (`basal_build_info{version,model,mode,layout}`), the state cache's
+  evictions and prefix hits, and a cache read that never waits for the engine's lock (the last values and their time
+  instead). [SERVING.md](SERVING.md#prometheus-metrics). Contributed by Marcin Brzeżański (@marcinbrzezanski),
+  [#48](https://github.com/rkinas/basal/pull/48).
+- **Development commands:** `make help` lists them: `make setup`, `make test`, `make serve MODE=...`, `make bench`,
+  `make run`, `make loadtest`, and `make check`, read-only pre-commit checks with pinned versions (Python syntax and
+  undefined names, merge markers, private keys, TOML / YAML / JSON / JSONL syntax), no Git hook installed. README
+  "Development commands". Contributed by Paweł Kiszczak (@pawelkiszczak),
+  [#46](https://github.com/rkinas/basal/pull/46).
+- **A Triton kernel for basal-omni's 512-wide global layers** (`--global-attn triton`, Hopper; opt-in, off by default:
+  faster on long states, but the answers differ from the default FlexAttention path's): single prompts and the states
+  of multi-question requests run basal's own causal kernel in the global layers. One H100, five questions over 24k-32k-
+  token states at 4 clients, against the default: basal-omni-1.0-mini 1.10x the questions per second, the same top
+  answer on 99.67% of 600 readouts, none changed where the default's margin was at least 0.05; basal-omni-1.1-max
+  1.16x, 98.33%, 4 changed; basal-omni-1.0-ultra 1.03x, 99.0%, 2 changed (15k-17k tokens: 1.07-1.10x).
+  [OMNI.md](OMNI.md#what-the-engine-does-differently-for-gemma-4)
+- **Known limit:** repeated requests over long states: with `--mode fast` on one H100, basal-omni-1.0-ultra gives
+  bit-identical probabilities for the same 24k-32k-token request sent again (one at a time) in 95 of 100 cases, as 2.4.1
+  did; basal-omni-1.0-mini in 100 of 100. Ultra's answers on long states are not guaranteed to be bit-stable.
+- **Known limit:** with `--mode fast` and `--state-cache-gb`, a rare race can fail one request with HTTP 500 (an error
+  about FX symbolic tracing): about 1 request in 8,000 in our tests; the server recovered and kept serving (retry the
+  request). Present since 2.3.1. `--state-cache-lock on` (opt-in) removes it at a cost: on one H100
+  (basal-omni-1.0-max, 8 clients, 8,740 requests) 0 failed instead of 1, but 8.19 instead of 8.88 requests/s (-8%) and
+  a p50 of 630 instead of 577 ms; the top answers agreed with the uncached ones as without it (99.24% vs 99.25%). A fix
+  without that cost is planned for 2.5.1.
+
 # What is new in basal 2.4.1
 
 - **Shorter start-up of the graph engine** (`--mode fast`): every CUDA graph is warmed up once before its capture

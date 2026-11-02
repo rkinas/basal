@@ -27,7 +27,8 @@ basal-omni-1.0:
 
 ## Engines
 
-basal runs on seven engines, all behind the same `basal-serve` HTTP API (`POST /v1/systemone`). Commands below use
+basal runs on seven engines, all behind the same `basal-serve` HTTP API (`POST /v1/systemone`), and in LM Studio,
+which serves that API itself. Commands below use
 basal-2.0 (4.5B); replace the repository name for mini or max.
 
 <!-- engines -->
@@ -40,13 +41,16 @@ basal-2.0 (4.5B); replace the repository name for mini or max.
 | **MLX** | `mlx` (default on a Mac with `basal[mlx]`) | Apple Silicon | Macs: the `-MLX-8bit` ports | `basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx` (extra `basal[mlx]`) |
 | **Ollama** | `ollama` | CPU, Apple Silicon, consumer GPUs | local and desktop use with the `-GGUF` files (up to 20 options per question) | `basal-serve --model ./basal-2.0-4.5B-GGUF --mode ollama --ollama-model basal-2.0-4.5b:q8_0` |
 | **llama.cpp** | `llamacpp`; `gguf` | CPU, Apple Silicon, consumer GPUs | `llama-server` with the `-GGUF` files, or the file in process (`--mode gguf`, extra `basal[gguf]`) | `basal-serve --model ./basal-2.0-4.5B-GGUF --mode llamacpp` |
+| **LM Studio** | none: LM Studio answers itself | Apple Silicon, CPU, consumer GPUs | the `-GGUF` files as decision models in LM Studio 0.4.26+ (`/v1/systemone`, `/v1/decisions`): choice, yes/no and score, up to 26 options | `basal-export-gguf ... --systemone`, then `lms import` ([below](#lm-studio-gguf-as-a-decision-model)) |
 
-**`basal-serve` is the decision layer in every row.** vLLM, SGLang, MLX, Ollama and llama.cpp only run the weights;
+**`basal-serve` is the decision layer in every row but LM Studio's.** vLLM, SGLang, MLX, Ollama and llama.cpp only run the weights;
 the typed, calibrated answers (a probability for each of your options, the state shared by several questions,
 `multi`, `act`, `tool` and `facts`) come from `basal-serve --mode <engine>` in front of them, with the same HTTP API
 in every mode. A plain `ollama run`, `llama-cli` or `mlx_lm.generate` gives free text only. vLLM and SGLang start with
 a 4,096-token context (longer states are cut or refused, see `--context-overflow`); raise it with `--max-len` (e.g.
-32768 for long documents). Install and first request for each engine: [quick start](#quick-start).
+32768 for long documents). LM Studio is the exception: with the decision metadata of `basal-export-gguf --systemone` it
+renders basal's prompt and reads the calibrated option probabilities itself, for the plain question types only.
+Install and first request for each engine: [quick start](#quick-start).
 <!-- /engines -->
 
 The basal-omni models (Gemma 4) run in the basal engine's `eager` mode only, on an NVIDIA GPU; `--media on` adds images
@@ -62,7 +66,7 @@ missing):
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --port 8000
 ```
 
@@ -76,7 +80,9 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --por
   torch, which breaks `transformers` ("operator torchvision::nms does not exist"). The text models do not need
   torchvision (the `basal[media]` extra for basal-omni installs it).
 - The first start in mode `fast` compiles the model and captures CUDA graphs (several minutes); `--mode
-  fast-nocompile` starts in seconds. On Hopper, FlashAttention 3 is used when its wheel is installed
+  fast-nocompile` starts in seconds. The compiled code is cached in `~/.cache/basal/torchinductor` (set
+  `TORCHINDUCTOR_CACHE_DIR` to put it elsewhere), so later starts, after a reboot too, skip most of the compiling;
+  delete the directory to free its space. On Hopper, FlashAttention 3 is used when its wheel is installed
   (`uv pip install flash_attn_3 --extra-index-url https://download.pytorch.org/whl/cu128`); compact batching and
   the template cache use it. On other GPUs, `--batches compact` runs them through torch's varlen attention (about
   6 GB more GPU memory for mini and 7 GB for the 4.5B where the card has room, 2.4 GB on a full 16 GB card;
@@ -129,6 +135,26 @@ print(round(a["score"], 2), a["probabilities"])          # expected level 0-3 an
 print(b.yes_no(state, "Czy problem dotyczy płatności kartą?")["noul"])   # P(yes)
 ```
 
+Every question and task type has a method (`choice`, `yes_no`, `score`, `multi`, `act`, `tool`, `classify`, `verify`,
+`compress`, `extract`); `decide` asks several questions over one state in one request, and `AsyncBasal` has the same
+methods for asyncio:
+
+```python
+import asyncio
+from basal.client import AsyncBasal, choice, yes_no
+
+async def main():
+    async with AsyncBasal("http://127.0.0.1:8000", retries=2) as b:   # retries: a 503 (GPU out of memory) only
+        a = await b.decide(state, {"dept": choice("Który dział?", {"it": "IT", "kasy": "Obsługa kas"}),
+                                   "card": yes_no("Czy problem dotyczy płatności kartą?")})
+        print(a["dept"]["choice"], a["card"]["noul"])
+
+asyncio.run(main())
+```
+
+Errors are `InvalidRequest` (422), `OutOfMemory` (503) and `ServerError` (500), all `BasalError` with `.status` (a
+`RuntimeError`, as before). `http=` takes your own `httpx.Client` / `httpx.AsyncClient` (headers, proxies, transport).
+
 ### FP8 checkpoints (basal engine)
 
 The `-FP8` repositories are NVIDIA ModelOpt FP8 checkpoints that the basal engine loads natively (the same install as
@@ -152,13 +178,13 @@ ties, and accuracy moved by −0.8 to +1.4 points against them on a development 
 ```bash
 # vLLM brings its own torch: a separate environment. vLLM 0.31 brings torch built for CUDA 13.0: NVIDIA driver >= 580
 uv venv --python 3.12 --allow-existing ~/basal-vllm && source ~/basal-vllm/bin/activate
-uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B --mode vllm --port 8000          # --max-len 32768 for long documents
 
 # SGLang (own environment; its kernels need a CUDA 12.9+ toolkit; it also brings torch for CUDA 13.0: driver >= 580)
 uv venv --python 3.12 --allow-existing ~/basal-sglang && source ~/basal-sglang/bin/activate
 uv pip install --prerelease=allow "sglang[srt]==0.5.21"
-uv pip install --no-deps "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install --no-deps "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 uv pip install starlette uvicorn httpx accelerate safetensors   # if missing
 basal-serve --model Remek/basal-2.0-4.5B --mode sglang --port 8000
 ```
@@ -173,7 +199,7 @@ basal-1.5 ([QUANTIZATION.md](QUANTIZATION.md)).
 
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-mlx && source ~/basal-mlx/bin/activate
-uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000
 ```
 
@@ -190,7 +216,7 @@ log-probabilities of the option codes of one generated token. Ollama 0.12.11 or 
 
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
-uv pip install "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"   # also installs the hf CLI
+uv pip install "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"   # also installs the hf CLI
 hf download Remek/basal-2.0-4.5B-GGUF --local-dir basal-2.0-4.5B-GGUF
 cd basal-2.0-4.5B-GGUF && ollama create basal-2.0-4.5b:q8_0 -f Modelfile.Q8_0 && cd ..
 basal-serve --model ./basal-2.0-4.5B-GGUF --mode ollama --ollama-model basal-2.0-4.5b:q8_0 --port 8000
@@ -209,7 +235,7 @@ Without a separate server, `--mode gguf` loads the file in process through llama
 CUDA build it first, see [GGUF.md](GGUF.md)):
 
 ```bash
-uv pip install "basal[gguf] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[gguf] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model ./basal-2.0-4.5B-GGUF --mode gguf --gguf basal-2.0-4.5B-GGUF/basal-2.0-4.5B-Q8_0.gguf --port 8000
 ```
 
@@ -225,6 +251,64 @@ prompt cache of Ollama / llama.cpp computes the state once; `--http-parallel N` 
 servers. Details: [PORTS.md](PORTS.md), [GGUF.md](GGUF.md). Other GGUF files with the same tokenizer fix (other
 quantisations, basal-1.0): `basal-export-gguf` ([GGUF.md](GGUF.md#convert-yourself)).
 
+### LM Studio (GGUF as a decision model)
+
+LM Studio serves a basal GGUF file as a decision model: its own `POST /v1/systemone` takes the request shape of
+`basal-serve`, and `POST /v1/decisions` the one of OpenAI's Decisions API (`client.decisions.create` of the OpenAI
+Python SDK works against it). LM Studio renders basal's prompt and reads the calibrated option probabilities itself,
+with no `basal-serve` in front. Requirements:
+
+- **LM Studio 0.4.26 or newer with the llama.cpp engine 2.65.1 or newer** (`lms runtime get llama.cpp`). Headless:
+  `llmster` 0.0.26 or newer, at the time of writing on the beta channel (`lms daemon update --beta`); 0.0.25 has no
+  `/v1/systemone`.
+- **A GGUF file with basal's decision metadata.** `basal-export-gguf --systemone` adds it to a copy of a `-GGUF` file;
+  the weights are not touched. Prompt-format-2 models only (basal-2.0, basal-omni); checked with basal-2.0-4.5B and
+  basal-omni-pico.
+- **Not the MLX ports:** LM Studio's MLX engine does not serve decision models. On a Mac, load the GGUF file (LM Studio
+  runs it with Metal), or use the `-MLX-8bit` ports with `basal-serve --mode mlx`.
+
+```bash
+uv pip install "basal[gguf-export] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
+hf download Remek/basal-2.0-4.5B-GGUF --local-dir basal-2.0-4.5B-GGUF
+basal-export-gguf ./basal-2.0-4.5B-GGUF lmstudio/basal-2.0-4.5B-Q8_0.gguf \
+    --gguf basal-2.0-4.5B-GGUF/basal-2.0-4.5B-Q8_0.gguf --systemone
+lms import -y --user-repo local/basal-2.0-4.5B-decision lmstudio/basal-2.0-4.5B-Q8_0.gguf
+lms load basal-2.0-4.5b-decision -y --identifier basal -c 16384
+curl http://127.0.0.1:1234/v1/systemone -H "Content-Type: application/json" -d '{"model": "basal",
+  "state": "I was charged twice for order 4471.", "questions": {"dept": {"type": "choice",
+  "instructions": "Which team?", "criteria": {"billing": null, "shipping": null, "technical": null}}}}'
+```
+
+`GET /api/v0/models` lists the file with `"type": "decision"`. What LM Studio serves, and what stays with
+`basal-serve`:
+
+- **choice** (2 to 26 options), **noul** (yes/no) and **score** (2 to 10 levels) only, the System One types;
+  `/v1/decisions` maps predicate to noul. Each question is read once (one option order), the option keys shown, Polish
+  or English picked from the text as `basal-serve` does. A question with more than 26 options gets an HTTP error
+  (llama.cpp codes options 27+ differently from basal); `basal-serve --mode gguf` takes up to 255.
+- **Calibrated with the temperatures written into the file**, per question type and option count as in
+  `basal-serve`, from the calibration file the tool names when it writes the file: `CALIBRATION.llamacpp.json`, else
+  `CALIBRATION.gguf.json`, else `CALIBRATION.json` (basal-2.0-4.5B: `CALIBRATION.llamacpp.json`, basal-omni-pico:
+  `CALIBRATION.gguf.json`). Nothing else of basal's calibration: no certified thresholds, `coverage` or `max_error`.
+- **Not in LM Studio:** `act`, `multi`, `tool`, `facts`, `ask_if`, `option_keys: "hide"`, more than one option order,
+  images. Run `basal-serve --mode gguf` (or `--mode llamacpp`) on the same file for those.
+- **A 30-second limit per request:** LM Studio stops a `/v1/systemone` request after 30 s with HTTP 504. On an Apple
+  M4 Pro the 4.5B reads about 400 prompt tokens per second, so a long state with several questions can hit it. Split
+  long states, or send fewer questions per request; for long documents use `basal-serve --mode gguf` on the same file,
+  which has no such limit. In our check none of the 306 requests hit it on an otherwise idle M4 Pro; the 5 that
+  did ran while macOS's background media analysis was busy.
+- **The same answers as `basal-serve`:** LM Studio 0.4.26 (llama.cpp engine 2.65.1) against `basal-serve --mode gguf`
+  on the same files, Apple M4 Pro, 620 questions per model (synthetic, Polish and English, states up to ~2,000
+  tokens): the prompts are identical token for token; basal-omni-pico 620 of 620 answered, the same top answer on all,
+  probabilities within 0.0013; basal-2.0-4.5B 607 of 620 answered (13 questions in 5 long requests stopped at the
+  30-second limit), the same top answer on all 607, probabilities within 0.0041. LM Studio's `/v1/decisions`
+  renders the same prompt as its `/v1/systemone`; the probabilities agree within LM Studio's own run-to-run variation
+  (max 0.0014; two identical calls differ by up to 0.0008).
+
+For your own calibration, fit it with `basal-calibrate` on the same file (`--model ./basal-2.0-4.5B-GGUF --mode gguf
+--gguf <file>`) and write it into a new copy with `--systemone --calibration CALIBRATION.custom.json`. Details of the
+metadata: [GGUF.md](GGUF.md#decision-metadata-for-lm-studio-and-llama-server---systemone).
+
 ### Google TPU (experimental, community-maintained)
 
 `--mode tpu` runs the bf16 weights in JAX / XLA on one TPU chip (measured on a v5e-1, the Colab TPU runtime), with
@@ -235,7 +319,7 @@ use transformers), then the `tpu` extra (JAX and libtpu from PyPI; Python 3.12 o
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-tpu && source ~/basal-tpu/bin/activate
 uv pip install "torch>=2.11" --index-url https://download.pytorch.org/whl/cpu
-uv pip install "basal[tpu] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"   # 2.2.0: the first release with --mode tpu
+uv pip install "basal[tpu] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"   # 2.2.0: the first release with --mode tpu
 basal-serve --model Remek/basal-2.0-4.5B --port 8000   # --mode tpu is the default on a TPU VM
 ```
 
@@ -265,7 +349,7 @@ Install the `media` extra (pillow, soundfile, scipy, torchvision) and serve a ba
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.4.1.tar.gz"
+uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.0.tar.gz"
 basal-serve --model Remek/basal-omni-1.0-mini --mode eager --media on --port 8000   # or Remek/basal-omni-1.0-max
 ```
 

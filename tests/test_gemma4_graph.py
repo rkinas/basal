@@ -161,6 +161,40 @@ def test_plain_block_mask_is_the_causal_window(L, W):
     assert torch.equal(got, true)
 
 
+@pytest.mark.parametrize("lens", [[3, 130, 1, 260, 77, 400], [700], [128, 128, 256, 5, 300]])
+@pytest.mark.parametrize("W", [None, 5, 128, 200, 512])
+def test_compact_window_block_is_each_prompts_causal_window(lens, W):
+    """The block mask of a sliding layer over compact rows (flex): full blocks + the mask inside partial blocks give
+    exactly each prompt's causal window, and no query block visits a key block before its prompt or window."""
+    g = Gemma4Graph(tiny("e4b"))
+    cu = torch.tensor([0] + list(torch.tensor(lens).cumsum(0)), dtype=torch.int32)
+    T = int(cu[-1]) + 37  # the padding after the last prompt: one more prompt nobody reads
+    cu = torch.cat([cu, torch.tensor([T], dtype=torch.int32)])
+    doc = torch.bucketize(torch.arange(T), cu[1:], right=True)
+    q, k = torch.arange(T)[:, None], torch.arange(T)[None]
+    true = (doc[:, None] == doc[None]) & (k <= q) & ((q - k < W) if W else True)
+    docp = torch.nn.functional.pad(doc, (0, g.BLOCK), value=-1)
+
+    def same(b, h, q, kv):
+        ok = (docp[q] == docp[kv]) & (q >= kv)
+        return ok & (q - kv < W) if W else ok
+    bm = g._compact_window_block(T, cu, W, same)
+    got = torch.zeros(T, T, dtype=torch.bool)
+    B = g.BLOCK
+    for i in range(-(-T // B)):
+        rows = slice(i * B, (i + 1) * B)
+        for c in range(int(bm.full_kv_num_blocks[0, 0, i])):
+            j = int(bm.full_kv_indices[0, 0, i, c])
+            assert true[rows, j * B: (j + 1) * B].all()
+            got[rows, j * B: (j + 1) * B] = True
+        visited = [int(bm.kv_indices[0, 0, i, c]) for c in range(int(bm.kv_num_blocks[0, 0, i]))]
+        for j in visited:
+            got[rows, j * B: (j + 1) * B] = true[rows, j * B: (j + 1) * B]
+        q0 = i * B
+        assert all(j * B + B > max(int(cu[doc[q0]]), q0 - W + 1 if W else 0) for j in visited)
+    assert torch.equal(got, true)
+
+
 def test_state_cache_second_round_equals_separate():
     """A request cut at its state (--state-cache-gb): the first call computes the state and stores its keys and values
     (own-key layers only, two head sizes), a second request over the same state runs pass 2 only over the cached
@@ -285,7 +319,7 @@ def test_chunked_long_states_and_incremental_states_equal_separate(kind):
         for r, e in zip(res[0] + res[1], separate(m, toks, lids) + separate(m, [st + [40, 41]], [[7, 9]])):
             assert torch.allclose(torch.tensor(r), e, atol=1e-6)
     s = be.state_cache.stats()
-    assert s["prefix_hits"] == 2 and s["entries"] == 2  # the grown state replaced the first
+    assert s["prefix_hits"] == 1 and s["entries"] == 2  # only the extension reused KV; the edit is outside the window
 
 
 def test_warm_captures_largest_first_then_long_pass2():
@@ -364,3 +398,30 @@ def test_compiled_layers_in_inductor_deterministic_mode(monkeypatch, env, want):
         monkeypatch.setenv("TORCHINDUCTOR_DETERMINISTIC", env)
     Gemma4Graph(tiny("e4b"), compile=True)
     assert len(seen) == 3 and all(kw == {"options": {"deterministic": want}} for kw in seen)
+
+
+@pytest.mark.parametrize("kind", ["e4b", "31b"])
+def test_edited_state_over_stale_memory_answers_as_separate(kind, monkeypatch):
+    """An edited state continued from inside a sliding layer's window, with a new turn shorter than the one it
+    replaces: its cached entry is shorter than the fresh buffer of a root beyond the graphs. Fresh GPU memory can hold
+    NaN (simulated: torch.empty returns NaN); the readouts still equal separate forwards (the buffer is zeros)."""
+    from basal.engine import StateCache
+    empty = torch.empty
+
+    def stale(*a, **k):
+        t = empty(*a, **k)
+        return t.fill_(float("nan")) if t.is_floating_point() else t
+    m = tiny(kind, torch.float32)
+    be = Stub(m)
+    be.CHUNK, be.gemma.MARGIN = 5, 3
+    be.state_cache = StateCache(1 << 30)
+    be.state_cache.BLOCK = 4
+    monkeypatch.setattr(torch, "empty", stale)
+    base = [1] + [3 + (7 * i) % 40 for i in range(20)]  # longer than window 5 + MARGIN 3
+    lids = [[7, 8], [7, 8]]
+    for st in (base, base[:-3] + [44]):  # the edit: 3 tokens replaced by 1, inside the margin
+        toks = [st + [20, 21, 30 + o, 31 - o] for o in range(2)]
+        res = be.run_shared([(toks, lids, len(st))])
+        for r, e in zip(res[0], separate(m, toks, lids)):
+            assert torch.isfinite(torch.tensor(r)).all() and torch.allclose(torch.tensor(r), e, atol=1e-5)
+    assert be.state_cache.stats()["prefix_hits"] == 1

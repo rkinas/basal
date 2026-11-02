@@ -1,6 +1,8 @@
 """The branch pass as a cascade on CUDA (basal.engine._varlen, _varlen_tree, _cascade_varlen): torch's varlen attention
 against the attention written out (its log-sum-exp layout, causal aligned at the end, per-sequence key counts), and the
 cascade against the dense masked attention of today's pass 2. Need CUDA sm80+ and torch's varlen attention."""
+import importlib.util
+
 import numpy as np
 import pytest
 import torch
@@ -17,6 +19,8 @@ if why is None:  # the cascade also needs seqused_k (_cascade_why), which torch_
         why = "this torch's varlen_attn has no seqused_k"
 cuda = pytest.mark.skipif(why is not None, reason=f"torch varlen attention: {why}")
 H, HKV, D = 16, 2, 128  # basal-2.0-4.5B: 8 query heads per key / value head, head size 128
+triton = pytest.mark.skipif(importlib.util.find_spec("triton") is None,
+                            reason="the fused merge is torch.compile's (Triton); without it GraphBackend does not fuse")
 
 
 def to_dev(x):
@@ -72,3 +76,25 @@ def test_cascade_equals_dense_masked_attention():
         torch.cat([vp, v], 2).float().repeat_interleave(rep, 1), attn_mask=mask).transpose(1, 2)
     real = torch.from_numpy(seg >= 0).cuda()
     assert torch.allclose(got[real], ref[real], atol=1e-2)
+
+
+@cuda
+@triton
+def test_fused_merge_gives_the_merge_bit_for_bit():
+    """The merge compiled into one kernel (_merge_fused: a GraphBackend that compiles) against _merge_attention op by
+    op: the cascade's output bit for bit, for rows without padding (both log-sum-exps as the kernel returns them) and
+    rows with padding (the branch's scattered into -inf), the two layouts a cascade passes."""
+    g = torch.Generator(device="cuda").manual_seed(2)
+    S, Lk = 96, 160
+    full = np.array([[0] * 40 + [1] * 26 + [2] * 30, [0] * 50 + [1] * 46])
+    padded = np.full((2, S), -1)
+    padded[0, :96] = [0] * 30 + [1] * 10 + [2] * 10 + [3] * 30 + [4] * 16
+    padded[1, :61] = [0] * 40 + [1] * 21
+    for seg, parents in ((full, [[-1, 0, -1], [-1, 0]]), (padded, [[-1, 0, 0, -1, 3], [-1, 0]])):
+        tree = _varlen_tree(seg, parents, [150, 70], Lk, to_dev)
+        q = torch.randn(2, H, S, D, device="cuda", dtype=torch.bfloat16, generator=g)
+        k, v = (torch.randn(2, HKV, S, D, device="cuda", dtype=torch.bfloat16, generator=g) for _ in "kv")
+        kp, vp = (torch.randn(2, HKV, Lk, D, device="cuda", dtype=torch.bfloat16, generator=g) for _ in "kv")
+        op_by_op = _cascade_varlen(q, k, v, kp, vp, tree, D ** -0.5)
+        fused = _cascade_varlen(q, k, v, kp, vp, tree._replace(fused=True), D ** -0.5)
+        assert tree.full == (seg is full) and torch.equal(fused, op_by_op)
