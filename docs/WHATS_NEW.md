@@ -379,7 +379,8 @@ is new is opt-in unless a line says otherwise.
   instead of three times (pass-2 graphs: twice). torch.compile compiles and cuBLAS and Triton set up at the first
   call; the further calls ran the same kernels again. RTX 4060 Ti 16 GB, the graph warm-up: basal-2.0-mini 468 ->
   323 s, basal-2.0-4.5B 1,094 -> 680 s (with the pass-2 graph budget it needs there); the same GPU memory and speed,
-  every probability bit-identical (420 readouts per model). Contributed by Miłosz Kucharski (@Butterski),
+  every probability bit-identical (420 readouts per model). On an H100 with a warm compile cache start-up is 15-40%
+  shorter (basal-omni-1.0-max 201 -> 121 s). Contributed by Miłosz Kucharski (@Butterski),
   [#43](https://github.com/rkinas/basal/pull/43).
 - **Prompt layouts** (`--layout`, prompt-format-2 models trained on them): besides the
   canonical layout (the state first, shared by a request's questions), `state_twice` reads the state twice and
@@ -519,8 +520,9 @@ is new is opt-in unless a line says otherwise.
   keys, summed in another order), so it needs no `[N, P + N]` mask and no copied keys, and a request with many
   questions is no longer split with the state recomputed per part. basal-2.0-mini fp32, a 3,278-token state, 6 CPU
   cores: 40 questions 105 -> 92 s, 120 questions 313 -> 207 s (the state once instead of 3 times), peak memory -0.5 /
-  -0.75 GB, the same top answer on 160 of 160 (max |Δp| 9e-6). On 32 threads of a Xeon 8460Y+ the 40-question case
-  runs at about the same speed (0.94-1.04x), 150 questions 1.24x faster. Contributed by Milosz (@Butterski),
+  -0.75 GB (about half the peak memory on many-question requests), the same top answer on 160 of 160 (max |Δp|
+  9e-6). On 32 threads of a Xeon 8460Y+ the 40-question case runs at about the same speed (0.94-1.04x), 150 questions
+  1.24x faster. Contributed by Milosz (@Butterski),
   [#34](https://github.com/rkinas/basal/pull/34).
 - **Windows:** `--batches compact` and `--gemma-attn flex` / `fa3` are refused with the reason where torch is built
   without FlashAttention or Triton is not installed (the Windows wheels), instead of failing at the first request.
@@ -655,6 +657,12 @@ is new is opt-in unless a line says otherwise.
   compact rows): single questions +18% (mini) and +13% (4.5B), five questions unchanged, the same top answer on 7,632
   of 7,632 and 9,047 of 9,049 dev v2 decisions with margin >= 0.2. The start-up line names the compact kernel.
   Contributed by Milosz (@Butterski), [#29](https://github.com/rkinas/basal/pull/29).
+- **Also from the community:** the calibration report's per-type ECE as `basal-serve` applies the temperatures
+  ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count for the 1% target in CALIBRATION.md
+  ([#25](https://github.com/rkinas/basal/pull/25)) and the Apple M5 Max benchmark tables in HARDWARE.md
+  ([#18](https://github.com/rkinas/basal/pull/18)), by Grzegorz Brzezinka (@agentGreg); `--mode strix` reproduced on a
+  second Strix Halo (ROG Flow Z13), bit-identical edge cases and a similar speed-up, by @piotrkowski
+  ([#21](https://github.com/rkinas/basal/pull/21)).
 
 # What is new in basal 2.3
 
@@ -703,10 +711,11 @@ is new is opt-in unless a line says otherwise.
   and the last own-key layer at the answer rows only, the fp32 readout with the softcap. On Hopper: FlashAttention 3 in
   the sliding layers, FlexAttention in the 512-wide global ones, merged projections, compact rows, compiled; elsewhere
   the math kernel of `--mode eager` (`--gemma-attn`). One H100, against 2.2's `--mode eager`: 1.1-max 16.2 vs 4.8 decisions
-  per second on single questions (vLLM bf16: 16.7) and 10.6 vs 0.7 questions per second with five questions over a long
-  state; mini 61.2 vs 10.0 and 21.4 vs 1.6; ultra 6.1 vs 2.0 and 4.8 vs 0.3. Same answers within bf16 rounding (dev
-  v2: 0.998-0.999 of the top answers at margin >= 0.2; with the shipped calibration files the automated share at 1%
-  within 0.1 points). On an RTX PRO 6000 Blackwell (`--mode fast --gemma-attn flex`, opt-in until its calibration
+  per second on single questions (vLLM bf16: 16.7) and 10.6 vs 0.72 questions per second with five questions over a long
+  state; mini 61.2 vs 10.0 and 21.4 vs 1.6; ultra 6.1 vs 2.0 and 4.8 vs 0.28. Same answers within bf16 rounding (dev
+  v2, 10,606 decisions: 0.998-0.999 of the top answers at margin >= 0.2; with the shipped calibration files the
+  automated share at 1% within 0.1 points). Without `--mode`, basal-omni runs `eager` on other GPUs (in 2.2 it stopped
+  at start-up). On an RTX PRO 6000 Blackwell (`--mode fast --gemma-attn flex`, opt-in until its calibration
   check): mini 23.2 vs 5.6 and 18.4 vs 0.85, 1.0-max 5.0 vs 2.3 and 5.3 vs 0.37 (vLLM is faster there for single max
   questions). [OMNI.md](OMNI.md#what-the-engine-does-differently-for-gemma-4)
 - **Less GPU memory for basal-omni in the graph engine:** 8 MB cuBLAS workspaces per captured graph
@@ -719,9 +728,21 @@ is new is opt-in unless a line says otherwise.
   questions: 79 ms, now 2 ms in task expansion). Same languages as before. Contributed by Milosz (@Butterski),
   [#17](https://github.com/rkinas/basal/pull/17).
 
+Release notes: [v2.3.0](https://github.com/rkinas/basal/releases/tag/v2.3.0).
+
 # What is new in basal 2.2
 
 **Engine v2.2.0: calibration on your own data, for every basal model**
+
+Label a few hundred of your own requests, run `basal-calibrate`, and serve the file it writes. The probabilities, and
+the `max_error` thresholds that decide what may be automated, are then certified on your data, not ours. A hosted
+decision API cannot be recalibrated on your data; a basal model can.
+
+```bash
+basal-calibrate my_labelled.jsonl --model Remek/basal-omni-1.0-max --mode eager    # writes CALIBRATION.custom.json
+basal-serve --model Remek/basal-omni-1.0-max --mode eager --calibration CALIBRATION.custom.json
+```
+
 - **Task thresholds from your labels.** `basal-calibrate` now takes labelled `classify`, `verify` and `extract`
   questions and certifies the `automated` flag of their answers (`task_thresholds`), by the same bound as the decision
   types, on the answers as served. A file with task questions only keeps the decision calibration and adds the task
@@ -760,6 +781,8 @@ is new is opt-in unless a line says otherwise.
   ([SERVING.md](SERVING.md#see-how-a-decision-is-made)).
 - Every other request takes the same code path as in v2.1.0.
 
+Release notes: [v2.2.0](https://github.com/rkinas/basal/releases/tag/v2.2.0).
+
 # What is new in basal 2.1
 
 **Engine v2.1.0: task types (experimental)**
@@ -780,6 +803,8 @@ is new is opt-in unless a line says otherwise.
   **basal-omni-1.0-ultra-FP8** for `--mode vllm` (text only).
 - **basal-omni-1.1-max** (*experimental*): basal-omni-1.0-max with extra training on the task formats, better on the
   tasks and slightly behind 1.0-max on general decisions; 1.0-max stays the default ([TASKS.md](TASKS.md#results)).
+
+Release notes: [v2.1.0](https://github.com/rkinas/basal/releases/tag/v2.1.0).
 
 # What is new in basal-2.0
 
@@ -831,3 +856,17 @@ is new is opt-in unless a line says otherwise.
 
 Full list: [release notes](https://github.com/rkinas/basal/releases/tag/v2.0.0). Details of the experimental features:
 [FEATURES.md](FEATURES.md).
+
+# Previous releases: basal-1.5 and basal-1.0
+
+**basal-1.5** (October 2026; mini 1.5B, 4.5B, max 11B, with FP8 / NVFP4, MLX 4-bit / 8-bit and GGUF ports) remains
+available on Hugging Face ([collection](https://huggingface.co/collections/Remek/basal-15-6ac0de0e9199d121c6adac20))
+and is served unchanged by this engine (`--model Remek/basal-1.5-4.5B`; two option orders by default). Its release
+README, with the full Werdykt board of that release: [v1.5.0](https://github.com/rkinas/basal/tree/v1.5.0).
+
+**basal-1.0** (September 2026; 4.5B and 1.5B, plus FP8 / NVFP4 ModelOpt checkpoints) remains available on Hugging Face
+(`Remek/basal-1.0-4.5B`, `Remek/basal-1.0-1.5B`). Its full tables, methods and limitations are in the
+[basal-1.0 technical report](basal-1.pdf) and the [v1.0.1 README](https://github.com/rkinas/basal/tree/v1.0.1).
+The engine serves basal-1.0 models unchanged; `fast-exit` and the `vllm` mode with the ModelOpt checkpoints work as
+before. The Apple Silicon engine modes (`mps`, `gguf`, `mlx-q8`) and the Apple Silicon engine study were contributed
+by Paweł Kiszczak ([#4](https://github.com/rkinas/basal/pull/4)).
