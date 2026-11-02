@@ -15,7 +15,7 @@ kernels by timing) and, for Qwen3.5 models, times fla's Triton kernels at their 
 model directory (prepared/<key>/, shipped with a model) or the user cache (~/.cache/basal/prepared/<key>/, where
 basal-prepare writes). The key covers what the compiled code depends on: the GPU (name and compute capability), the
 torch / triton / CUDA versions (fla's for Qwen3.5 models), the Python version and the basal release whose compiled
-code this is (PREPARED_BASAL), the model's architecture
+code this is (PREPARED_ENGINE), the model's architecture
 (config.json, not its weights: they are inputs of the compiled functions), the mode, dtype and attention. Any
 difference: nothing is loaded and the engine compiles as before. CUDA graphs are still captured at every start (they
 hold device addresses). Inductor checks every loaded entry against its own key as well, so a directory that matches
@@ -36,10 +36,10 @@ from pathlib import Path
 import torch
 
 FILES = ("inductor.bin", "fla_configs.json", "manifest.json")
-# The basal version in the key: the release whose compiled code (the engine's layer functions) this one runs. A patch
-# release that changes no compiled code keeps it, so the directories shipped in the model repositories for that
-# release still load (2.5.1: 2.5.0's); a release that changes compiled code sets its own version.
-PREPARED_BASAL = "2.5.0"
+# The compiled-code version, the basal version in the key: bump it when a release changes compiled / graph code (the
+# engine's layer functions); a patch that only changes Python around it keeps it, so the directories shipped in the
+# model repositories still load (2.5.1 keeps 2.5.0's). A new minor release sets its own (tests/test_prepared.py).
+PREPARED_ENGINE = "2.5.0"
 
 
 def cache_root():
@@ -47,9 +47,9 @@ def cache_root():
 
 
 def environment():
-    """What compiled code depends on besides the model: GPU, library versions, basal (PREPARED_BASAL)."""
+    """What compiled code depends on besides the model: GPU, library versions, basal (PREPARED_ENGINE)."""
     python = ".".join(platform.python_version_tuple()[:2])  # (a patch release does not change compiled code)
-    env = dict(basal=PREPARED_BASAL, torch=torch.__version__, cuda=torch.version.cuda, python=python)
+    env = dict(basal=PREPARED_ENGINE, torch=torch.__version__, cuda=torch.version.cuda, python=python)
     try:
         import triton
         env["triton"] = triton.__version__

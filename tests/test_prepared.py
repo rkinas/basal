@@ -121,11 +121,21 @@ def test_key_of_a_shipped_directory(tmp_path, monkeypatch):
 
 
 def test_patch_release_keeps_the_key():
-    """The basal version in the key is the release whose compiled code this one runs: 2.5.1 changes no compiled code,
-    so it keys as 2.5.0 and loads the directories shipped for 2.5.0; a new minor release must set its own."""
+    """The basal version in the key is the compiled-code version: 2.5.1 changes no compiled code, so it keys as 2.5.0
+    and loads the directories shipped for 2.5.0."""
+    assert prepared.environment()["basal"] == prepared.PREPARED_ENGINE == "2.5.0"
+
+
+def test_compiled_code_version_follows_the_release():
+    """Guard: PREPARED_ENGINE must be bumped when basal's major.minor moves past it (a new minor release changes
+    compiled code), and it is never ahead of the release."""
     import basal
-    assert prepared.environment()["basal"] == prepared.PREPARED_BASAL == "2.5.0"
-    assert prepared.PREPARED_BASAL.split(".")[:2] == basal.__version__.split(".")[:2]
+
+    def ver(v):
+        return tuple(int(x) for x in v.split(".")[:3])
+    assert ver(prepared.PREPARED_ENGINE)[:2] == ver(basal.__version__)[:2], (
+        f"basal {basal.__version__}: set prepared.PREPARED_ENGINE (now {prepared.PREPARED_ENGINE}) to this release")
+    assert ver(prepared.PREPARED_ENGINE) <= ver(basal.__version__)
 
 
 def test_fetch_from_the_model_repository(tmp_path, monkeypatch):
