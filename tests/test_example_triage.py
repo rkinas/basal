@@ -110,3 +110,14 @@ def test_webhook_asks_basal_with_the_rules_and_returns_the_queue():
     assert empty.status_code == 422 and len(sent) == 1
     q = sent[0]["questions"]
     assert q["category"]["criteria"] == run.RULES["pl"]["category"] and q["category"]["max_error"] == 0.05
+
+
+def test_holdout_tickets_are_new_and_labelled():
+    """holdout.jsonl: the tickets the rules and the calibration were not written or fitted on."""
+    hold = [json.loads(line) for line in (ROOT / "examples/triage/holdout.jsonl").read_text().splitlines()]
+    seen = {json.loads(line)["state"] for line in (ROOT / "examples/triage/tickets.jsonl").read_text().splitlines()}
+    assert len(hold) == 97 and len({h["id"] for h in hold}) == 97
+    assert not seen & {h["state"] for h in hold}
+    for h in hold:
+        assert h["gold"]["category"] in run.RULES["pl"]["category"] and h["gold"]["urgency"] in (0, 1, 2)
+        assert h["gold"]["needs_human"] in ("yes", "no")
