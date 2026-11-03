@@ -5,6 +5,7 @@ basal-serve, scored against the gold labels, with a certified error target that 
   python examples/triage/run.py --url http://127.0.0.1:8000 --max-error 0.05
   python examples/triage/run.py --url http://127.0.0.1:8000 --rules             # the preset with RULES in the options
   python examples/triage/run.py --calibration-input labelled.jsonl             # requests for basal-calibrate
+  python examples/triage/run.py --rules --lang both --calibration-input labelled.jsonl   # Polish and English wording
 
 Input lines: {"id", "state", "gold": {"category": key, "urgency": 0-2, "needs_human": "yes" | "no"}}.
 """
@@ -110,12 +111,18 @@ async def answer_all(url, tickets, max_error, lang, concurrency, rules):
 
 
 def calibration_lines(tickets, lang, rules):
-    """One labelled /v1/systemone request per ticket, the input of basal-calibrate (docs/CALIBRATION.md)."""
+    """The labelled /v1/systemone requests of basal-calibrate (docs/CALIBRATION.md): one per ticket, or with lang
+    "both" two, the Polish and the English wording, in one group (they stay on one side of the FIT / CERT split) and
+    with a family per language (the report then gives each wording its own calibration error)."""
     for t in tickets:
-        qs = triage_questions(t["state"], lang, rules=rules)
-        for name, gold in t["gold"].items():
-            qs[name]["gold"] = gold
-        yield {"id": t["id"], "state": t["state"], "questions": qs}
+        for wording in (("pl", "en") if lang == "both" else (lang,)):
+            qs = triage_questions(t["state"], wording, rules=rules)
+            for name, gold in t["gold"].items():
+                qs[name]["gold"] = gold
+                if lang == "both":
+                    qs[name]["family"] = f"{name}/{wording}"
+            line = {"id": t["id"], "state": t["state"], "questions": qs}
+            yield {**line, "id": f"{t['id']}/{wording}", "group": t["id"]} if lang == "both" else line
 
 
 def main(argv=None):
@@ -123,7 +130,9 @@ def main(argv=None):
     p.add_argument("--input", default=str(HERE / "tickets.jsonl"))
     p.add_argument("--url", default="http://127.0.0.1:8000")
     p.add_argument("--max-error", type=float, help="certified error target: answers below its threshold abstain")
-    p.add_argument("--lang", choices=["pl", "en"], help="preset wording (default: the language of each ticket)")
+    p.add_argument("--lang", choices=["pl", "en", "both"],
+                   help="preset wording (default: the language of each ticket); both: the Polish and the English "
+                        "wording of every ticket, with --calibration-input only")
     p.add_argument("--rules", action="store_true", help="the preset with this helpdesk's rules in the options (RULES)")
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--output", help="also write every ticket with its answers (JSON lines)")
@@ -131,11 +140,14 @@ def main(argv=None):
                    help="write the tickets as labelled requests for basal-calibrate and exit (no server needed)")
     a = p.parse_args(argv)
     tickets = [json.loads(line) for line in Path(a.input).read_text(encoding="utf-8").splitlines() if line.strip()]
+    if a.lang == "both" and not a.calibration_input:
+        p.error("--lang both goes with --calibration-input: a run asks each ticket in one wording")
     if a.calibration_input:
         with open(a.calibration_input, "w", encoding="utf-8") as f:
-            for line in calibration_lines(tickets, a.lang, a.rules):
+            n = 0
+            for n, line in enumerate(calibration_lines(tickets, a.lang, a.rules), 1):
                 f.write(json.dumps(line, ensure_ascii=False) + "\n")
-        print(f"{len(tickets)} labelled requests in {a.calibration_input}", file=sys.stderr)
+        print(f"{n} labelled requests in {a.calibration_input}", file=sys.stderr)
         return
     rows = asyncio.run(answer_all(a.url, tickets, a.max_error, a.lang, a.concurrency, a.rules))
     if a.output:
