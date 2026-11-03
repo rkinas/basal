@@ -17,6 +17,7 @@ Measured per mode (same definitions as in the technical report):
 import argparse
 import gc
 import json
+import math
 import random
 import statistics
 import time
@@ -212,7 +213,7 @@ def measure(be, groups, lat_n):
     be.run_shared([(g[2], g[3]) for g in chunk[:16]])
     t = sum(timed(lambda: [be.run_shared([(g[2], g[3]) for g in chunk[i: i + 16]]) for i in range(0, len(chunk), 16)], 1, be))
     return dec, dict(lat1_ms=statistics.median(one) * 1000, lat2_ms=statistics.median(two) * 1000,
-                     lat2_p95_ms=two[int(0.95 * len(two))] * 1000, dec_s=len(chunk) / t)
+                     lat2_p95_ms=two[math.ceil(0.95 * len(two)) - 1] * 1000, dec_s=len(chunk) / t)
 
 
 
