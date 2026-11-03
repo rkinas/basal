@@ -15,7 +15,18 @@ async function check(b: Basal) {
   ok<Equal<typeof r.y, NoulAnswer | null>>();
   ok<Equal<typeof r.m, MultiAnswer | null>>();
   ok<Equal<typeof r.a, ActAnswer | null>>();
-  const choice: string | undefined = r.c?.choice;
+  const ocr = await b.decide("state", {
+    x: { type: "choice", instructions: "Amount?", __other__: "No amount", generated_criteria:
+      { preprocessor: "ocr", source: "invoice.png", filter: "\\d+" } },
+    y: { type: "multi", instructions: "Which dates?", generated_criteria:
+      { preprocessor: "ocr", source: "invoice.png", filter: "\\d+" } },
+  }, { media: [{ type: "image", name: "invoice.png", ocr: "on", context: "none", data: "base64" }] });
+  ok<Equal<typeof ocr.x, ChoiceAnswer | null>>();
+  ok<Equal<typeof ocr.y, MultiAnswer | null>>();
+  const selectedOther: boolean | undefined = ocr.x?.__other__;
+  const otherProbability: number | undefined = ocr.x?.probabilities.__other__;
+  void [selectedOther, otherProbability];
+  const choice: string | null | undefined = r.c?.choice;
   const set: string[] | undefined = r.c?.answer_set;
   const p: number | undefined = r.y?.probabilities.true;
   void [choice, set, p];

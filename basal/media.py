@@ -4,6 +4,11 @@ A request carries its media with the state:
 
   "media": [{"type": "image" | "audio", "data": "<base64>"}, ...], "detail": "default" | "high" (optional)
 
+For external OCR, image fields "name", "ocr": "on", and
+"context": "image" | "text" | "both" | "none" are handled by basal/ocr.py before this decoder.
+"text" replaces the image with OCR text in the state; "both" keeps image and text.
+"none" drops the image from model input, while OCR-derived criteria can still be generated.
+
 The items go where the state text goes, before it, in the order given: the prompt the basal-omni evaluation reads them
 with. Images: any format Pillow opens, converted to RGB; "detail" sets the image's soft tokens
 (default 280, high 1,120). Audio: WAV, FLAC, OGG or MP3 (libsndfile), mixed to mono and resampled to 16 kHz; at most the

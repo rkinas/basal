@@ -18,6 +18,7 @@ dependencies = [
   "starlette>=0.47",
   "uvicorn[standard]>=0.35",
   "httpx>=0.28",
+  "regex>=2024.11",  # bounded regex execution for OCR-generated candidates
 ]
 
 [project.optional-dependencies]

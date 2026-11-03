@@ -5,6 +5,13 @@ export type Json = string | number | boolean | null | Json[] | { [key: string]: 
 /** Options of a choice question: a map key -> description (null: the key is shown alone), or a list of keys. */
 export type Criteria = Record<string, string | null> | string[];
 
+/** OCR regex matches from a named image become candidate options. */
+export interface OCRGeneratedCriteria {
+  preprocessor: "ocr";
+  source: string;
+  filter: string;
+}
+
 export interface QuestionBase {
   instructions?: string;
   /** "show" (default): options are shown as "key: description"; "hide": the descriptions only. */
@@ -25,11 +32,17 @@ export interface SetAndAbstain {
   max_error?: number;
 }
 
-export interface ChoiceQuestion extends QuestionBase, SetAndAbstain {
+/** A question must provide static criteria or a dynamic OCR source (or both). */
+export type CandidateSupply =
+  | { criteria: Criteria; generated_criteria?: OCRGeneratedCriteria }
+  | { criteria?: Criteria; generated_criteria: OCRGeneratedCriteria };
+
+export type ChoiceQuestion = QuestionBase & SetAndAbstain & CandidateSupply & {
   type: "choice";
   instructions: string;
-  criteria: Criteria;
-}
+  /** Visible label of the reserved __other__ candidate; automatic when generated_criteria is given. */
+  __other__?: string | null;
+};
 
 export interface NoulQuestion extends QuestionBase, SetAndAbstain {
   type: "noul";
@@ -45,10 +58,9 @@ export interface ScoreQuestion extends QuestionBase, SetAndAbstain {
   criteria: string[] | Record<string, string>;
 }
 
-export interface MultiQuestion extends QuestionBase {
+export type MultiQuestion = QuestionBase & CandidateSupply & {
   type: "multi";
   instructions: string;
-  criteria: Criteria;
   threshold?: number;
   min?: number;
   max?: number;
@@ -56,7 +68,7 @@ export interface MultiQuestion extends QuestionBase {
   exclusive?: string[];
   fallback?: string;
   fallback_threshold?: number;
-}
+};
 
 export interface ActQuestion extends QuestionBase {
   type: "act";
@@ -129,9 +141,13 @@ interface AnswerExtras {
 
 export interface ChoiceAnswer extends AnswerExtras {
   type: "choice";
-  choice: string;
+  choice: string | null;
   probabilities: Record<string, number>;
-  confidence: number;
+  confidence: number | null;
+  __other__?: boolean;
+  source?: Array<"static" | "ocr" | "__other__">;
+  decision_source?: "ocr_preprocessor";
+  reason?: "no_candidates";
 }
 
 export interface NoulAnswer extends AnswerExtras {
@@ -156,9 +172,12 @@ export interface MultiAnswer extends AnswerExtras {
   selected: string[];
   probabilities: Record<string, number>;
   threshold: number;
-  set_confidence: number;
-  expected_score?: number;
+  set_confidence: number | null;
+  expected_score?: number | null;
   objective?: string;
+  sources?: Record<string, Array<"static" | "ocr">>;
+  decision_source?: "ocr_preprocessor";
+  reason?: "no_candidates";
 }
 
 export interface ActAnswer extends AnswerExtras {
@@ -222,6 +241,12 @@ export interface MediaItem {
   type: "image" | "audio";
   /** Base64 (or a data URL). */
   data: string;
+  /** Name used by generated_criteria.source. */
+  name?: string;
+  /** Only for image: allow external OCR to generate candidates and/or text context. */
+  ocr?: "on" | "off" | boolean;
+  /** Original image, OCR text, both, or neither. "none" forwards only generated candidates, if requested. */
+  context?: "image" | "text" | "both" | "none";
 }
 
 /** Request fields next to state and questions. */
@@ -250,6 +275,8 @@ export interface Usage {
   skipped?: string[];
   truncated?: boolean;
   second_order_branches?: number;
+  preprocessor_only?: number;
+  ocr?: { images: number; matches: Record<string, number> };
   [field: string]: unknown;
 }
 
