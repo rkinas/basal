@@ -197,25 +197,34 @@ def test_starting_answers_503_then_frees_the_port():
 
 
 
-@pytest.mark.parametrize("method", ["GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH"])
+def _raw_request(port, request):
+    """The bytes the server sends back for a raw request over a plain socket (no client library hides the body)."""
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as c:
+        c.sendall(request)
+        data = b""
+        while chunk := c.recv(4096):
+            data += chunk
+    return data.partition(b"\r\n\r\n")
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH", "TRACE", "CONNECT",
+                                    "PROPFIND"])
 def test_starting_answers_every_http_method_with_503_and_retry_after(method):
     """A router or a load balancer may probe with any method: PUT, DELETE, OPTIONS and PATCH used to get the standard
-    library's 501 HTML page without Retry-After, the others the 503."""
-    import http.client
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    st = S.Starting("127.0.0.1", port)
+    library's 501 HTML page without Retry-After, the others the 503; TRACE, CONNECT and made-up methods still did.
+    HEAD sends the status and the headers only, never the body (checked on the raw socket)."""
+    st = S.Starting("127.0.0.1", 0)  # port 0: the system picks a free one, no race with another process
     try:
-        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        c.request(method, "/health", body=b"{}" if method in ("POST", "PUT", "PATCH") else None)
-        r = c.getresponse()
-        body = r.read()
-        assert r.status == 503 and r.getheader("Retry-After") == "5"
-        assert r.getheader("Content-Type") == "application/json"
-        if method != "HEAD":
+        port = st.httpd.server_address[1]
+        head, _, body = _raw_request(port, f"{method} /health HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n".encode())
+        lines = head.decode().split("\r\n")
+        headers = {k.lower(): v for k, v in (ln.split(": ", 1) for ln in lines[1:])}
+        assert lines[0].split()[1] == "503" and headers["retry-after"] == "5"
+        assert headers["content-type"] == "application/json"
+        if method == "HEAD":
+            assert body == b""
+        else:
             assert json.loads(body) == {"status": "starting"}
-        c.close()
     finally:
         st.stop()
 
