@@ -196,7 +196,6 @@ def test_starting_answers_503_then_frees_the_port():
         s.bind(("127.0.0.1", port))
 
 
-
 def _raw_request(port, request):
     """The bytes the server sends back for a raw request over a plain socket (no client library hides the body)."""
     with socket.create_connection(("127.0.0.1", port), timeout=5) as c:
@@ -227,6 +226,15 @@ def test_starting_answers_every_http_method_with_503_and_retry_after(method):
             assert json.loads(body) == {"status": "starting"}
     finally:
         st.stop()
+
+
+def test_starting_needs_no_fork_hook_where_the_platform_has_none(monkeypatch):
+    """Native Windows has no os.register_at_fork: basal-serve died with AttributeError before loading the model."""
+    monkeypatch.delattr(os, "register_at_fork")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    S.Starting("127.0.0.1", port).stop()
 
 
 def _sleep(seconds):
