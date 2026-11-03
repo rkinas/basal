@@ -527,13 +527,16 @@ RECURRENT_MODEL_TYPES = ("qwen3_5", "qwen3_next", "mamba", "jamba", "zamba", "ba
                          "nemotron_h", "lfm2", "recurrent_gemma", "rwkv")
 
 
-def recurrent_layers(model_dir):
+def recurrent_layers(model_dir, strict=False):
     """The recurrent-state layers of a model (Gated DeltaNet / linear attention as in Qwen3.5, Mamba, conv), read from
     its config.json before any weights are -> e.g. "18 linear_attention layers" or "model_type qwen3_5_text"; None for
-    an attention-only decoder or without a readable config.json."""
+    an attention-only decoder or without a readable config.json (strict: one that exists but cannot be read or
+    parsed raises instead)."""
     try:
         cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        if strict and not isinstance(e, FileNotFoundError):
+            raise
         return None
     cfgs = (cfg, cfg.get("text_config") or {})  # multimodal models: the decoder's settings in text_config
     for c in cfgs:

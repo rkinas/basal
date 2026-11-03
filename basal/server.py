@@ -165,7 +165,7 @@ def _gemma4(model, revision=None):
     """A Gemma 4 model (basal-omni), from its config.json; False when that cannot be read (the server says why)."""
     from .gemma4_graph import is_gemma4_dir
     try:
-        return is_gemma4_dir(resolve(model, revision, metadata_only=True))
+        return is_gemma4_dir(resolve(model, revision, metadata_only=True), strict=True)
     except Exception as e:  # offline without the model cached, a wrong name: the model load reports it
         _config_unreadable("_gemma4", model, e)
         return False
@@ -175,7 +175,7 @@ def _recurrent(model, revision=None):
     """The recurrent-state layers of a model (recurrent_layers), from its config.json; None when that cannot be read
     (the model load reports it)."""
     try:
-        return recurrent_layers(resolve(model, revision, metadata_only=True))
+        return recurrent_layers(resolve(model, revision, metadata_only=True), strict=True)
     except Exception as e:
         _config_unreadable("_recurrent", model, e)
         return None
@@ -185,7 +185,7 @@ def _gdn(model, revision=None):
     """A Qwen3.5 model of Gated DeltaNet and attention layers (gdn_graph.is_gdn: the recurrent models the CUDA graph
     engine serves), from its config.json; False when that cannot be read."""
     try:
-        return is_gdn(resolve(model, revision, metadata_only=True))
+        return is_gdn(resolve(model, revision, metadata_only=True), strict=True)
     except Exception as e:
         _config_unreadable("_gdn", model, e)
         return False

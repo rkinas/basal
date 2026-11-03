@@ -2,6 +2,7 @@
 list conform to the official System One OpenAPI schema (tests/data/systemone_openapi.json)."""
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -643,3 +644,31 @@ def test_config_probes_warn_when_the_config_cannot_be_read(monkeypatch, capsys, 
     assert getattr(server_module, probe)("some/model") == default
     err = capsys.readouterr().err
     assert f"basal: warning: {probe}" in err and "OSError" in err and "Permission denied" in err
+    assert "some/model" in err  # the warning names the model
+
+
+@pytest.mark.parametrize("probe, default", [("_gemma4", False), ("_recurrent", None), ("_gdn", False)])
+@pytest.mark.parametrize("damage, error", [("directory", "IsADirectoryError"), ("json", "JSONDecodeError"),
+                                           ("noperm", "PermissionError")])
+def test_config_probes_warn_on_a_real_config_that_cannot_be_read(tmp_path, capsys, probe, default, damage, error):
+    """The helpers under the probes (is_gemma4_dir, recurrent_layers, is_gdn) used to swallow the read and parse errors
+    themselves, so the probes' warning never showed on a real model directory (no monkeypatch of the helpers here)."""
+    cfg = tmp_path / "config.json"
+    if damage == "directory":
+        cfg.mkdir()
+    else:
+        cfg.write_text("{not json" if damage == "json" else "{}")
+    if damage == "noperm":
+        cfg.chmod(0)
+        if os.access(cfg, os.R_OK):
+            pytest.skip("root reads a file without permissions")
+    assert getattr(server_module, probe)(str(tmp_path)) == default
+    err = capsys.readouterr().err
+    assert f"basal: warning: {probe}" in err and str(tmp_path) in err and error in err
+
+
+@pytest.mark.parametrize("probe, default", [("_gemma4", False), ("_recurrent", None), ("_gdn", False)])
+def test_config_probes_stay_silent_without_a_config(tmp_path, capsys, probe, default):
+    """A model directory with no config.json (a GGUF folder) is not an error: the default, no warning."""
+    assert getattr(server_module, probe)(str(tmp_path)) == default
+    assert capsys.readouterr().err == ""
