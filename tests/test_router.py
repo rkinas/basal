@@ -230,7 +230,7 @@ def test_starting_answers_every_http_method_with_503_and_retry_after(method):
 
 def test_starting_needs_no_fork_hook_where_the_platform_has_none(monkeypatch):
     """Native Windows has no os.register_at_fork: basal-serve died with AttributeError before loading the model."""
-    monkeypatch.delattr(os, "register_at_fork")
+    monkeypatch.delattr(os, "register_at_fork", raising=False)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
