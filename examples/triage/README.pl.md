@@ -146,6 +146,19 @@ basal-calibrate labelled.jsonl --url http://127.0.0.1:8000 --model Remek/basal-2
 Użyj tego samego modelu, trybu (`mlx`, `fast`, `gguf`, ...), kwantyzacji i pytań co na produkcji: progi należą do
 nich.
 
+**Oba języki w jednym pliku.** Jeśli serwujesz pytania po polsku i po angielsku, dodaj `--lang both`:
+
+```bash
+python examples/triage/run.py --rules --lang both --calibration-input labelled.jsonl   # 2 żądania na zgłoszenie
+```
+
+Każde zgłoszenie trafia do pliku dwa razy, raz z pytaniami po polsku i raz po angielsku:
+
+- obie kopie mają wspólną `group`, więc lądują po tej samej stronie podziału FIT/CERT i liczby z CERT zostają
+  uczciwe;
+- każdy język dostaje własne `family`, więc raport podaje błąd kalibracji osobno dla każdego języka
+  (`LOFO ECE`).
+
 **Krok 3. Przeczytaj raport.**
 
 | linia | na co patrzeć |
@@ -302,6 +315,45 @@ Co z tego wynika:
 - **Większość pomyłek w kategorii to zgłoszenia wysłane do `other`.** W przebiegu na serwerze trafiło tam 12
   reklamacji i 11 zgłoszeń technicznych. Następny krok to ostrzejszy opis `other` w `RULES`. Po zmianie trzeba
   kalibrować ponownie.
+
+### NVIDIA GB10, `--mode fast`, pytania polskie i angielskie w jednej kalibracji
+
+basal-2.0-4.5B w bf16, `--rules --max-error 0.05`, na tych samych 300 polskich zgłoszeniach. Kalibrację
+dopasowano z `--lang both`: 600 żądań, około 9 minut.
+
+Raport kalibracji, część CERT (176 żądań, których dopasowanie nie widziało):
+
+| pytanie | trafność | automatycznie | błędy wśród automatycznych | ECE dostarczona -> dopasowana |
+|---|---|---|---|---|
+| kategoria | 88% | 37.5% (próg 0.938) | 1 na 66 | 0.093 -> 0.042 |
+| pilność | 83% | 52.8% (próg 0.863) | **5 na 93 (5.4%)** | 0.169 -> 0.019 |
+| człowiek? | 80% | brak progu | - | 0.081 -> 0.062 |
+
+Błąd kalibracji osobno dla każdego języka (`LOFO ECE`) wynosi 0.059-0.065 dla kategorii i około 0.045 dla pilności.
+Jeden plik obsługuje oba języki.
+
+Przebiegi na serwerze, wszystkie 300 zgłoszeń:
+
+| kalibracja | `--lang` | kategoria: trafność, automatycznie, błędy | pilność | człowiek? |
+|---|---|---|---|---|
+| dostarczona | pl | 87%, 24%, 0 na 73 | 84%, brak progu | 79%, 9%, 0 na 27 |
+| dostarczona | en | 89%, 17%, 0 na 51 | 81%, brak progu | 80%, 8%, 1 na 23 |
+| dopasowana (both) | pl | 87%, 40%, 2% ze 121 | 84%, 54%, 4% ze 163 | 79%, brak progu |
+| dopasowana (both) | en | 89%, 41%, 2% ze 122 | 81%, 57%, 3% ze 171 | 80%, brak progu |
+
+Co się zmienia na CUDA:
+
+- **Dostarczona kalibracja modelu bf16 już automatyzuje część zgłoszeń.** Kieruje 17-24% kategorii i 8-9%
+  odpowiedzi `needs_human`, bez błędów albo z jednym. Na Macu dostarczony plik portu MLX automatyzuje około 1%.
+  Każdy silnik i port ma własny plik kalibracji, więc mierz na tym, który serwujesz.
+- **Dopasowany plik podwaja odsetek dla kategorii do około 40%,** w obu językach.
+- **Dopasowany próg pilności nie trzyma 5%.** `basal-calibrate` ostrzega, że na CERT przyjmuje 93 odpowiedzi z 5
+  błędami (5.4%), czyli powyżej celu 5%: „the threshold does not hold on CERT; label more data before relying on
+  it”. Z tym plikiem nie kieruj zgłoszeń według pilności.
+- **Dopasowany plik traci próg `needs_human`, który miał plik dostarczony.** Na tych zgłoszeniach żaden poziom
+  pewności nie spełnił warunku. Dla tego pytania zostaw zachowanie dostarczonego pliku albo kieruj je do ludzi.
+- **Pytania po angielsku działają na polskich zgłoszeniach tak samo dobrze jak po polsku:** 89% wobec 87% dla
+  kategorii. Używaj języka, który czyta Twój zespół. Jedna kalibracja z `--lang both` obsłuży oba.
 
 ## Ograniczenia
 

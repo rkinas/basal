@@ -146,6 +146,19 @@ basal-calibrate labelled.jsonl --url http://127.0.0.1:8000 --model Remek/basal-2
 Use the same model, mode (`mlx`, `fast`, `gguf`, ...), quantisation and questions as in production: the thresholds
 belong to them.
 
+**Both wordings in one file.** If you serve the questions in Polish and in English, add `--lang both`:
+
+```bash
+python examples/triage/run.py --rules --lang both --calibration-input labelled.jsonl   # 2 requests per ticket
+```
+
+This writes every ticket twice, once with the Polish and once with the English questions:
+
+- both copies share one `group`, so they land on the same side of the FIT/CERT split and the CERT numbers stay
+  honest;
+- each wording gets its own `family`, so the report gives each language its own calibration error
+  (`LOFO ECE`).
+
 **Step 3. Read the report.**
 
 | line | what to check |
@@ -300,6 +313,45 @@ What the numbers say:
 - **Most category mistakes are tickets sent to `other`.** In the served run, 12 complaints and 11 technical tickets
   went to `other`. A sharper description of `other` in `RULES` is the next thing to try. After changing it,
   calibrate again.
+
+### NVIDIA GB10, `--mode fast`, Polish and English questions in one calibration
+
+basal-2.0-4.5B in bf16 with `--rules --max-error 0.05`, on the same 300 Polish tickets. The calibration was fitted
+with `--lang both`: 600 requests, about 9 minutes.
+
+Calibration report, CERT split (176 requests the fit did not see):
+
+| question | accuracy | automated | errors when automated | ECE shipped -> fitted |
+|---|---|---|---|---|
+| category | 88% | 37.5% (threshold 0.938) | 1 in 66 | 0.093 -> 0.042 |
+| urgency | 83% | 52.8% (threshold 0.863) | **5 in 93 (5.4%)** | 0.169 -> 0.019 |
+| needs_human | 80% | no threshold | - | 0.081 -> 0.062 |
+
+The calibration error per language (`LOFO ECE`) is 0.059-0.065 for the category and about 0.045 for the urgency.
+One file serves both wordings.
+
+The served runs, all 300 tickets:
+
+| calibration | `--lang` | category: accuracy, automated, errors | urgency | needs_human |
+|---|---|---|---|---|
+| shipped | pl | 87%, 24%, 0 in 73 | 84%, no threshold | 79%, 9%, 0 in 27 |
+| shipped | en | 89%, 17%, 0 in 51 | 81%, no threshold | 80%, 8%, 1 in 23 |
+| fitted (both) | pl | 87%, 40%, 2% of 121 | 84%, 54%, 4% of 163 | 79%, no threshold |
+| fitted (both) | en | 89%, 41%, 2% of 122 | 81%, 57%, 3% of 171 | 80%, no threshold |
+
+What changes on CUDA:
+
+- **The shipped calibration of the bf16 model already automates some tickets.** It routes 17-24% of the categories,
+  and 8-9% of the `needs_human` answers, with no or one error. On the Mac, the MLX port's shipped file automates
+  about 1%. Each engine and port has its own calibration file, so measure on the one you serve.
+- **The fitted file doubles the category share to about 40%,** in both languages.
+- **The fitted urgency threshold does not hold.** `basal-calibrate` warns that on CERT it accepts 93 answers with 5
+  errors (5.4%), above the 5% target: "the threshold does not hold on CERT; label more data before relying on it".
+  Do not route on urgency with this file.
+- **The fitted file drops the `needs_human` threshold the shipped file had.** On these tickets no confidence level
+  met the bound. For that question, keep the shipped file's behaviour or send it to people.
+- **The English wording is as good as the Polish one** on Polish tickets: 89% against 87% for the category. Use the
+  wording your team reads. One calibration with `--lang both` covers both.
 
 ## Limits
 
