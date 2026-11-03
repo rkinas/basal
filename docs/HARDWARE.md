@@ -764,11 +764,46 @@ every shape: 268 s (basal-2.0) and 180 s (mini) on a v5e, cached for later start
 Not on TPU: evidence spans, `--media`, early exit and quantisation. The 44 examples are a small sample; agreement and
 speed on your own items: `basal-bench --modes eager-fp32 tpu --questions <file.jsonl>`.
 
+## DGX Spark (GB10): batch flags with basal-2.0
+
+Whole-batch throughput of the bf16 engine (not `fp8`): `basal-calibrate --mode fast-nocompile` at the default
+concurrency (32) on 800 English decisions (every 5th line of a 4,000-decision public panel), basal-2.0 (4.5B) with
+basal 2.5.2, PyTorch 2.11.0+cu130 unless noted. Time includes the model load; agreement is argmax agreement with the
+default run.
+
+| flags | time | vs default | agreement |
+|---|---:|---:|---|
+| default | 399 s | – | – (a repeat: 800/800) |
+| `--concurrency 64` | 399 s | 1.00× | 800/800 |
+| `--concurrency 128` | 378 s | 0.95× | 800/800 |
+| `--batches fine` | 477 s | 1.20× | 800/800 |
+| `--prefix-cache on` | 470 s | 1.18× | 799/800 |
+| `--mode fast` | 441 s | 1.11× | 799/800 (a repeat: the same) |
+| `--deterministic` (PyTorch 2.13) | 410 s | 1.03× | two runs bit-identical |
+| PyTorch 2.13.0+cu130 | 399 s | 1.00× | 800/800 |
+| PyTorch 2.13, `--batches compact` | 394 s | 0.99× | 798/800 |
+
+On the GB10 no flag speeds the batch up by more than 5% (`--concurrency 128`), and `fine`, `--prefix-cache on` and
+`fast` (its compile time included) are slower: keep the defaults. Accuracy stayed within one decision of the default's
+(0.8137) in every row.
+
+- **`--batches compact` needs PyTorch 2.13** here: 2.11's `varlen_attn` has no `enable_gqa`, and the engine refuses
+  compact rows (`this torch's varlen_attn has no enable_gqa`). The format-1 cascade's second pass needs 2.13 as well
+  (`seqused_k`); with it, basal-1.5 (4.5B, format 1) took 471 s against 483 s on 2.11, 800/800 agreeing.
+- **basal-2.0-mini**: 136 s on 2.11, the same on 2.13 (answers identical); `--batches compact` 139 s.
+- **One request at a time** (`basal-bench`, 44 built-in decisions), 4.5B: `eager` 9.95 decisions/s (load 76 s),
+  `fast-nocompile` 8.70 (334 s), `fast` 9.09 (508 s); mini: 27.0, 27.0 and 28.4. Unchanged from basal 2.4.1 within
+  0.5%.
+- **PyTorch 2.11 and FlexAttention**: the Gemma 4 attention test at head dimension 512 (`tests/test_sdpa_stride.py`)
+  fails to compile on the GB10 (`No valid triton configs ... Required: 165888 Hardware limit: 101376` bytes of shared
+  memory); PyTorch 2.13 compiles it.
+
 ## Notes per platform
 
 - **DGX Spark (GB10, aarch64, CUDA 13).** In the README install steps use the CUDA 13 build of PyTorch
   (`uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130`) instead of cu128. The GPU shares LPDDR5X memory (about 273 GB/s) with the CPU; every forward pass reads
-  all weights, which is why FP8 (half the bytes) halves latency.
+  all weights, which is why FP8 (half the bytes) halves latency. PyTorch 2.13 (cu130) adds `--batches compact`
+  and the format-1 cascade; batch flags measured: [DGX Spark (GB10): batch flags](#dgx-spark-gb10-batch-flags-with-basal-20).
 - **B300 / B200 (sm_100/sm_103).** PyTorch cu130 wheels work. The `vllm` mode needs a CUDA toolkit (nvcc) of version
   12.9 or newer on the machine: vLLM's FlashInfer kernels are compiled on first use, and nvcc 12.8 (found in some
   container images) cannot target the B300 (`Unsupported gpu architecture 'compute_103a'`). Compilation of `nvfp4` takes long (about 50 minutes on
