@@ -104,6 +104,7 @@ def test_models_endpoint_reports_the_bucket_temperatures():
     ({"state": "s", "questions": {"q": dict(Q, type="multi", max="one")}}, None, "max must convert to an integer"),
     ({"state": "s", "questions": {"q": dict(Q, type="multi", threshold="high")}}, None, "could not convert"),
     ({"state": "s", "questions": {"q": {"type": "tool", "tools": [{"type": "web"}]}}}, None, "function tools only"),
+    ({"state": "s", "questions": {"q": dict(Q, type="chioce")}}, None, "unknown type 'chioce'"),
     ({"state": "s", "questions": {"q": Q}, "lang": "de"}, None, "lang must be"),
 ])
 def test_invalid_requests_answer_422(body, content, message):

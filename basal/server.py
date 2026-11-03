@@ -258,6 +258,8 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
     state_pl = not force_lang and lang_of(state) == "pl"  # once per request, not once per question
     for name, q in questions.items():
         t = q.get("type", "choice")
+        if t not in ("choice", "noul", "score", "act", "multi", "tool"):
+            raise RequestError(f"question {name!r}: unknown type {t!r}")
         instr = _text(q.get("instructions", ""))
         lang = force_lang or ("pl" if state_pl else lang_of(instr))
         extra = {}
