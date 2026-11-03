@@ -154,12 +154,20 @@ def default_mode(model=None, revision=None):
     return "eager"
 
 
+def _config_unreadable(probe, model, e):
+    """The warning for a model whose config.json a probe could not read: the probe answers its default, the cause
+    (a permission error, a full disk) is no longer swallowed with it."""
+    print(f"basal: warning: {probe}: cannot read the config of {model}: {type(e).__name__}: {str(e)[:300]}",
+          file=sys.stderr, flush=True)
+
+
 def _gemma4(model, revision=None):
     """A Gemma 4 model (basal-omni), from its config.json; False when that cannot be read (the server says why)."""
     from .gemma4_graph import is_gemma4_dir
     try:
         return is_gemma4_dir(resolve(model, revision, metadata_only=True))
-    except Exception:  # offline without the model cached, a wrong name: the model load reports it
+    except Exception as e:  # offline without the model cached, a wrong name: the model load reports it
+        _config_unreadable("_gemma4", model, e)
         return False
 
 
@@ -168,7 +176,8 @@ def _recurrent(model, revision=None):
     (the model load reports it)."""
     try:
         return recurrent_layers(resolve(model, revision, metadata_only=True))
-    except Exception:
+    except Exception as e:
+        _config_unreadable("_recurrent", model, e)
         return None
 
 
@@ -177,7 +186,8 @@ def _gdn(model, revision=None):
     engine serves), from its config.json; False when that cannot be read."""
     try:
         return is_gdn(resolve(model, revision, metadata_only=True))
-    except Exception:
+    except Exception as e:
+        _config_unreadable("_gdn", model, e)
         return False
 
 

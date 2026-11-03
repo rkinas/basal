@@ -631,3 +631,15 @@ def test_help_renders_every_option():
     prints the action's fields)."""
     text = parser().format_help()
     assert "option_strings" not in text and "+1.6% at best" in " ".join(text.split())
+
+
+@pytest.mark.parametrize("probe, default", [("_gemma4", False), ("_recurrent", None), ("_gdn", False)])
+def test_config_probes_warn_when_the_config_cannot_be_read(monkeypatch, capsys, probe, default):
+    """default_mode's config probes answer their default when config.json cannot be read, and say why on stderr
+    (an OSError used to give the default with no trace)."""
+    def unreadable(*a, **k):
+        raise OSError("Permission denied: config.json")
+    monkeypatch.setattr(server_module, "resolve", unreadable)
+    assert getattr(server_module, probe)("some/model") == default
+    err = capsys.readouterr().err
+    assert f"basal: warning: {probe}" in err and "OSError" in err and "Permission denied" in err
