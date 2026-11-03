@@ -188,6 +188,18 @@ def cold(be):
             clear()
 
 
+def fresh(be, prompts):
+    """llama-server and Ollama keep the last prompts in a KV / prompt cache that no call of ours can clear, and answer
+    a repeated prompt (the warm-up of the same group, the single-order call before the two-order call) almost for free.
+    Put one nonce in front of the prompts of a timed call so that its prompt is computed; both option orders of the
+    call get the same nonce, so the second order still reuses the first order's prefix, as in real serving. The
+    answers of timed calls are discarded."""
+    if getattr(be, "http", None) is None:  # not an HTTP engine: cold() clears what there is to clear
+        return prompts
+    nonce = f"{random.getrandbits(64):016x}\n"
+    return [nonce + p for p in prompts]
+
+
 def timed(fn, reps, be=None):
     lat = []
     for _ in range(reps):
@@ -206,12 +218,12 @@ def measure(be, groups, lat_n):
     one, two = [], []
     for g in groups[: lat_n + 5]:
         be.run([g[2][0]], [g[3][0]]); be.run_shared([(g[2], g[3])])  # warm-up of the shapes
-        one += timed(lambda: be.run([g[2][0]], [g[3][0]]), 1, be)
-        two += timed(lambda: be.run_shared([(g[2], g[3])]), 1, be)
+        one += timed(lambda: be.run(fresh(be, [g[2][0]]), [g[3][0]]), 1, be)
+        two += timed(lambda: be.run_shared([(fresh(be, g[2]), g[3])]), 1, be)
     one, two = sorted(one[5:]), sorted(two[5:])
     chunk = groups[: 16 * 8]
     be.run_shared([(g[2], g[3]) for g in chunk[:16]])
-    t = sum(timed(lambda: [be.run_shared([(g[2], g[3]) for g in chunk[i: i + 16]]) for i in range(0, len(chunk), 16)], 1, be))
+    t = sum(timed(lambda: [be.run_shared([(fresh(be, g[2]), g[3]) for g in chunk[i: i + 16]]) for i in range(0, len(chunk), 16)], 1, be))
     return dec, dict(lat1_ms=statistics.median(one) * 1000, lat2_ms=statistics.median(two) * 1000,
                      lat2_p95_ms=two[math.ceil(0.95 * len(two)) - 1] * 1000, dec_s=len(chunk) / t)
 
