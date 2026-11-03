@@ -14,8 +14,9 @@ def test_rules_replace_the_options_of_every_preset_question():
     for lang in ("pl", "en"):
         plain = run.triage_questions("x", lang)
         ruled = run.triage_questions("x", lang, max_error=0.05, rules=True)
-        assert set(ruled) == set(plain) == set(run.RULES[lang])
-        for name, q in ruled.items():
+        assert set(ruled) == set(plain) | {"danger"} and set(plain) == set(run.RULES[lang])
+        assert ruled["danger"] == run.SAFETY[lang] and "max_error" not in ruled["danger"]  # a filter, never certified
+        for name, q in ((n, q) for n, q in ruled.items() if n != "danger"):
             assert q["criteria"] == run.RULES[lang][name] and q["max_error"] == 0.05
             assert q["type"] == plain[name]["type"]
         assert list(ruled["category"]["criteria"]) == list(plain["category"]["criteria"])  # same keys as the preset
@@ -34,7 +35,7 @@ def test_calibration_input_carries_the_gold_labels(tmp_path):
                for line in forced.read_text(encoding="utf-8").splitlines())
     for line, t in zip(lines, tickets):
         assert line["id"] == t["id"] and line["state"] == t["state"]
-        assert {n: q["gold"] for n, q in line["questions"].items()} == t["gold"]
+        assert {n: q["gold"] for n, q in line["questions"].items()} == {k: v for k, v in t["gold"].items() if k != "danger"}
         assert line["questions"]["category"]["criteria"] == run.RULES[run.lang_of(t["state"])]["category"]
         assert t["gold"]["category"] in line["questions"]["category"]["criteria"]
 
@@ -87,6 +88,15 @@ def test_route_sends_abstained_categories_to_people():
     assert app_mod.route(answers(human_abstain=True))["needs_human"] is None
 
 
+def test_the_safety_question_sends_a_ticket_to_the_alarm_queue_first():
+    a = answers()
+    a["danger"] = {"type": "noul", "noul": run.SAFETY_AT, "probabilities": {}}
+    r = app_mod.route(a)
+    assert r["queue"] == "alarm" and r["priority"] == "urgent" and r["needs_human"] is True
+    a["danger"]["noul"] = run.SAFETY_AT - 0.01
+    assert app_mod.route(a)["queue"] == "billing"
+
+
 def test_webhook_asks_basal_with_the_rules_and_returns_the_queue():
     import asyncio
 
@@ -120,4 +130,14 @@ def test_holdout_tickets_are_new_and_labelled():
     assert not seen & {h["state"] for h in hold}
     for h in hold:
         assert h["gold"]["category"] in run.RULES["pl"]["category"] and h["gold"]["urgency"] in (0, 1, 2)
-        assert h["gold"]["needs_human"] in ("yes", "no")
+        assert h["gold"]["needs_human"] in ("yes", "no") and h["gold"]["danger"] in ("yes", "no")
+
+
+def test_safety_tickets_are_a_blind_set_with_labelled_risks():
+    """safety.jsonl: the blind test of the danger question (written after it, not used to write it)."""
+    safety = [json.loads(line) for line in (ROOT / "examples/triage/safety.jsonl").read_text().splitlines()]
+    seen = {json.loads(line)["state"] for name in ("tickets.jsonl", "holdout.jsonl")
+            for line in (ROOT / "examples/triage" / name).read_text().splitlines()}
+    assert len(safety) == 40 and sum(t["gold"]["danger"] == "yes" for t in safety) == 12
+    assert not seen & {t["state"] for t in safety}
+    assert all(t["gold"]["urgency"] == 2 for t in safety if t["gold"]["danger"] == "yes")
