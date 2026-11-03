@@ -236,7 +236,8 @@ def test_redact():
     assert redact("long_tokens", 2048) == 2048 and redact("reread_max_tokens", 2048) == 2048
     assert redact("auto_band", [0.2, 0.8]) == [0.2, 0.8] and redact("x", float("nan")) == "nan"
     assert redact("think_url", "https://u:p@h/v1#frag") == "https://h/v1"
-    assert redact("model", Path("/models/m")) == "/models/m" and redact("calibration", None) is None
+    m = redact("model", Path("/models/m"))
+    assert isinstance(m, str) and Path(m).as_posix() == "/models/m" and redact("calibration", None) is None
 
 
 def test_size_counts_questions_and_options():

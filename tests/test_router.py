@@ -452,7 +452,6 @@ def test_replicas_end_when_the_router_is_killed(tmp_path):
     assert _gone(pids), "a replica outlived a killed router"
 
 
-@posix
 def test_router_exits_1_when_every_replica_exited(tmp_path):
     port, rport = _free_port(), _free_port()
     p = subprocess.Popen([sys.executable, "-c", ROUTER, EXITER, "--gpus", "0,1", "--port", str(port),

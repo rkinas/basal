@@ -191,10 +191,11 @@ def documents(inputs):
                         k = next((x for x in ("markdown", "html", "text") if isinstance(d.get(x), str)), None)
                         if k is None:
                             raise ValueError(f"{f}:{n + 1}: a document needs text, markdown or html")
-                        yield str(d.get("id", f"{rel.with_suffix('')}:{n + 1}")), d.get("title"), d.get("group"), \
-                            k, d[k]
+                        yield str(d.get("id", f"{rel.with_suffix('').as_posix()}:{n + 1}")), d.get("title"), \
+                            d.get("group"), k, d[k]
             else:
-                yield str(rel.with_suffix("")), None, str(rel.parent) if str(rel.parent) != "." else None, kind, \
+                yield rel.with_suffix("").as_posix(), None, \
+                    rel.parent.as_posix() if rel.parent != Path(".") else None, kind, \
                     f.read_text(encoding="utf-8", errors="replace")
 
 
