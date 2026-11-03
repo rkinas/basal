@@ -58,7 +58,7 @@ def test_lanes_run_requests_at_once_one_per_lane():
     res, dt = asyncio.run(go())
     assert res == [[[0.5, 0.5]]] * 6
     assert live["max"] == 3 and [x.calls for x in lanes] == [2, 2, 2]  # three at once, never two on one lane
-    assert dt < 0.45                                                    # one at a time: 0.6 s
+    assert dt < 0.6  # three lanes: ~0.2 s; one at a time: at least 0.6 s of sleep (slow CI runners took 0.48 s)
     assert sorted(x.name for x in srv.free_lanes) == [0, 1, 2]          # every lane back in the pool
 
 
