@@ -9,7 +9,7 @@ import pytest
 
 from basal import adapters, presets
 from basal.client import Basal
-from basal.run import to_request
+from basal.run import summarise, to_request
 
 TYPES = {"choice", "noul", "score", "multi"}
 
@@ -101,3 +101,14 @@ def test_adapter_without_its_framework_says_what_to_install(monkeypatch):
     monkeypatch.setitem(sys.modules, "crewai.tools", None)
     with pytest.raises(ImportError, match="uv pip install crewai"):
         adapters.crewai_tool()
+
+
+def test_preset_lines_are_summarised_by_their_answers():
+    """basal-run --preset: a line with a state only got the preset's questions in to_request, but summarise read it as
+    a simple line and looked for the answer "q" (KeyError in 2.5.2)."""
+    answers = {"urgency": {"type": "score"}, "category": {"type": "choice"}, "needs_human": {"type": "noul"}}
+    out = summarise({"id": 1, "state": "s"}, {"answers": answers, "usage": {"latency_ms": 3.0}})
+    assert out == {"id": 1, "answers": answers, "latency_ms": 3.0}
+    simple = summarise({"id": 2, "state": "s", "question": "q?", "options": ["a", "b"], "gold": 1},
+                       {"answers": {"q": {"type": "choice", "probabilities": {"0": 0.2, "1": 0.8}, "confidence": 0.8}}})
+    assert simple["prediction"] == 1 and simple["correct"] is True
