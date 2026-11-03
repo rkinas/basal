@@ -19,6 +19,7 @@ Kalibracja na Twoich oznaczonych zgłoszeniach pokazuje, jaką część ruchu ba
 ```
 helpdesk / e-mail / formularz ──> webhook (app.py) ──> basal-serve ──> odpowiedzi + pewność
                                          │
+                                         ├─ danger p >= 0.2               -> kolejka "alarm", priorytet urgent (najpierw)
                                          ├─ kategoria certyfikowana       -> kolejka zespołu (automatycznie)
                                          ├─ kategoria wstrzymana          -> kolejka "human" (kieruje człowiek)
                                          ├─ najwyższy poziom pilności     -> priorytet "high"
@@ -32,6 +33,7 @@ helpdesk / e-mail / formularz ──> webhook (app.py) ──> basal-serve ─�
 | `tickets.jsonl` | polskie zgłoszenia z poprawnymi etykietami: `{"id", "state", "gold": {"category", "urgency", "needs_human"}}` |
 | `run.py` | puszcza preset `triage` przez zgłoszenia i liczy trafność. Opcje: `--rules` (reguły tego helpdesku), `--max-error` (automatyzacja), `--calibration-input` (dane wejściowe dla `basal-calibrate`) |
 | `holdout.jsonl` | 97 zgłoszeń testowych z czterech innych branż, do uczciwego sprawdzenia reguł i kalibracji (zob. „Reguły v2 i zestaw testowy”) |
+| `safety.jsonl` | 40 zgłoszeń do ślepego testu pytania `danger`: 12 groźnych, 28 podchwytliwych, ale bezpiecznych |
 | `app.py` | webhook: `POST /ticket {"id", "text"}` zwraca kolejkę, priorytet i odpowiedzi |
 | `../../tests/test_example_triage.py` | testy `run.py` i `app.py` bez modelu |
 
@@ -416,6 +418,52 @@ Co to znaczy dla Twojego helpdesku:
   zanim włączysz `max_error`, i co tydzień sprawdzaj próbkę zgłoszeń skierowanych automatycznie.
 - **Nie zostawiaj bezpieczeństwa routerowi kategorii.** Zapach gazu albo nagły stan zdrowia potrzebują osobnego
   pytania tak/nie z własną ścieżką, sprawdzanego przed routerem.
+
+### Najpierw bezpieczeństwo: pytanie danger
+
+Zestaw testowy pokazał, że router kategorii wysyła zapach gazu i brak prądu u pacjentki na tlenie do `other`, z
+pewnością ponad 0.98. Router nie powinien decydować o bezpieczeństwie, więc `--rules` zadaje też pytanie tak/nie:
+
+- **`danger`**: „Czy w zgłoszeniu jest zagrożenie zdrowia, życia lub bezpieczeństwa ludzi?”. Odpowiedzi wymieniają
+  zagrożenia: dym, ogień, gaz, zatrucie, uraz, problem z lekiem, ktoś bez potrzebnego zasilania, także zagrożenie
+  wspomniane mimochodem.
+- **To filtr, a nie automatyczna decyzja.** Od p >= `SAFETY_AT` = 0.2 `app.py` wysyła zgłoszenie do kolejki
+  `alarm` z priorytetem `urgent`, niezależnie od kategorii. Próg jest dużo niższy niż 0.5, bo przeoczone zagrożenie
+  kosztuje dużo więcej niż fałszywy alarm.
+- **Nie ma `max_error`, a `--calibration-input` go pomija,** więc żadna kalibracja nie podniesie jego progu ani go
+  nie wyłączy.
+
+Wyniki na basal-2.0-4.5B-MLX-8bit, `--lang pl`:
+
+| zestaw | wykryte groźne zgłoszenia | fałszywe alarmy |
+|---|---|---|
+| `safety.jsonl`: 40 nowych zgłoszeń z dziesięciu branż, 12 groźnych (w 4 zagrożenie jest wspomniane mimochodem), 28 podchwytliwych, ale bezpiecznych (rachunki za gaz, pilne awarie, wycieki danych) | **12 z 12** | 2 z 28 |
+| `holdout.jsonl`: 97 zgłoszeń, 4 groźne (gaz, koncentrator tlenu, zła dawka, leki dla dziecka) | **4 z 4** | 3 z 93 |
+
+Jak zachowałem ślepotę `safety.jsonl`:
+
+- napisał go agent po ułożeniu pytania;
+- nie czytałem go przed pomiarem;
+- po pomiarze nie zmieniałem pytania.
+
+4 zagrożenia z `holdout.jsonl` widziałem przed napisaniem pytania, więc ten wiersz jest mniej niezależny.
+
+Ile zapasu ma próg:
+
+- **Na `safety.jsonl` najmniej pewne groźne zgłoszenie dostało 0.58.** Każdy próg od 0.1 do 0.5 łapie wszystkie
+  12; fałszywych alarmów jest od 6 (przy 0.1) do 1 (przy 0.5).
+- **Fałszywe alarmy to przypadki z pogranicza**, prawie wszystkie tuż nad progiem: przewóz powerbanków w samolocie
+  (0.80), lodówka, która przestała chłodzić i zepsuła jedzenie (0.28), paczka z pękniętym ekspresem (0.23).
+
+Zgłoszenie o gazie przez webhook:
+
+```json
+{"queue": "alarm", "priority": "urgent", "category": "other", "urgency": "wysoka", "danger": 0.867, ...}
+```
+
+**Dwanaście i cztery groźne zgłoszenia mało dowodzą przy rzadkich zdarzeniach.** Zanim zaufasz temu filtrowi,
+zbierz wszystkie prawdziwe groźne zgłoszenia, jakie masz, zmierz na nich czułość i trzymaj człowieka przy kolejce
+`alarm`.
 
 ## Ograniczenia
 

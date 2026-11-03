@@ -10,6 +10,7 @@ basal-serve, scored against the gold labels, with a certified error target that 
 Input lines: {"id", "state", "gold": {"category": key, "urgency": 0-2, "needs_human": "yes" | "no"}}.
 """
 import argparse
+import copy
 import asyncio
 import json
 import sys
@@ -73,12 +74,36 @@ RULES = {
 }
 
 
+# --rules also asks the safety question, before any routing (app.py sends a yes to the "alarm" queue). It is a filter
+# tuned to miss nothing, not an automated decision: a ticket goes to the alarm queue from SAFETY_AT, far below 0.5,
+# and it carries no max_error, so no calibration can turn it off.
+SAFETY_AT = 0.2
+SAFETY = {
+    "pl": {"type": "noul", "instructions": "Czy w zgłoszeniu jest zagrożenie zdrowia, życia lub bezpieczeństwa ludzi?",
+           "criteria": {"true": "tak: dym, ogień, iskrzenie, porażenie prądem, zapach gazu lub chemii, zatrucie lub "
+                                "reakcja alergiczna, uraz, nagły stan zdrowia, problem z lekiem, sprzęt medyczny lub "
+                                "osoba bez potrzebnego zasilania, niebezpieczny produkt lub pojazd, ktoś uwięziony, "
+                                "groźba przemocy, także wspomniane mimochodem",
+                        "false": "nie: pieniądze, dostawa, konto, dane, awaria albo pilna sprawa bez ryzyka dla "
+                                 "zdrowia i bezpieczeństwa ludzi"}},
+    "en": {"type": "noul", "instructions": "Is there a risk to people's health, life or safety in the ticket?",
+           "criteria": {"true": "yes: smoke, fire, sparks, an electric shock, a smell of gas or chemicals, poisoning "
+                                "or an allergic reaction, an injury, a sudden illness, a medicine problem, medical "
+                                "equipment or a person without the power they need, an unsafe product or vehicle, "
+                                "someone trapped, a threat of violence, also when mentioned in passing",
+                        "false": "no: money, a delivery, the account, data, an outage or an urgent matter with no "
+                                 "risk to people's health or safety"}},
+}
+
+
 def triage_questions(state, lang=None, max_error=None, rules=False):
-    """The triage preset's questions about state, with RULES in the options when rules is set."""
+    """The triage preset's questions about state; with rules, RULES in the options and the SAFETY question."""
     qs = questions("triage", lang, state, max_error)
     if rules:
-        for name, criteria in RULES[lang or lang_of(state)].items():
+        lang = lang or lang_of(state)
+        for name, criteria in RULES[lang].items():
             qs[name]["criteria"] = criteria
+        qs["danger"] = copy.deepcopy(SAFETY[lang])
     return qs
 
 
@@ -92,7 +117,7 @@ def predicted(answer):
 
 
 def report(rows, max_error):
-    names = list(rows[0]["gold"])
+    names = [n for n in rows[0]["gold"] if n in rows[0]["answers"] and n != "danger"]
     print(f"{len(rows)} tickets\n")
     print(f"{'question':<12} {'accuracy':>9}" + (f" {'automated':>10} {'error when automated':>21}" if max_error else ""))
     for name in names:
@@ -111,6 +136,15 @@ def report(rows, max_error):
                           for r in rows for n in names if r["answers"][n].get("abstain"))
         for why, n in reasons.most_common():
             print(f"  abstained {n}x: {why}")
+    if "danger" in rows[0]["answers"] and "danger" in rows[0]["gold"]:
+        risky = [r for r in rows if r["gold"]["danger"] == "yes"]
+        alarm = [r for r in rows if r["answers"]["danger"]["noul"] >= SAFETY_AT]
+        caught = [r for r in risky if r in alarm]
+        print(f"\ndanger (alarm from p >= {SAFETY_AT}): caught {len(caught)} of {len(risky)}, false alarms "
+              f"{len(alarm) - len(caught)} of {len(rows) - len(risky)}")
+        for r in risky:
+            if r not in alarm:
+                print(f"  missed {r['id']} (p {r['answers']['danger']['noul']:.2f}): {r['state'][:100]}")
     wrong = Counter((r["gold"]["category"], predicted(r["answers"]["category"])) for r in rows
                     if predicted(r["answers"]["category"]) != r["gold"]["category"])
     if wrong:
@@ -134,7 +168,10 @@ def calibration_lines(tickets, lang, rules):
     for t in tickets:
         for wording in (("pl", "en") if lang == "both" else (lang,)):
             qs = triage_questions(t["state"], wording, rules=rules)
+            qs.pop("danger", None)  # a filter at SAFETY_AT, not a decision to certify
             for name, gold in t["gold"].items():
+                if name not in qs:
+                    continue
                 qs[name]["gold"] = gold
                 if lang == "both":
                     qs[name]["family"] = f"{name}/{wording}"

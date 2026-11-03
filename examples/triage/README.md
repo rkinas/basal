@@ -19,6 +19,7 @@ then tells you what share of the traffic basal can route at that error.
 ```
 helpdesk / e-mail / form ──> webhook (app.py) ──> basal-serve ──> answers + confidence
                                     │
+                                    ├─ danger p >= 0.2           -> "alarm" queue, priority urgent (checked first)
                                     ├─ category certified        -> team queue (automatic)
                                     ├─ category abstains         -> "human" queue (a person routes it)
                                     ├─ top urgency level         -> priority "high"
@@ -32,6 +33,7 @@ helpdesk / e-mail / form ──> webhook (app.py) ──> basal-serve ──> an
 | `tickets.jsonl` | Polish helpdesk tickets with gold labels: `{"id", "state", "gold": {"category", "urgency", "needs_human"}}` |
 | `run.py` | runs the `triage` preset on the tickets and scores the answers. Options: `--rules` (this helpdesk's rules), `--max-error` (automation), `--calibration-input` (the input of `basal-calibrate`) |
 | `holdout.jsonl` | 97 held-out tickets from four other kinds of business, for an honest test of the rules and the calibration (see "Rules v2 and a held-out test") |
+| `safety.jsonl` | 40 tickets for a blind test of the `danger` question: 12 risky, 28 tricky but safe |
 | `app.py` | a webhook: `POST /ticket {"id", "text"}` returns the queue, the priority and the answers |
 | `../../tests/test_example_triage.py` | offline tests of `run.py` and `app.py`, which need no model |
 
@@ -408,6 +410,51 @@ What this means for your helpdesk:
   you turn on `max_error`, and audit a sample of the automated tickets every week.
 - **Do not let the category router decide safety.** A gas smell or a medical emergency needs its own yes/no
   question with its own route, checked before the router.
+
+### Safety first: the danger question
+
+The held-out test showed the category router sending a gas smell and a power cut with a patient on oxygen to `other`,
+with confidence above 0.98. A router should not decide safety, so `--rules` also asks a yes/no question:
+
+- **`danger`**: "Is there a risk to people's health, life or safety in the ticket?" The options list the risks:
+  smoke, fire, gas, poisoning, injury, a medicine problem, someone without power they need, and also a risk mentioned
+  in passing.
+- **It is a filter, not an automated decision.** From p >= `SAFETY_AT` = 0.2, `app.py` sends the ticket to the
+  `alarm` queue with priority `urgent`, whatever the category says. The threshold sits far below 0.5 because a
+  missed risk costs far more than a false alarm.
+- **It carries no `max_error`, and `--calibration-input` leaves it out,** so no calibration can raise its threshold
+  or turn it off.
+
+Results on basal-2.0-4.5B-MLX-8bit, `--lang pl`:
+
+| set | risky tickets caught | false alarms |
+|---|---|---|
+| `safety.jsonl`: 40 new tickets from ten businesses, 12 risky (4 of them with the risk mentioned in passing), 28 tricky but safe ("gaz" bills, urgent outages, data leaks) | **12 of 12** | 2 of 28 |
+| `holdout.jsonl`: 97 tickets, 4 risky (gas, oxygen concentrator, wrong dose, a child's medicine) | **4 of 4** | 3 of 93 |
+
+How `safety.jsonl` was kept blind:
+
+- an agent wrote it after the question;
+- it was not read before the measurement;
+- the question was not changed after it.
+
+The 4 risks in `holdout.jsonl` were seen before the question was written, so that row is less independent.
+
+How much margin the threshold has:
+
+- **On `safety.jsonl` the least confident risky ticket scored 0.58.** Every threshold from 0.1 to 0.5 catches all
+  12; the false alarms fall from 6 (at 0.1) to 1 (at 0.5).
+- **The false alarms are near misses**, all but one just above the threshold: carrying power banks on a plane
+  (0.80), a fridge that stopped and spoiled the food (0.28), a parcel with a cracked coffee machine (0.23).
+
+The gas ticket through the webhook:
+
+```json
+{"queue": "alarm", "priority": "urgent", "category": "other", "urgency": "wysoka", "danger": 0.867, ...}
+```
+
+**Twelve and four risky tickets prove little about rare events.** Before you rely on this filter, collect every
+real risky ticket you have, measure the recall on them, and keep a person on the `alarm` queue.
 
 ## Limits
 
