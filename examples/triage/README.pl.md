@@ -31,6 +31,7 @@ helpdesk / e-mail / formularz ──> webhook (app.py) ──> basal-serve ─�
 |---|---|
 | `tickets.jsonl` | polskie zgłoszenia z poprawnymi etykietami: `{"id", "state", "gold": {"category", "urgency", "needs_human"}}` |
 | `run.py` | puszcza preset `triage` przez zgłoszenia i liczy trafność. Opcje: `--rules` (reguły tego helpdesku), `--max-error` (automatyzacja), `--calibration-input` (dane wejściowe dla `basal-calibrate`) |
+| `holdout.jsonl` | 97 zgłoszeń testowych z czterech innych branż, do uczciwego sprawdzenia reguł i kalibracji (zob. „Reguły v2 i zestaw testowy”) |
 | `app.py` | webhook: `POST /ticket {"id", "text"}` zwraca kolejkę, priorytet i odpowiedzi |
 | `../../tests/test_example_triage.py` | testy `run.py` i `app.py` bez modelu |
 
@@ -268,6 +269,8 @@ Pomiary na Apple M1 Max, basal 2.5.2, basal-2.0-4.5B-MLX-8bit, `--lang pl`.
 
 ### Trafność
 
+Wiersze `--rules` tutaj i w tabelach automatyzacji aż do „Reguły v2” używają pierwszej wersji reguł (v1).
+
 | zgłoszenia | pytania | kategoria | pilność | człowiek? |
 |---|---|---|---|---|
 | 1-300 | preset | 68% | 65% | 77% |
@@ -354,6 +357,65 @@ Co się zmienia na CUDA:
   pewności nie spełnił warunku. Dla tego pytania zostaw zachowanie dostarczonego pliku albo kieruj je do ludzi.
 - **Pytania po angielsku działają na polskich zgłoszeniach tak samo dobrze jak po polsku:** 89% wobec 87% dla
   kategorii. Używaj języka, który czyta Twój zespół. Jedna kalibracja z `--lang both` obsłuży oba.
+
+### Reguły v2 i zestaw testowy: czego kalibracja nie obiecuje
+
+**Zmiana.** Przy pierwszej wersji `RULES` (v1) około 30 z 38 pomyłek w kategorii trafiało do `other`. Wersja v2
+w `run.py` dokładniej opisuje, czym zajmuje się każdy zespół:
+
+- technika: internet, telewizja, routery, pytania o konfigurację;
+- reklamacje: status zamówienia, zwroty, odwołane usługi;
+- płatności: plany, raty, metody płatności;
+- konto: wnioski RODO, zmiana właściciela.
+
+Kategorię `other` v2 zawęża do „tylko gdy żadna z powyższych nie pasuje”.
+
+**Zestaw testowy.** `holdout.jsonl` to 97 zgłoszeń z czterech nowych branż: bank, przychodnia, dostawca energii,
+kurier. Powstały po napisaniu v2. Nie dopasowywano na nich ani reguł, ani żadnej kalibracji. Usunąłem z nich trzy
+prawie-kopie zgłoszeń z zestawu 300. Etykiety są według tej samej polityki, a polityka opisuje `other` podobnie jak
+v2, co może lekko faworyzować v2.
+
+Trafność kategorii, `--lang pl`, Mac (basal-2.0-4.5B-MLX-8bit):
+
+| reguły | 300 zgłoszeń | 97 zgłoszeń testowych |
+|---|---|---|
+| v1 | 87% | 72% |
+| v2 | 95% | **85%** |
+
+95% jest zawyżone, bo v2 napisałem na podstawie pomyłek na tych zgłoszeniach. Prawdziwy zysk to ten na zestawie
+testowym: z 72% do 85%.
+
+**Automatyzacja na zestawie testowym.** Kalibrację policzyłem ponownie z regułami v2 na 300 zgłoszeniach
+(`--lang both`), na GB10 (`--mode fast`, bf16), przy `--max-error 0.05`:
+
+| kalibracja | `--lang` | kategoria: automatycznie, błędy | pilność: automatycznie, błędy |
+|---|---|---|---|
+| dostarczona | pl | 18%, 0 na 17 | brak progu |
+| dostarczona | en | 23%, 0 na 22 | brak progu |
+| dopasowana na 300 zgłoszeniach | pl | 89%, **9 na 86 (10%)** | 46%, 1 na 45 |
+| dopasowana na 300 zgłoszeniach | en | 92%, **11 na 89 (12%)** | 51%, 1 na 49 |
+
+**Dopasowany próg kategorii zawodzi w nowych branżach.** Na własnej części CERT przyjmował 94% z 3% błędów, więc
+tam wyglądał bezpiecznie. Na zestawie testowym model jest pewny siebie i się myli:
+
+- zapach gazu (0.992) i brak prądu u osoby z koncentratorem tlenu (0.983) trafiają do `other`, bo reguły opisują
+  internet i routery, a nie gaz ani prąd;
+- zła dawka na recepcie trafia do `other` (0.995);
+- pytania o cenę, np. „ile kosztuje USG”, trafiają do `other`.
+
+Próg pilności trzyma: 1 błąd na 45 i 1 na 49. Dostarczony plik zostaje ostrożny i nie popełnia błędów.
+
+Co to znaczy dla Twojego helpdesku:
+
+- **Kalibracja gwarantuje błąd na ruchu podobnym do tego, na którym ją policzono.** Nowe produkty, nowy rynek
+  albo nowy rodzaj wiadomości to nowy ruch. Kalibruj na nim.
+- **Reguły pisz tylko na części FIT albo kalibruj ponownie na świeżo oznaczonych zgłoszeniach po każdej zmianie
+  reguł.** Tutaj reguły powstały na podstawie wszystkich 300 zgłoszeń, więc część CERT nie była od nich
+  niezależna.
+- **Trzymaj zestaw testowy**: oznaczone zgłoszenia, których nie widziały ani reguły, ani kalibracja. Mierz na nim,
+  zanim włączysz `max_error`, i co tydzień sprawdzaj próbkę zgłoszeń skierowanych automatycznie.
+- **Nie zostawiaj bezpieczeństwa routerowi kategorii.** Zapach gazu albo nagły stan zdrowia potrzebują osobnego
+  pytania tak/nie z własną ścieżką, sprawdzanego przed routerem.
 
 ## Ograniczenia
 

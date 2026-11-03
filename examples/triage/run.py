@@ -26,12 +26,20 @@ HERE = Path(__file__).parent
 # what they cover here.
 RULES = {
     "pl": {
-        "category": {"complaint": "reklamacja, skarga, wadliwy lub niezgodny towar, problem z dostawą lub obsługą",
-                     "billing": "płatności, faktury, ceny, zwroty pieniędzy, karty płatnicze",
-                     "technical": "błąd lub awaria aplikacji, strony, API albo integracji",
+        "category": {"complaint": "reklamacja lub skarga: wadliwy, uszkodzony lub niezgodny towar, opóźniona, zgubiona "
+                                  "lub niedostarczona przesyłka, status zamówienia lub dostawy, zwrot towaru, odwołana "
+                                  "lub niezrealizowana usługa (wyjazd, transfer, wynajem, wdrożenie, wizyta technika), "
+                                  "szkoda, niedotrzymana obietnica lub umowa, zła obsługa",
+                     "billing": "pieniądze: płatności, faktury, ceny, plany i abonamenty, raty, metody płatności (karta, "
+                                "BLIK, przelew), opłaty, kaucje i blokady na karcie, zwroty pieniędzy, windykacja",
+                     "technical": "technika: błąd, awaria lub pytanie techniczne o aplikację, stronę, API, integrację, "
+                                  "internet, sieć, telefon, telewizję, router, dekoder lub inne urządzenie, także "
+                                  "konfiguracja, zgodność i limity",
                      "account": "konto klienta: logowanie, hasło, kody weryfikacyjne, dane, adres, użytkownicy, "
-                                "usunięcie konta",
-                     "other": "coś innego: oferta, współpraca, pytanie ogólne, podziękowanie"},
+                                "uprawnienia, przejęcie konta lub numeru, zmiana właściciela konta lub umowy, wnioski "
+                                "RODO o dane, usunięcie konta",
+                     "other": "tylko gdy żadna z powyższych nie pasuje: oferta handlowa, współpraca, prasa, "
+                              "rekrutacja, godziny otwarcia, lokalizacja, ogólne pytanie o firmę, podziękowanie"},
         "urgency": ["niska: pytanie lub prośba bez terminu, nic nie przestało działać",
                     "średnia: coś nie działa albo klient traci pieniądze, ale może poczekać dzień",
                     "wysoka: awaria blokująca pracę lub sprzedaż, włamanie, klient potrzebuje pomocy teraz"],
@@ -40,12 +48,21 @@ RULES = {
                         "false": "wystarczy gotowa odpowiedź, instrukcja lub zwykła zmiana danych"},
     },
     "en": {
-        "category": {"complaint": "a complaint, a faulty or wrong product, a delivery or service problem",
-                     "billing": "payments, invoices, prices, refunds, payment cards",
-                     "technical": "an error or outage of the app, the website, the API or an integration",
+        "category": {"complaint": "a complaint: a faulty, damaged or wrong product, a late, lost or undelivered "
+                                  "parcel, the status of an order or delivery, returning goods, a cancelled or "
+                                  "undelivered service (a trip, a transfer, a rental, an implementation, a technician "
+                                  "visit), damage, a broken promise or contract, bad service",
+                     "billing": "money: payments, invoices, prices, plans and subscriptions, instalments, payment "
+                                "methods (card, BLIK, transfer), fees, deposits and holds on a card, refunds, debt "
+                                "collection",
+                     "technical": "technical: an error, an outage or a technical question about the app, the website, "
+                                  "the API, an integration, the internet, the network, a phone, TV, a router, a "
+                                  "set-top box or another device, also setup, compatibility and limits",
                      "account": "the customer account: login, password, verification codes, data, address, users, "
-                                "closing the account",
-                     "other": "something else: an offer, a partnership, a general question, thanks"},
+                                "permissions, a taken-over account or number, a change of the account or contract "
+                                "holder, GDPR data requests, closing the account",
+                     "other": "only when none of the above fits: a sales offer, a partnership, press, recruitment, "
+                              "opening hours, a location, a general question about the company, thanks"},
         "urgency": ["low: a question or request with no deadline, nothing stopped working",
                     "medium: something does not work or the customer loses money, but it can wait a day",
                     "high: an outage that blocks work or sales, a break-in, the customer needs help now"],

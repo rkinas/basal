@@ -31,6 +31,7 @@ helpdesk / e-mail / form ──> webhook (app.py) ──> basal-serve ──> an
 |---|---|
 | `tickets.jsonl` | Polish helpdesk tickets with gold labels: `{"id", "state", "gold": {"category", "urgency", "needs_human"}}` |
 | `run.py` | runs the `triage` preset on the tickets and scores the answers. Options: `--rules` (this helpdesk's rules), `--max-error` (automation), `--calibration-input` (the input of `basal-calibrate`) |
+| `holdout.jsonl` | 97 held-out tickets from four other kinds of business, for an honest test of the rules and the calibration (see "Rules v2 and a held-out test") |
 | `app.py` | a webhook: `POST /ticket {"id", "text"}` returns the queue, the priority and the answers |
 | `../../tests/test_example_triage.py` | offline tests of `run.py` and `app.py`, which need no model |
 
@@ -267,6 +268,8 @@ Measured on an Apple M1 Max with basal 2.5.2 and basal-2.0-4.5B-MLX-8bit, `--lan
 
 ### Accuracy
 
+The `--rules` rows here and in the automation tables up to "Rules v2" use the first rules (v1).
+
 | tickets | questions | category | urgency | needs_human |
 |---|---|---|---|---|
 | 1-300 | preset | 68% | 65% | 77% |
@@ -352,6 +355,59 @@ What changes on CUDA:
   met the bound. For that question, keep the shipped file's behaviour or send it to people.
 - **The English wording is as good as the Polish one** on Polish tickets: 89% against 87% for the category. Use the
   wording your team reads. One calibration with `--lang both` covers both.
+
+### Rules v2 and a held-out test: what calibration does not promise
+
+**The change.** The first `RULES` (v1) left about 30 of their 38 category mistakes in `other`. The v2 `RULES` in
+`run.py` say more about what each team covers: internet, TV, routers and setup questions under technical; order
+status, returns and cancelled services under complaint; plans, instalments and payment methods under billing; GDPR
+requests and owner changes under account. They also narrow `other` to "only when none of the above fits".
+
+**The test set.** `holdout.jsonl` holds 97 tickets from four new kinds of business: a bank, a clinic, an energy
+supplier and a courier. They were written after v2, and neither the rules nor any calibration was fitted on them.
+Three near copies of the 300 tickets were removed. They were labelled with the same policy, and the policy's
+wording of `other` is close to v2's, which may favour v2 a little.
+
+Category accuracy, `--lang pl`, Mac (basal-2.0-4.5B-MLX-8bit):
+
+| rules | the 300 tickets | the 97 held-out tickets |
+|---|---|---|
+| v1 | 87% | 72% |
+| v2 | 95% | **85%** |
+
+The 95% is optimistic, because v2 was written from the mistakes on those tickets. The held-out gain, 72% to 85%, is
+the real one.
+
+**Automation on the held-out tickets.** The calibration was fitted again with the v2 rules on the 300 tickets
+(`--lang both`) on a GB10 (`--mode fast`, bf16), with `--max-error 0.05`:
+
+| calibration | `--lang` | category: automated, errors | urgency: automated, errors |
+|---|---|---|---|
+| shipped | pl | 18%, 0 in 17 | no threshold |
+| shipped | en | 23%, 0 in 22 | no threshold |
+| fitted on the 300 tickets | pl | 89%, **9 in 86 (10%)** | 46%, 1 in 45 |
+| fitted on the 300 tickets | en | 92%, **11 in 89 (12%)** | 51%, 1 in 49 |
+
+**The fitted category threshold fails on new kinds of business.** On its own CERT split it accepted 94% with 3%
+error, so it looked safe there. On the held-out tickets the model is sure and wrong:
+
+- a smell of gas (0.992) and a power cut with a patient on an oxygen concentrator (0.983) go to `other`, because the
+  rules describe internet and routers, not gas or electricity;
+- a wrong dose on a prescription goes to `other` (0.995);
+- price questions such as "how much is an ultrasound" go to `other`.
+
+The urgency threshold holds: 1 error in 45 and 1 in 49. The shipped file stays cautious, with 0 errors.
+
+What this means for your helpdesk:
+
+- **A calibration certifies the error on traffic like the one it was fitted on.** New products, a new market or a
+  new kind of message are new traffic. Calibrate on it.
+- **Write the rules on the FIT part only, or calibrate on fresh labelled tickets after you change them.** Here the
+  rules were written from all 300 tickets, so the CERT split was not independent of them.
+- **Keep a held-out set**, labelled tickets that neither the rules nor the calibration saw. Measure on it before
+  you turn on `max_error`, and audit a sample of the automated tickets every week.
+- **Do not let the category router decide safety.** A gas smell or a medical emergency needs its own yes/no
+  question with its own route, checked before the router.
 
 ## Limits
 
