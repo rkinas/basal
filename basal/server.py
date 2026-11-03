@@ -839,7 +839,7 @@ def order_average_arg(value):
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
                    calibration_warning=None, vllm_preset=None, layout=None, two_way=None, option_isolation=False,
-                   certified=None, context=None, adapter=None):
+                   certified=None, context=None, adapter=None, buckets=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
     model's prompt format, the option orders served, why the --calibration file may not belong to the model, the
@@ -849,6 +849,7 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
              "mode": mode, "early_exit": sorted(policies), "temperature_per_prim": dict(temperatures or {})}
+    entry["temperature_per_bucket"] = buckets or {}
     if prompt_format is not None:
         entry["prompt_format"] = prompt_format
     if media:  # --media on: the media the served model takes
@@ -1040,8 +1041,7 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     fitted = calibration_orders(data)
     alt = cal.with_name(f"{cal.stem}.o{orders}{cal.suffix}")
     if fitted is not None and fitted != orders and not path and alt.exists():
-        cal, data = alt, json.loads(alt.read_text(encoding="utf-8"))
-        fitted = calibration_orders(data)
+        return load_calibration(md, kind, alt, quant, orders, off, preset, layout, adapter)
     if fitted is None or fitted == orders:
         return data, cal, None
     why = f"{cal.name} was fitted on {fitted} option order(s), served with {orders}"
@@ -2491,7 +2491,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                                            certified_table(srv.cal),
                                            context={"limit": srv.context[0] if srv.context else None,
                                                     "overflow": srv.overflow, "truncate_head": srv.trunc_head},
-                                           adapter=srv.adapter.identity if getattr(srv, "adapter", None) else None))
+                                           adapter=srv.adapter.identity if getattr(srv, "adapter", None) else None,
+                                           buckets=srv.cal.get("temperature_per_bucket")))
 
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})
