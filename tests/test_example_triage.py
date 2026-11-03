@@ -39,6 +39,24 @@ def test_calibration_input_carries_the_gold_labels(tmp_path):
         assert t["gold"]["category"] in line["questions"]["category"]["criteria"]
 
 
+def test_both_wordings_share_a_group_and_have_a_family_each(tmp_path):
+    out = tmp_path / "both.jsonl"
+    run.main(["--calibration-input", str(out), "--rules", "--lang", "both"])
+    lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 600
+    pl, en = lines[0], lines[1]
+    assert (pl["id"], en["id"], pl["group"], en["group"]) == ("t01/pl", "t01/en", "t01", "t01")
+    assert pl["state"] == en["state"]
+    assert pl["questions"]["category"]["criteria"] == run.RULES["pl"]["category"]
+    assert en["questions"]["category"]["criteria"] == run.RULES["en"]["category"]
+    assert en["questions"]["urgency"]["family"] == "urgency/en" and pl["questions"]["urgency"]["gold"] == 1
+    try:
+        run.main(["--lang", "both"])
+        raise AssertionError("--lang both without --calibration-input")
+    except SystemExit as e:
+        assert e.code == 2
+
+
 def test_answers_read_as_gold_labels():
     assert run.predicted({"type": "choice", "choice": "billing"}) == "billing"
     assert run.predicted({"type": "score", "score": 1.1, "probabilities": {"0": 0.3, "1": 0.3, "2": 0.4}}) == 2
