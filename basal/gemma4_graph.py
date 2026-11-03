@@ -66,14 +66,17 @@ def is_gemma4(model):
     return str(getattr(model.config, "model_type", "")).startswith("gemma4")
 
 
-def is_gemma4_dir(model_dir):
-    """A model directory with a Gemma 4 config.json (before loading it)."""
+def is_gemma4_dir(model_dir, strict=False):
+    """A model directory with a Gemma 4 config.json (before loading it). strict: a config.json that cannot be read
+    (permissions, a full disk) or parsed raises instead of answering False (a missing one still answers False)."""
     import json
     from pathlib import Path
     p = Path(model_dir) / "config.json"
     try:
         return str(json.loads(p.read_text(encoding="utf-8")).get("model_type", "")).startswith("gemma4")
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        if strict and not isinstance(e, FileNotFoundError):
+            raise
         return False
 
 
