@@ -35,6 +35,9 @@ unless a line says otherwise. All changes and the known limits: [WHATS_NEW](docs
 
 2.5.1 (2 November 2026): `--prepared auto` now loads the start-up kernels shipped in the model repositories.
 
+2.5.2 (3 November 2026): bug fixes; a question with an unknown `type` is now refused (HTTP 422) instead of
+answered as `choice`. [WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-252).
+
 - **Changes on the default path**: in a request with task questions, a question named `<task>::<part>` is refused (HTTP
   422, #59); error bodies gain `code` (#62); `GET /v1/models` lists the certified thresholds and the context (#64);
   every response carries an `x-request-id` header (#68).
@@ -104,7 +107,7 @@ NVIDIA GPU, with [uv](https://docs.astral.sh/uv/) in a fresh environment:
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.1.tar.gz"
+uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.2.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --port 8000
 ```
 
@@ -113,7 +116,7 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --por
   CUDA than your driver. DGX Spark and B300: the cu130 build ([docs/HARDWARE.md](docs/HARDWARE.md)).
 - The first start in `--mode fast` compiles the model (several minutes); `--mode fast-nocompile` starts in seconds.
 
-Apple Silicon: the same with `uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.1.tar.gz"`
+Apple Silicon: the same with `uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.2.tar.gz"`
 (no torch step) and `basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000`.
 
 Ask questions with curl. Several questions about one state go into one request and share the state; each answer has a
@@ -160,7 +163,7 @@ The basal-omni models answer the same questions; with `--media on` a request may
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.1.tar.gz"
+uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.2.tar.gz"
 basal-serve --model Remek/basal-omni-1.0-mini --mode eager --media on --port 8000   # or Remek/basal-omni-1.0-max
 ```
 
@@ -176,7 +179,7 @@ a stdio bridge for hosts that start local processes. Protect HTTP and MCP reques
 `127.0.0.1` ([SERVING](docs/SERVING.md#api-access), [MCP](docs/MCP.md)).
 
 ```bash
-uv pip install "basal[fp8,mcp] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.1.tar.gz"
+uv pip install "basal[fp8,mcp] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.2.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --host 127.0.0.1 --port 8000 --mcp on
 claude mcp add --transport http basal http://127.0.0.1:8000/mcp     # Claude Code; other hosts take the same URL
 ```
@@ -254,8 +257,8 @@ basal-1.5 and basal-1.0 remain on Hugging Face and are served unchanged by this 
 Thank you to [Paweł Kiszczak](https://github.com/pawelkiszczak), [Piotr Durlej](https://github.com/pdurlej), [Kuba Sołtys](https://github.com/qooba),
 [Michał Kardyś](https://github.com/kardysm), [@lukaspoloki](https://github.com/lukaspoloki), [Miłosz Kucharski](https://github.com/Butterski),
 [Grzegorz Brzezinka](https://github.com/agentGreg), [@piotrkowski](https://github.com/piotrkowski), [@lukaszpodgorski-pl](https://github.com/lukaszpodgorski-pl),
-[Marcin Brzeżański](https://github.com/marcinbrzezanski), [Grzegorz Stark](https://github.com/gstark0) and [Dariusz Koryto](https://github.com/dkoryto), whose pull
-requests are in this repository, and to [Kamil](https://github.com/kamilrosa) and [@krzysztofkaminski](https://github.com/krzysztofkaminski) for their measurements.
+[Marcin Brzeżański](https://github.com/marcinbrzezanski), [Grzegorz Stark](https://github.com/gstark0), [Dariusz Koryto](https://github.com/dkoryto) and
+[Rafal Wiktorowicz](https://github.com/onlypositivetravelvibes-dotcom), whose pull requests are in this repository, and to [Kamil](https://github.com/kamilrosa) and [@krzysztofkaminski](https://github.com/krzysztofkaminski) for their measurements.
 What each one contributed, by pull request: [CONTRIBUTING](CONTRIBUTING.md#contributors-by-pull-request). `--mode tpu`
 and `--mode strix` are community-maintained: their numbers in [HARDWARE](docs/HARDWARE.md) are the contributors' own.
 

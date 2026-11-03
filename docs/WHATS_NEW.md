@@ -1,3 +1,35 @@
+# What is new in basal 2.5.2
+
+Released 3 November 2026. Bug fixes, all contributed by Rafal Wiktorowicz (NovaraX). Answers to valid requests are
+byte-identical to 2.5.1 (checked on an H100 with basal-omni-1.0-mini in `--mode fast`), and the prepared start-up
+directories shipped for 2.5.0 still load (the compiled code is the same). **One change on the default path:** a
+question with an unknown `type` was answered as `choice` and is now refused with HTTP 422 (#84).
+
+- **The start-up 503 answers every HTTP method** (`basal-serve`): while the model loads, every method (PUT, DELETE,
+  OPTIONS, PATCH, TRACE, CONNECT, any other) gets the same `503 {"status": "starting"}` with `Retry-After: 5` as GET
+  and POST, not the 501 HTML page; HEAD gets the status and the headers without a body.
+  Contributed by Rafal Wiktorowicz (NovaraX), [#80](https://github.com/rkinas/basal/pull/80).
+- **The config probes of the default mode say why they fell back** (`basal-serve`): when a model's config.json exists
+  but cannot be read (permissions, a full disk) or parsed (damaged JSON), `_gemma4`, `_recurrent` and `_gdn` print a
+  `basal: warning:` line with the model and the exception instead of silently returning their default; a model
+  directory without a config.json stays silent. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#81](https://github.com/rkinas/basal/pull/81).
+- **`basal-serve` starts on native Windows, and `--quant int8` works** (`basal-serve`): the 503 start-up server called
+  `os.register_at_fork`, which Windows does not have, so the server died with `AttributeError` before loading the
+  model; the call is now guarded. `--quant int8` was offered by the parser and `--help` for the CUDA graph modes but
+  rejected by `validate_quant`; it is accepted now, as `--mode int8` already was. Contributed by Rafal Wiktorowicz
+  (NovaraX), [#82](https://github.com/rkinas/basal/pull/82).
+- **Calibration files keep their provenance and the flags are honoured** (`basal-serve`, `basal-calibrate`): the
+  `CALIBRATION.oN.json` file picked for the served option orders is checked for the layout like the base file;
+  `GET /v1/models` reports `temperature_per_bucket` and `basal-calibrate --url` refuses a server that applies bucket
+  temperatures; `--from-rows --no-calibration` ignores the baseline; `--save-rows` keeps layout, adapter and revision
+  and `--from-rows` writes them to `fitted_on`. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#83](https://github.com/rkinas/basal/pull/83).
+- **An unknown question `type` answers 422** (`basal-serve`): a question whose `type` is not choice, noul, score, act,
+  multi or tool (a typo, for example) was read as `choice` and answered with 200; it is now refused with
+  `INVALID_REQUEST`, as `basal-calibrate` already does for labelled data. Requests that relied on the fallback must
+  send a valid type. Contributed by Rafal Wiktorowicz (NovaraX), [#84](https://github.com/rkinas/basal/pull/84).
+
 # What is new in basal 2.5.1
 
 Released 2 November 2026. A bug fix; defaults and answers are unchanged.

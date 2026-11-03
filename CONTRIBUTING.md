@@ -168,6 +168,12 @@ Thank you to the people whose work is in this repository, by pull request:
   request with task questions refused instead of misread ([#59](https://github.com/rkinas/basal/pull/59));
   `basal-interpolate` ([#60](https://github.com/rkinas/basal/pull/60)); and changelog fragments in `docs/changes`
   ([#55](https://github.com/rkinas/basal/pull/55)).
+- Rafal Wiktorowicz ([@onlypositivetravelvibes-dotcom](https://github.com/onlypositivetravelvibes-dotcom)): the 2.5.2
+  fixes: the start-up 503 for every HTTP method ([#80](https://github.com/rkinas/basal/pull/80)), config probes that
+  say why they fell back ([#81](https://github.com/rkinas/basal/pull/81)), `basal-serve` on native Windows and
+  `--quant int8` ([#82](https://github.com/rkinas/basal/pull/82)), the provenance and flags of calibration files
+  ([#83](https://github.com/rkinas/basal/pull/83)) and HTTP 422 for an unknown question type
+  ([#84](https://github.com/rkinas/basal/pull/84)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),
