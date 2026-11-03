@@ -27,7 +27,7 @@ def test_calibration_input_carries_the_gold_labels(tmp_path):
     run.main(["--calibration-input", str(out), "--rules"])
     lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     tickets = [json.loads(line) for line in (ROOT / "examples/triage/tickets.jsonl").read_text().splitlines()]
-    assert len(lines) == len(tickets) == 40
+    assert len(lines) == len(tickets) == 100
     forced = tmp_path / "pl.jsonl"
     run.main(["--calibration-input", str(forced), "--rules", "--lang", "pl"])
     assert all(json.loads(line)["questions"]["category"]["criteria"] == run.RULES["pl"]["category"]

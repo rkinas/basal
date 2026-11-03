@@ -6,7 +6,7 @@ Each ticket gets three answers from the `triage` preset (`basal/presets.py`) in 
 - `urgency`: a score of low, medium or high;
 - `needs_human`: yes or no.
 
-`run.py` scores the answers against the gold labels in `tickets.jsonl`, which holds 40 Polish tickets.
+`run.py` scores the answers against the gold labels in `tickets.jsonl`, which holds 100 Polish tickets.
 `--max-error` adds the certified error target: an answer whose confidence is below the threshold abstains, and the ticket
 goes to the human queue.
 
@@ -20,39 +20,64 @@ python examples/triage/run.py --rules --calibration-input labelled.jsonl   # the
 
 ## Results
 
-Measured on an Apple M1 Max with basal 2.5.2. A run of the 40 tickets takes about 15 s with the mini model.
+Measured on an Apple M1 Max with basal 2.5.2. A run of the 100 tickets takes about 40 s on the 4.5B model.
 
-| model | questions | category | urgency | needs_human |
-|---|---|---|---|---|
-| basal-2.0-mini-MLX-8bit | preset | 82% | 55% | 52% |
-| basal-2.0-mini-MLX-8bit | `--rules` | 95% | 55% | 72% |
-| basal-2.0-4.5B-MLX-8bit | preset | 78% | 57% | 75% |
-| basal-2.0-4.5B-MLX-8bit | `--rules` | 98% | 70% | 80% |
+### Accuracy
 
-- **Write your rules into the options.** The preset describes the account option as "konto lub dane klienta" (the
-  account or the customer's data). With that wording the model sends a change of address, a password question or a
-  new user to `other`. `RULES` in `run.py` says what each option covers at this helpdesk. That raises category
-  accuracy from 78% to 98% on the 4.5B model, and `needs_human` from 52% to 72% on the mini model. A preset is a
-  starting point.
-- **`--max-error 0.05` automates nothing here, and that is the point of calibration.** The shipped calibration
-  certifies only `choice` at 5% error, with a threshold of 0.977. No ticket reaches it, and `score` and `noul` have no
-  threshold, so every answer abstains. The thresholds are fitted on basal's own data. To automate a share of your
-  tickets at a known error, fit them on your labelled tickets:
+The 4.5B rows were run with `--lang pl`. The mini rows were run before it was added, so their wording followed each
+ticket's language.
 
-  ```bash
-  python examples/triage/run.py --rules --calibration-input labelled.jsonl
-  basal-calibrate labelled.jsonl --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx     # writes CALIBRATION.custom.json
-  basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --calibration CALIBRATION.custom.json
-  ```
+| model | tickets | questions | category | urgency | needs_human |
+|---|---|---|---|---|---|
+| basal-2.0-mini-MLX-8bit | 1-40 | preset | 82% | 55% | 52% |
+| basal-2.0-mini-MLX-8bit | 1-40 | `--rules` | 95% | 55% | 72% |
+| basal-2.0-4.5B-MLX-8bit | 1-100 | preset | 70% | 66% | 80% |
+| basal-2.0-4.5B-MLX-8bit | 1-100 | `--rules` | 91% | 80% | 81% |
 
-  On these 40 tickets, `basal-calibrate --report-only` reports what is missing. A 5% target needs at least 59
-  accepted FIT decisions per question type, and 299 for 1%. The FIT/CERT split is 70/30, so that is about 85 or 430
-  labelled tickets.
+**Write your rules into the options.** The preset describes the account option as "konto lub dane klienta" (the
+account or the customer's data). With that wording the model sends a change of address, a password question or a new
+user to `other`. `RULES` in `run.py` says what each option covers at this helpdesk, which raises category accuracy
+from 70% to 91%. A preset is a starting point.
 
-- **The preset's language follows the state.** With no `--lang`, the wording follows each ticket.
-  `presets.lang_of` reads t33, "Aplikacja na iPhone wylogowuje mnie co kilka minut.", as English: it has no
-  diacritics and one common Polish word. So t33 gets the English questions. `--lang pl` fixes the wording. On the
-  4.5B model with `--rules` the results are then 95%, 70% and 80%.
+### Automation at 5% error (`--max-error 0.05`), basal-2.0-4.5B-MLX-8bit
+
+| calibration | category automated | error when automated | urgency, needs_human |
+|---|---|---|---|
+| shipped (`CALIBRATION.json`) | 0% (threshold 0.977) | - | no threshold: every answer abstains |
+| fitted on the 100 tickets | 83% (threshold 0.929) | 1 of 83 | no threshold: every answer abstains |
+| the same, on its CERT split only | 73% | 1 of 22 | - |
+
+The shipped thresholds are fitted on basal's own data. Fitted on these tickets:
+
+```bash
+python examples/triage/run.py --rules --lang pl --calibration-input labelled.jsonl
+basal-calibrate labelled.jsonl --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --out CALIBRATION.triage.json  # ~4 min
+basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --calibration CALIBRATION.triage.json
+python examples/triage/run.py --rules --lang pl --max-error 0.05
+```
+
+How to read the three rows:
+
+- **The 83% row is measured on the tickets the thresholds were fitted on**, so it is optimistic.
+- **The honest number is the CERT split, which the fit did not see:** 73% of the category answers automated, with
+  1 error in 22 accepted.
+- **That threshold is not yet proven at 5%.** `basal-calibrate` certifies it on FIT, but says CERT has too few
+  decisions to confirm it: 0 errors would need at least 59 accepted CERT decisions. That is about 200 more labelled
+  tickets.
+- **`urgency` (80%) and `needs_human` (81%) get no threshold at 5% at all.** Too few of their answers are both
+  confident and right. Those questions stay with a person, or need more labelled tickets and sharper rules.
+
+The fit also lowers the calibration error (ECE on CERT):
+
+| question | shipped | fitted |
+|---|---|---|
+| category | 0.122 | 0.087 |
+| urgency | 0.140 | 0.071 |
+| needs_human | 0.126 | 0.121 |
+
+**Pass `--lang pl` for Polish tickets.** Without it, the wording follows each ticket, and `presets.lang_of` reads
+t33, "Aplikacja na iPhone wylogowuje mnie co kilka minut.", as English: it has no diacritics and only one common
+Polish word.
 
 Replace `tickets.jsonl` with your own tickets, in the same shape:
 `{"id", "state", "gold": {"category", "urgency", "needs_human"}}`.

@@ -38,3 +38,63 @@
 {"id": "t38", "state": "Czy mogę zapłacić za zamówienie BLIK-iem?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
 {"id": "t39", "state": "Chciałbym zaproponować współpracę reklamową na naszym portalu.", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
 {"id": "t40", "state": "Telewizor kupiony u was przestał się włączać po 3 miesiącach. Serwis odmówił naprawy gwarancyjnej, twierdząc że to uszkodzenie mechaniczne, a nic takiego nie miało miejsca.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t41", "state": "Od dziś rano nie działa logowanie przez SSO dla całej naszej firmy, 200 osób nie może pracować w systemie.", "gold": {"category": "technical", "urgency": 2, "needs_human": "yes"}}
+{"id": "t42", "state": "Przycisk „Zapisz” w formularzu zamówienia jest szary i nie da się go kliknąć w przeglądarce Firefox.", "gold": {"category": "technical", "urgency": 1, "needs_human": "no"}}
+{"id": "t43", "state": "Czy wasza aplikacja będzie działać na tablecie z Androidem 12?", "gold": {"category": "technical", "urgency": 0, "needs_human": "no"}}
+{"id": "t44", "state": "Webhook z waszego systemu przestał wysyłać powiadomienia o nowych zamówieniach, od dwóch dni ręcznie sprawdzamy panel.", "gold": {"category": "technical", "urgency": 1, "needs_human": "no"}}
+{"id": "t45", "state": "Po aktualizacji drukarka fiskalna nie łączy się z waszym programem kasowym i nie możemy wydawać paragonów. Sklep jest otwarty, klienci czekają.", "gold": {"category": "technical", "urgency": 2, "needs_human": "yes"}}
+{"id": "t46", "state": "W raporcie miesięcznym wykres się nie wyświetla, ale tabela z danymi jest w porządku.", "gold": {"category": "technical", "urgency": 0, "needs_human": "no"}}
+{"id": "t47", "state": "Zdjęcia produktów nie ładują się w aplikacji, widzę tylko szare kwadraty.", "gold": {"category": "technical", "urgency": 1, "needs_human": "no"}}
+{"id": "t48", "state": "Wyciekły dane naszych klientów? Dostaliśmy maila od kogoś, kto twierdzi, że ma bazę z waszego systemu i żąda okupu.", "gold": {"category": "technical", "urgency": 2, "needs_human": "yes"}}
+{"id": "t49", "state": "Proszę o korektę faktury, bo jest na niej błędna nazwa firmy: zamiast „Kowalski Sp. z o.o.” wpisano „Kowalsky”.", "gold": {"category": "billing", "urgency": 0, "needs_human": "yes"}}
+{"id": "t50", "state": "Jak mogę ustawić automatyczną płatność kartą za abonament co miesiąc?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t51", "state": "Zrezygnowałem z usługi w sierpniu, a nadal co miesiąc pobieracie ode mnie 59 zł. Proszę o zwrot trzech opłat.", "gold": {"category": "billing", "urgency": 1, "needs_human": "yes"}}
+{"id": "t52", "state": "Gdzie w panelu znajdę historię moich płatności?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t53", "state": "Dziś mija termin płatności, a przelew nie przechodzi przez wasz system płatności, ciągle wyskakuje błąd. Nie chcę płacić odsetek.", "gold": {"category": "billing", "urgency": 2, "needs_human": "yes"}}
+{"id": "t54", "state": "Czy mogę dostać fakturę proforma przed opłaceniem zamówienia?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t55", "state": "Prosimy o rozłożenie zaległej płatności 4800 zł na trzy raty, mamy chwilowe problemy z płynnością.", "gold": {"category": "billing", "urgency": 1, "needs_human": "yes"}}
+{"id": "t56", "state": "Ile kosztuje przejście z planu podstawowego na plan biznesowy?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t57", "state": "Zwrot za oddany towar miał być w ciągu 14 dni, minął miesiąc i pieniędzy nadal nie ma na koncie.", "gold": {"category": "billing", "urgency": 1, "needs_human": "yes"}}
+{"id": "t58", "state": "Jak zmienić numer telefonu przypisany do konta?", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t59", "state": "Zapomniałam hasła i link do resetu nie przychodzi na mój e-mail, sprawdzałam też spam.", "gold": {"category": "account", "urgency": 1, "needs_human": "no"}}
+{"id": "t60", "state": "Dostałem powiadomienie o logowaniu na moje konto z nieznanego urządzenia w nocy. To nie byłem ja. Co mam zrobić?", "gold": {"category": "account", "urgency": 2, "needs_human": "yes"}}
+{"id": "t61", "state": "Chcę zmienić nazwisko w danych konta po ślubie.", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t62", "state": "Proszę o przeniesienie konta na nowego właściciela firmy, poprzedni wspólnik odszedł ze spółki.", "gold": {"category": "account", "urgency": 1, "needs_human": "yes"}}
+{"id": "t63", "state": "Jak włączyć logowanie dwuetapowe na moim koncie?", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t64", "state": "Moje konto zostało zablokowane po trzech błędnych próbach logowania. Jak je odblokować?", "gold": {"category": "account", "urgency": 1, "needs_human": "no"}}
+{"id": "t65", "state": "Proszę o wydanie kopii wszystkich moich danych osobowych, które przetwarzacie, zgodnie z art. 15 RODO.", "gold": {"category": "account", "urgency": 1, "needs_human": "yes"}}
+{"id": "t66", "state": "Chcę wypisać się z newslettera, ale zachować konto.", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t67", "state": "Pracownik, który odszedł z firmy, nadal ma dostęp do naszego konta firmowego. Prosimy o natychmiastowe odebranie mu uprawnień.", "gold": {"category": "account", "urgency": 2, "needs_human": "yes"}}
+{"id": "t68", "state": "Paczka miała przyjść we wtorek, a dziś jest piątek i status od czterech dni się nie zmienia. Kiedy ją dostanę?", "gold": {"category": "complaint", "urgency": 1, "needs_human": "no"}}
+{"id": "t69", "state": "Lodówka kupiona tydzień temu głośno buczy i nie chłodzi. Proszę o odbiór i wymianę na sprawną w ramach reklamacji.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t70", "state": "W zamówieniu zabrakło jednej pozycji, ładowarki, choć zapłaciłem za cały komplet.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t71", "state": "Jestem oburzona: w sklepie stacjonarnym ochroniarz publicznie oskarżył mnie o kradzież przy innych klientach. Domagam się przeprosin i wyjaśnień, rozważam pozew.", "gold": {"category": "complaint", "urgency": 2, "needs_human": "yes"}}
+{"id": "t72", "state": "Jak odesłać towar w ramach zwrotu 14 dni? Nie chcę reklamować, po prostu mi nie pasuje.", "gold": {"category": "complaint", "urgency": 0, "needs_human": "no"}}
+{"id": "t73", "state": "Mebel przyszedł porysowany. Mogę go zatrzymać, jeśli dostanę rabat, w przeciwnym razie chcę zwrot.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t74", "state": "Dziecko pokaleczyło się o ostrą krawędź zabawki z waszego sklepu. Zabawka miała atest dla dzieci od 3 lat. Żądam wycofania produktu ze sprzedaży.", "gold": {"category": "complaint", "urgency": 2, "needs_human": "yes"}}
+{"id": "t75", "state": "Kurier był bardzo nieuprzejmy przy doręczeniu, rzucił paczką na ziemię.", "gold": {"category": "complaint", "urgency": 0, "needs_human": "yes"}}
+{"id": "t76", "state": "Złożyłem reklamację dwa tygodnie temu, numer R-5521. Jaki jest jej status?", "gold": {"category": "complaint", "urgency": 0, "needs_human": "no"}}
+{"id": "t77", "state": "Zamówiłem czarną kurtkę, a przyszła granatowa. Proszę o wymianę na właściwy kolor.", "gold": {"category": "complaint", "urgency": 0, "needs_human": "no"}}
+{"id": "t78", "state": "Czy organizujecie szkolenia z obsługi waszego systemu dla nowych pracowników?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t79", "state": "Jestem dziennikarzem i przygotowuję artykuł o branży. Czy mogę porozmawiać z kimś z działu prasowego?", "gold": {"category": "other", "urgency": 0, "needs_human": "yes"}}
+{"id": "t80", "state": "Gdzie znajduje się wasz najbliższy punkt odbioru w Gdańsku?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t81", "state": "Czy wysyłacie zamówienia za granicę, na przykład do Niemiec?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t82", "state": "Chcielibyśmy zostać waszym dystrybutorem na terenie Czech. Z kim możemy rozmawiać o warunkach?", "gold": {"category": "other", "urgency": 0, "needs_human": "yes"}}
+{"id": "t83", "state": "Świetna obsługa, pani Anna bardzo mi pomogła. Proszę przekazać podziękowania.", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t84", "state": "Czy macie aplikację w wersji na komputer z systemem macOS?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t85", "state": "Otrzymaliśmy pismo z sądu dotyczące waszej firmy jako dłużnika naszego klienta. Do kogo mamy je skierować?", "gold": {"category": "other", "urgency": 1, "needs_human": "yes"}}
+{"id": "t86", "state": "Czy w sklepie stacjonarnym jest parking dla klientów?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t87", "state": "Jaka jest wasza polityka ekologiczna, czy opakowania nadają się do recyklingu?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t88", "state": "Pytanie ogólne: czy jesteście czynni w sobotę?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t89", "state": "Strona główna od godziny zwraca błąd 503, nikt z klientów nie może złożyć zamówienia w trakcie naszej promocji.", "gold": {"category": "technical", "urgency": 2, "needs_human": "yes"}}
+{"id": "t90", "state": "Aplikacja zużywa bardzo dużo baterii od ostatniej wersji.", "gold": {"category": "technical", "urgency": 0, "needs_human": "no"}}
+{"id": "t91", "state": "Import pliku CSV z produktami kończy się komunikatem „nieprawidłowe kodowanie”. Plik zapisałem w UTF-8.", "gold": {"category": "technical", "urgency": 1, "needs_human": "no"}}
+{"id": "t92", "state": "Czy jest możliwość pobrania faktur zbiorczo za cały rok w jednym pliku?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t93", "state": "Komornik zajął nasze konto przez waszą niezapłaconą fakturę, której nigdy nie dostaliśmy. Sprawa jest pilna, nie możemy wypłacić pensji.", "gold": {"category": "billing", "urgency": 2, "needs_human": "yes"}}
+{"id": "t94", "state": "Czy mogę zapłacić za fakturę przelewem z konta firmowego, jeśli wystawiona jest na mnie prywatnie?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t95", "state": "Jak dodać nowy adres dostawy do mojego konta?", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t96", "state": "Ktoś założył konto na mój adres e-mail i składa na nie zamówienia. Nie rejestrowałem się u was.", "gold": {"category": "account", "urgency": 2, "needs_human": "yes"}}
+{"id": "t97", "state": "Jak zmienić język interfejsu konta na angielski?", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t98", "state": "Rower elektryczny zapalił się podczas ładowania w garażu. Na szczęście nikt nie ucierpiał, ale spłonęła część wyposażenia. Oczekuję kontaktu i odszkodowania.", "gold": {"category": "complaint", "urgency": 2, "needs_human": "yes"}}
+{"id": "t99", "state": "Dostałem uszkodzony karton, ale towar w środku jest cały. Daję znać tylko informacyjnie.", "gold": {"category": "complaint", "urgency": 0, "needs_human": "no"}}
+{"id": "t100", "state": "Czy możecie polecić książkę o zarządzaniu zespołem? Pytam prywatnie, bo lubię wasze treści na blogu.", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
