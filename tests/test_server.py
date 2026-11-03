@@ -209,6 +209,13 @@ def test_unsupported_quant_fails_before_model_loading(monkeypatch, mode, quant):
         server_module.main()
 
 
+def test_int8_quant_is_accepted_for_the_cuda_graph_modes_as_the_help_says():
+    for mode in ("fast", "int8"):
+        server_module.validate_quant(mode, parser().parse_args(["--mode", mode, "--quant", "int8"]).quant)
+    with pytest.raises(SystemExit, match="not supported"):
+        server_module.validate_quant("eager", "int8")
+
+
 def test_gguf_mode_needs_a_file_before_model_loading(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["basal-serve", "--mode", "gguf"])
     monkeypatch.setattr(server_module, "resolve", lambda *_, **__: pytest.fail("must reject before loading a model"))

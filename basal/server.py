@@ -186,10 +186,10 @@ def validate_quant(mode, quant):
     if quant is None:
         return
     kind = MODES[mode][0]
-    if quant == "q8" and kind == "mlx" or quant in ("fp8", "nvfp4") and kind in ("graph", "exit"):
+    if quant == "q8" and kind == "mlx" or quant in ("fp8", "nvfp4", "int8") and kind in ("graph", "exit"):
         return
     raise SystemExit(f"--quant {quant} is not supported with --mode {mode} "
-                     "(q8 only for mlx; fp8 and nvfp4 only for the CUDA graph modes)")
+                     "(q8 only for mlx; fp8, nvfp4 and int8 only for the CUDA graph modes)")
 
 
 def _text(x):
@@ -2383,7 +2383,8 @@ class Starting:
         # whole life, so the port stayed taken after stop() and the real server's bind failed (address already in
         # use): the child closes its copy at once
         sock = self.httpd.socket
-        os.register_at_fork(after_in_child=sock.close)
+        if hasattr(os, "register_at_fork"):
+            os.register_at_fork(after_in_child=sock.close)
 
     def stop(self):
         if self.httpd is not None:
