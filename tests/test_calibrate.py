@@ -251,3 +251,12 @@ def test_url_mode_needs_an_uncalibrated_server(capsys):
     assert uncalibrated(entry({}), "http://h")["mode"] == "mlx"
     uncalibrated({"name": "basal-1.5-mini", "mode": "mlx"}, "http://h")         # a 1.5.0 server: warned, not refused
     assert "make sure it runs with --no-calibration" in capsys.readouterr().err
+
+
+def test_url_mode_refuses_a_server_that_applies_bucket_temperatures():
+    entry = {"name": "basal-1.5-mini", "mode": "mlx", "temperature_per_prim": {"choice": 1.0},
+             "temperature_per_bucket": {"choice": {"2-10": 2.0}}}
+    with pytest.raises(SystemExit, match="--no-calibration"):
+        uncalibrated(entry, "http://h")
+    entry["temperature_per_bucket"] = {"choice": {"2-10": 1.0}}
+    assert uncalibrated(entry, "http://h") is entry

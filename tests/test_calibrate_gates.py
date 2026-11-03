@@ -3,10 +3,13 @@ its `multi` section (fallback_threshold fitted per label set), and basal-serve u
 import asyncio
 import json
 import re
+from types import SimpleNamespace
 
+import httpx
 import numpy as np
 import pytest
 
+import basal.calibrate as calibrate_module
 import basal.server as server_module
 from basal.calibrate import (REFERENCE, accepted_needed, cert_note, fit, fit_fallback, is_cert, lofo, main,
                              sample_size, set_metrics, set_probs)
@@ -374,3 +377,48 @@ def test_saved_rows_refit_without_an_engine(tmp_path, engine):
         assert a[k] == b[k], k
     with pytest.raises(SystemExit, match="not a file written by"):
         main([str(tmp_path / "l.jsonl"), "--from-rows", "--out", str(tmp_path / "c.json")])
+
+
+def saved_rows(tmp_path, baseline, **head):
+    first = dict(basal_calibrate_rows=1, fmt=2, kind="eager", quant=None, model="stub", engine="eager",
+                 data="labels.jsonl", requests=1, baseline=str(baseline), orders=1, **head)
+    row = dict(prim="choice", group="g", family="f", gold=0, p=[0.8, 0.2])
+    path = tmp_path / "rows.jsonl"
+    path.write_text(json.dumps(first) + "\n" + json.dumps(row) + "\n", encoding="utf-8")
+    return path
+
+
+def test_saved_rows_refit_honours_no_calibration(tmp_path):
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"temperature_per_prim": {"choice": 4.0}}), encoding="utf-8")
+    rows, out = saved_rows(tmp_path, baseline), tmp_path / "out.json"
+    main([str(rows), "--from-rows", "--no-calibration", "--out", str(out)])
+    cal = json.loads(out.read_text(encoding="utf-8"))
+    assert cal["baseline"] == "none" and cal["temperature_per_prim"].get("choice", 1.0) != 4.0
+
+
+def test_saved_rows_keep_the_serving_identity_of_the_fit(tmp_path, monkeypatch):
+    """--save-rows stores layout, adapter and revision; the --from-rows refit writes them to fitted_on, where
+    basal-serve checks them."""
+    md = tmp_path / "models--owner--stub" / "snapshots" / ("a" * 40)
+    md.mkdir(parents=True)
+    (md / "basal.json").write_text(json.dumps({"prompt": 2, "layout": "qfirst"}), encoding="utf-8")
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"state": "s", "questions": {"q": {
+        "type": "choice", "criteria": ["a", "b"], "gold": "a"}}}) + "\n", encoding="utf-8")
+    entry = dict(name="stub", mode="eager", prompt_format=2, orders=1, layout="qfirst",
+                 adapter="stub-adapter@sha256:abc", temperature_per_prim={})
+    monkeypatch.setattr(httpx, "get", lambda *args, **kw: SimpleNamespace(json=lambda: {"models": [entry]}))
+    monkeypatch.setattr(calibrate_module, "resolve", lambda *args, **kw: md)
+
+    async def readouts(*args):
+        return [{"answers": {"q": {"probabilities": {"a": 0.8, "b": 0.2}}}}]
+    monkeypatch.setattr(calibrate_module, "over_http", readouts)
+    rows, first, again = tmp_path / "rows.jsonl", tmp_path / "first.json", tmp_path / "again.json"
+    main([str(labels), "--url", "http://h", "--model", "owner/stub", "--no-calibration",
+          "--save-rows", str(rows), "--out", str(first)])
+    main([str(rows), "--from-rows", "--out", str(again)])
+    fitted = [json.loads(p.read_text(encoding="utf-8"))["fitted_on"] for p in (first, again)]
+    assert fitted[0]["adapter"] == "stub-adapter@sha256:abc" and fitted[0]["revision"] == "a" * 40
+    for field in ("layout", "adapter", "revision"):
+        assert fitted[1][field] == fitted[0][field], field

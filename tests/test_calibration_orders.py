@@ -100,3 +100,14 @@ def test_orders_2le():
                                         "five": {"type": "choice", "criteria": ["a", "b", "c", "d", "e"]}}}
     asyncio.run(srv._run(body))
     assert sorted(seen) == [2, 2, 5]                       # two orders for 2 options, one for 5
+
+
+def test_the_file_for_the_served_orders_is_checked_for_the_layout_too(tmp_path):
+    """The .oN file is picked after the layout check of CALIBRATION.json: its own layout is checked as well."""
+    write(tmp_path, "CALIBRATION.json", 1)
+    write(tmp_path, "CALIBRATION.o2.json", 2, layout="qfirst")
+    cal, path, why = load_calibration(tmp_path, "graph", None, None, 2, layout="canonical")
+    assert "thresholds" not in cal and why is not None
+    write(tmp_path, "CALIBRATION.json", 1, layout="qfirst")                      # the same layout: the .o2 file loads
+    cal, path, why = load_calibration(tmp_path, "graph", None, None, 2, layout="qfirst")
+    assert why is None and path.name == "CALIBRATION.o2.json" and cal["thresholds"]

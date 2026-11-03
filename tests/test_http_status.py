@@ -78,6 +78,17 @@ def test_models_endpoint_reports_context_and_hides_mismatched_certification():
     assert "certified" not in response.json()["models"][0]
 
 
+def test_models_endpoint_reports_the_bucket_temperatures():
+    srv = AppServer(Engine())
+    srv.cal = {"temperature_per_prim": {"choice": 1.0}, "temperature_per_bucket": {"choice": {"2-10": 2.0}}}
+
+    async def go(c):
+        return await c.get("/v1/models")
+
+    entry = asyncio.run(on_app(srv, go)).json()["models"][0]
+    assert entry["temperature_per_bucket"] == {"choice": {"2-10": 2.0}}
+
+
 @pytest.mark.parametrize("body,content,message", [
     (None, b"{not json", "not valid JSON"),
     (["a list"], None, "must be a JSON object"),
