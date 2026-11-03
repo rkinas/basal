@@ -265,7 +265,11 @@ def test_cascade_why(monkeypatch):
     class NoFlash:
         def __getattr__(self, name):
             raise AttributeError(name)
-    pytest.importorskip("torch.nn.attention.varlen")  # (its first import reads torch.ops.aten)
+    varlen = pytest.importorskip("torch.nn.attention.varlen")  # (its first import reads torch.ops.aten)
+
+    def varlen_attn(query, key, value, cu_seq_q, cu_seq_k, max_q, max_k, *, enable_gqa=False, seqused_k=None):
+        """The signature of a torch whose varlen_attn takes per-sequence key counts (2.13; 2.11's has no seqused_k)."""
+    monkeypatch.setattr(varlen, "varlen_attn", varlen_attn)
     monkeypatch.setattr(E.torch.ops, "aten", NoFlash())
     monkeypatch.setattr(E, "torch_varlen_available", lambda dtype: None)
     be = Stub(tiny())

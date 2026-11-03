@@ -47,6 +47,7 @@ def test_off_by_default():
 
 def test_refused_where_it_cannot_run(monkeypatch):
     m = tiny("e4b")
+    monkeypatch.setattr(attn512, "available", lambda: "needs a CUDA GPU")  # the reason of a CPU, on any machine
     with pytest.raises(ValueError, match="--global-attn triton: needs a CUDA GPU"):
         Gemma4Graph(m, kernels="flex", global_attn="triton")
     monkeypatch.setattr(attn512, "available", lambda: None)
