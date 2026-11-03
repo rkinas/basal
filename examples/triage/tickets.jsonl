@@ -1,0 +1,40 @@
+{"id": "t01", "state": "Dzień dobry, od wczoraj nie mogę się zalogować do aplikacji mobilnej. Po wpisaniu hasła pojawia się biały ekran i aplikacja się zamyka. Telefon Samsung, Android 14.", "gold": {"category": "technical", "urgency": 1, "needs_human": "no"}}
+{"id": "t02", "state": "Na fakturze FV/2026/10/0412 naliczono mi opłatę za pakiet premium, którego nigdy nie zamawiałem. Proszę o korektę faktury i zwrot 49 zł.", "gold": {"category": "billing", "urgency": 1, "needs_human": "yes"}}
+{"id": "t03", "state": "Proszę o zmianę adresu korespondencyjnego na ul. Lipowa 7/3, 30-001 Kraków.", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t04", "state": "Zamówiony ekspres przyszedł z pękniętą obudową, a kurier nie chciał spisać protokołu szkody. Jestem bardzo niezadowolona z obsługi i żądam wymiany na nowy egzemplarz.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t05", "state": "Cały system płatności w naszym sklepie przestał działać 20 minut temu, klienci nie mogą zapłacić kartą, tracimy sprzedaż. Pilne!", "gold": {"category": "technical", "urgency": 2, "needs_human": "yes"}}
+{"id": "t06", "state": "Czy macie w ofercie kubki z logo firmy? Szukam prezentów świątecznych dla pracowników.", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t07", "state": "Ktoś zalogował się na moje konto z obcego kraju i zmienił numer telefonu. Nie mam już dostępu. Proszę natychmiast zablokować konto.", "gold": {"category": "account", "urgency": 2, "needs_human": "yes"}}
+{"id": "t08", "state": "Kiedy dostanę fakturę za październik? W panelu klienta jeszcze jej nie widzę.", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t09", "state": "Trzeci raz zgłaszam ten sam problem z dostawą i nikt nie odpowiada. Jeśli do piątku nie dostanę paczki, rezygnuję z usług i składam skargę do UOKiK.", "gold": {"category": "complaint", "urgency": 2, "needs_human": "yes"}}
+{"id": "t10", "state": "Eksport raportu do PDF kończy się błędem 500. Do Excela działa normalnie.", "gold": {"category": "technical", "urgency": 1, "needs_human": "no"}}
+{"id": "t11", "state": "Chcę usunąć swoje konto i wszystkie dane zgodnie z RODO.", "gold": {"category": "account", "urgency": 1, "needs_human": "yes"}}
+{"id": "t12", "state": "Pobrano ode mnie dwa razy tę samą kwotę 129 zł za abonament w listopadzie. Proszę o zwrot nadpłaty.", "gold": {"category": "billing", "urgency": 1, "needs_human": "yes"}}
+{"id": "t13", "state": "Dziękuję za szybką pomoc w zeszłym tygodniu, wszystko działa.", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t14", "state": "Kupione buty rozkleiły się po dwóch tygodniach noszenia. Składam reklamację i proszę o zwrot pieniędzy.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t15", "state": "Jak zmienić hasło do konta? Nie widzę tej opcji w ustawieniach.", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t16", "state": "Serwer API odpowiada z opóźnieniem około 8 sekund od rana. Nasza integracja zaczyna zwracać timeouty.", "gold": {"category": "technical", "urgency": 2, "needs_human": "yes"}}
+{"id": "t17", "state": "Proszę o wystawienie faktury na firmę zamiast na osobę prywatną, NIP 5213000000.", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t18", "state": "Konsultant był wobec mnie niegrzeczny i rozłączył rozmowę. Oczekuję przeprosin.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t19", "state": "W jakich godzinach działa infolinia w święta?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t20", "state": "Powiadomienia push przestały przychodzić po aktualizacji aplikacji do wersji 5.2.", "gold": {"category": "technical", "urgency": 0, "needs_human": "no"}}
+{"id": "t21", "state": "Moja karta została zablokowana podczas płatności za granicą i nie mogę zapłacić za hotel. Jestem teraz w recepcji, proszę o pilny kontakt.", "gold": {"category": "billing", "urgency": 2, "needs_human": "yes"}}
+{"id": "t22", "state": "Proszę dodać drugiego użytkownika do konta firmowego z uprawnieniami tylko do odczytu.", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t23", "state": "Otrzymałem wezwanie do zapłaty za fakturę, którą opłaciłem miesiąc temu. W załączniku potwierdzenie przelewu. Proszę o wyjaśnienie, bo grozicie windykacją.", "gold": {"category": "billing", "urgency": 2, "needs_human": "yes"}}
+{"id": "t24", "state": "Strona ładuje się bardzo wolno w przeglądarce Safari, w Chrome jest w porządku.", "gold": {"category": "technical", "urgency": 0, "needs_human": "no"}}
+{"id": "t25", "state": "Produkt nie zgadza się z opisem na stronie: miał być wodoodporny, a przemókł przy pierwszym deszczu. Chcę odstąpić od umowy.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t26", "state": "Czy możecie przysłać katalog produktów na przyszły rok?", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t27", "state": "Nie przychodzi mi kod SMS do weryfikacji dwuetapowej, przez co nie mogę zalogować się na konto.", "gold": {"category": "account", "urgency": 1, "needs_human": "no"}}
+{"id": "t28", "state": "Po wczorajszym wdrożeniu baza danych klientów jest niedostępna, cały zespół sprzedaży stoi. Prosimy o natychmiastową interwencję.", "gold": {"category": "technical", "urgency": 2, "needs_human": "yes"}}
+{"id": "t29", "state": "Jaki jest numer konta do przelewu za fakturę?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t30", "state": "Zamówiłam rozmiar M, a przyszedł XL. Jak mogę wymienić towar?", "gold": {"category": "complaint", "urgency": 0, "needs_human": "no"}}
+{"id": "t31", "state": "Chciałbym zmienić adres e-mail przypisany do konta na nowy.", "gold": {"category": "account", "urgency": 0, "needs_human": "no"}}
+{"id": "t32", "state": "Proszę o informację, czy prowadzicie rekrutację na stanowisko magazyniera.", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t33", "state": "Aplikacja na iPhone wylogowuje mnie co kilka minut.", "gold": {"category": "technical", "urgency": 0, "needs_human": "no"}}
+{"id": "t34", "state": "Zmieniła się cena abonamentu bez wcześniejszego powiadomienia. Nie zgadzam się na podwyżkę i proszę o wyjaśnienie podstawy prawnej.", "gold": {"category": "billing", "urgency": 1, "needs_human": "yes"}}
+{"id": "t35", "state": "Kurier zostawił paczkę pod drzwiami i została skradziona. Nie podpisywałem odbioru. Żądam ponownej wysyłki.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
+{"id": "t36", "state": "Mój mąż zmarł w zeszłym miesiącu. Jak mogę przejąć lub zamknąć jego konto?", "gold": {"category": "account", "urgency": 1, "needs_human": "yes"}}
+{"id": "t37", "state": "Synchronizacja kalendarza z Outlookiem nie działa od poniedziałku, spotkania się nie pojawiają.", "gold": {"category": "technical", "urgency": 1, "needs_human": "no"}}
+{"id": "t38", "state": "Czy mogę zapłacić za zamówienie BLIK-iem?", "gold": {"category": "billing", "urgency": 0, "needs_human": "no"}}
+{"id": "t39", "state": "Chciałbym zaproponować współpracę reklamową na naszym portalu.", "gold": {"category": "other", "urgency": 0, "needs_human": "no"}}
+{"id": "t40", "state": "Telewizor kupiony u was przestał się włączać po 3 miesiącach. Serwis odmówił naprawy gwarancyjnej, twierdząc że to uszkodzenie mechaniczne, a nic takiego nie miało miejsca.", "gold": {"category": "complaint", "urgency": 1, "needs_human": "yes"}}
