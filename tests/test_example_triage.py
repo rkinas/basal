@@ -44,3 +44,51 @@ def test_answers_read_as_gold_labels():
     assert run.predicted({"type": "score", "score": 1.1, "probabilities": {"0": 0.3, "1": 0.3, "2": 0.4}}) == 2
     assert run.predicted({"type": "noul", "noul": 0.5}) == "yes"
     assert run.predicted({"type": "noul", "noul": 0.49}) == "no"
+
+
+spec_app = importlib.util.spec_from_file_location("triage_app", ROOT / "examples/triage/app.py")
+app_mod = importlib.util.module_from_spec(spec_app)
+spec_app.loader.exec_module(app_mod)
+
+
+def answers(cat_abstain=False, urgency=(0.1, 0.2, 0.7), human=0.8, human_abstain=False):
+    return {"category": {"type": "choice", "choice": "billing", "probabilities": {"billing": 0.95, "other": 0.05},
+                         "confidence": 0.95, "abstain": cat_abstain},
+            "urgency": {"type": "score", "score": 1.6, "legend": {"0": "niska", "1": "średnia", "2": "wysoka"},
+                        "probabilities": {str(i): p for i, p in enumerate(urgency)}, "abstain": True},
+            "needs_human": {"type": "noul", "noul": human, "probabilities": {"true": human, "false": 1 - human},
+                            "confidence": max(human, 1 - human), "abstain": human_abstain}}
+
+
+def test_route_sends_abstained_categories_to_people():
+    r = app_mod.route(answers())
+    assert r == {"queue": "billing", "priority": "high", "category": "billing", "urgency": "wysoka",
+                 "needs_human": True, "automated": False}
+    assert app_mod.route(answers(cat_abstain=True))["queue"] == "human"
+    assert app_mod.route(answers(urgency=(0.6, 0.3, 0.1)))["priority"] == "normal"
+    assert app_mod.route(answers(human_abstain=True))["needs_human"] is None
+
+
+def test_webhook_asks_basal_with_the_rules_and_returns_the_queue():
+    import asyncio
+
+    import httpx
+
+    from basal.client import AsyncBasal
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"model": "m", "usage": {}, "answers": answers()})
+    basal = AsyncBasal("http://basal", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    web = app_mod.make_app(basal, max_error=0.05, lang="pl")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=web), base_url="http://app") as c:
+            return (await c.post("/ticket", json={"id": "7", "text": "Pobrano dwa razy 129 zł"}),
+                    await c.post("/ticket", json={"id": "8", "text": " "}))
+    ok, empty = asyncio.run(go())
+    assert ok.status_code == 200 and ok.json()["queue"] == "billing" and ok.json()["id"] == "7"
+    assert empty.status_code == 422 and len(sent) == 1
+    q = sent[0]["questions"]
+    assert q["category"]["criteria"] == run.RULES["pl"]["category"] and q["category"]["max_error"] == 0.05
