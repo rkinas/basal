@@ -2366,8 +2366,13 @@ class Starting:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Retry-After", "5")
                 self.end_headers()
-                self.wfile.write(body)
-            do_GET = do_POST = do_HEAD = _answer
+                if self.command != "HEAD":  # HEAD gets the status and the headers of GET, never a body
+                    self.wfile.write(body)
+
+            def __getattr__(self, name):  # any method (TRACE, CONNECT, a made-up one) gets the same answer, not a 501
+                if name.startswith("do_"):
+                    return self._answer
+                raise AttributeError(name)
 
             def log_message(self, *_):
                 pass
