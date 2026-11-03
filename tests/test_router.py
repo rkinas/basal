@@ -196,6 +196,30 @@ def test_starting_answers_503_then_frees_the_port():
         s.bind(("127.0.0.1", port))
 
 
+
+@pytest.mark.parametrize("method", ["GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH"])
+def test_starting_answers_every_http_method_with_503_and_retry_after(method):
+    """A router or a load balancer may probe with any method: PUT, DELETE, OPTIONS and PATCH used to get the standard
+    library's 501 HTML page without Retry-After, the others the 503."""
+    import http.client
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    st = S.Starting("127.0.0.1", port)
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        c.request(method, "/health", body=b"{}" if method in ("POST", "PUT", "PATCH") else None)
+        r = c.getresponse()
+        body = r.read()
+        assert r.status == 503 and r.getheader("Retry-After") == "5"
+        assert r.getheader("Content-Type") == "application/json"
+        if method != "HEAD":
+            assert json.loads(body) == {"status": "starting"}
+        c.close()
+    finally:
+        st.stop()
+
+
 def _sleep(seconds):
     time.sleep(seconds)
 

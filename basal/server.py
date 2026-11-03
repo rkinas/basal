@@ -2367,7 +2367,7 @@ class Starting:
                 self.send_header("Retry-After", "5")
                 self.end_headers()
                 self.wfile.write(body)
-            do_GET = do_POST = do_HEAD = _answer
+            do_GET = do_POST = do_HEAD = do_PUT = do_DELETE = do_OPTIONS = do_PATCH = _answer
 
             def log_message(self, *_):
                 pass
