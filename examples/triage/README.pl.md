@@ -110,8 +110,8 @@ Webhook odpowiada tak (pole `answers` skrócone):
 ## 4. Wpisz swoje reguły w pytania
 
 Preset to punkt wyjścia. `RULES` w `run.py` opisuje przy każdej odpowiedzi, co obejmuje w tym helpdesku. Na
-przykład `account` to „logowanie, hasło, kody weryfikacyjne, dane, adres, użytkownicy, usunięcie konta”. Na 100
-zgłoszeniach podniosło to trafność kategorii z 70% do 91% (zob. „Wyniki”). Zrób to przed kalibracją, bo kalibracja
+przykład `account` to „logowanie, hasło, kody weryfikacyjne, dane, adres, użytkownicy, usunięcie konta”. Na 300
+zgłoszeniach podniosło to trafność kategorii z 68% do 87% (zob. „Wyniki”). Zrób to przed kalibracją, bo kalibracja
 dotyczy dokładnie tych pytań, które serwujesz:
 
 - pisz opisy w języku zgłoszeń;
@@ -121,7 +121,7 @@ dotyczy dokładnie tych pytań, które serwujesz:
 ## 5. Skalibruj na swoich zgłoszeniach
 
 Model ma kalibrację dopasowaną na danych basala. W helpdesku model może być trafny, a mimo to inaczej pewny siebie.
-Wtedy dostarczony próg przepuszcza za mało odpowiedzi: tutaj 0%. `basal-calibrate` dopasowuje temperatury i progi
+Wtedy dostarczony próg przepuszcza za mało odpowiedzi: tutaj 1%. `basal-calibrate` dopasowuje temperatury i progi
 na Twoich oznaczonych zgłoszeniach.
 
 **Krok 1. Oznacz zgłoszenia.** Weź prawdziwe zgłoszenia i wpisz poprawne odpowiedzi w `gold`, w formacie
@@ -153,7 +153,7 @@ nich.
 | `accuracy` per typ | jak często odpowiedź jest trafna, bez żadnego progu |
 | `ECE on CERT shipped -> fitted` | błąd kalibracji. Im niżej, tym lepiej; dopasowanie powinno go obniżyć |
 | `automated on CERT`, `max_error 0.05` | **główna liczba**: jaką część basal skieruje automatycznie i z jakim błędem, na zgłoszeniach, których dopasowanie nie widziało |
-| `0.05 per type: choice 0.93 (73%)` | próg każdego typu pytania; `none (defers)` znaczy, że ten typ zawsze idzie do człowieka |
+| `0.05 per type: choice 0.93 (35%)` | próg każdego typu pytania; `none (defers)` znaczy, że ten typ zawsze idzie do człowieka |
 | `warning: ... too few to confirm on CERT` | próg jest dopasowany, ale jeszcze niepotwierdzony. Oznacz więcej zgłoszeń |
 
 `--report-only` wypisuje raport bez zapisywania pliku. `--save-rows rows.jsonl` zapisuje prawdopodobieństwa, a
@@ -212,7 +212,8 @@ basal-serve, w sieci wewnętrznej.
 basal-run --preset triage --lang pl --input export.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
 ```
 
-`basal-run --preset` wysyła preset bez `RULES`. Z własnymi regułami zapisz linie żądań (robi to `run.py
+W basalu 2.5.2 `basal-run --preset` kończy każdą linię błędem `KeyError: 'q'`; poprawka to jedna linia w
+`basal/run.py`. `basal-run --preset` wysyła preset bez `RULES`. Z własnymi regułami zapisz linie żądań (robi to `run.py
 --calibration-input`; usuń `gold`) albo użyj `run.py --input export.jsonl --output answers.jsonl`.
 
 **Agenci (LangChain, LlamaIndex, CrewAI, MCP)**:
@@ -244,41 +245,63 @@ Dla MCP `basal-serve --mcp on` udostępnia `/mcp`, a `basal-mcp` łączy z hosta
 
 ## Wyniki
 
-Pomiary na Apple M1 Max, basal 2.5.2. Przebieg przez 100 zgłoszeń na modelu 4.5B trwa około 40 s.
+Pomiary na Apple M1 Max, basal 2.5.2, basal-2.0-4.5B-MLX-8bit, `--lang pl`.
+
+- **Zgłoszenia:** 300. Zgłoszenia 1-100 są krótkie i jasne. Zgłoszenia 101-300 pochodzą z czterech rodzajów firm:
+  sklepu internetowego, oprogramowania B2B, telekomu i mieszanych, chaotycznych e-maili (przekazane wątki, wielkie
+  litery, brak polskich znaków, dwie sprawy w jednej wiadomości).
+- **Przebieg:** około 7,5 minuty dla 300 zgłoszeń, czyli około 1,5 s na zgłoszenie, przy 8 żądaniach naraz.
+- **Kalibracja:** około 12 minut z `basal-calibrate`.
 
 ### Trafność
 
-Wiersze 4.5B uruchomiono z `--lang pl`. Wiersze mini uruchomiono wcześniej, zanim dodano `--lang pl`, więc język
-pytań dopasowywał się do każdego zgłoszenia.
+| zgłoszenia | pytania | kategoria | pilność | człowiek? |
+|---|---|---|---|---|
+| 1-300 | preset | 68% | 65% | 77% |
+| 1-300 | `--rules` | 87% | 85% | 79% |
+| 1-100 | preset | 70% | 66% | 80% |
+| 1-100 | `--rules` | 91% | 80% | 81% |
 
-| model | zgłoszenia | pytania | kategoria | pilność | człowiek? |
-|---|---|---|---|---|---|
-| basal-2.0-mini-MLX-8bit | 1-40 | preset | 82% | 55% | 52% |
-| basal-2.0-mini-MLX-8bit | 1-40 | `--rules` | 95% | 55% | 72% |
-| basal-2.0-4.5B-MLX-8bit | 1-100 | preset | 70% | 66% | 80% |
-| basal-2.0-4.5B-MLX-8bit | 1-100 | `--rules` | 91% | 80% | 81% |
+Model mini (basal-2.0-mini-MLX-8bit) na zgłoszeniach 1-40, zanim dodano `--lang pl`:
 
-### Automatyzacja przy 5% błędu, basal-2.0-4.5B-MLX-8bit, 100 zgłoszeń
-
-| kalibracja | kategoria automatycznie | błąd wśród automatycznych | pilność, człowiek? |
+| pytania | kategoria | pilność | człowiek? |
 |---|---|---|---|
-| dostarczona (`CALIBRATION.json`) | 0% (próg 0.977) | - | brak progu: wszystko się wstrzymuje |
-| dopasowana na 100 zgłoszeniach | 83% (próg 0.929) | 1 z 83 | brak progu: wszystko się wstrzymuje |
-| to samo, tylko część CERT | 73% | 1 z 22 | - |
+| preset | 82% | 55% | 52% |
+| `--rules` | 95% | 55% | 72% |
 
-- **Wynik 83% jest optymistyczny:** zmierzony na tych samych zgłoszeniach, na których dopasowano progi.
-- **Uczciwa liczba to CERT:** 73% automatycznie, 1 błąd na 22.
-- **Próg 5% nie jest jeszcze potwierdzony.** `basal-calibrate` zgłasza, że w CERT jest za mało decyzji.
-- **Pilność i „człowiek?” nie dostają progu.** Za mało ich odpowiedzi jest jednocześnie pewnych i trafnych, więc
-  te pytania zostają u ludzi.
+### Automatyzacja przy 5% błędu (`--rules --max-error 0.05`)
 
-Dopasowanie obniża błąd kalibracji (ECE na CERT):
+| kalibracja | kategoria | pilność | człowiek? |
+|---|---|---|---|
+| dostarczona (`CALIBRATION.json`) | 1% automatycznie | brak progu | brak progu |
+| dopasowana na 300 zgłoszeniach, część CERT (88 zgłoszeń, których dopasowanie nie widziało) | **35% automatycznie, 0 błędów na 31** (próg 0.934) | **42% automatycznie, 1 błąd na 37** (próg 0.907) | brak progu |
+| ten sam plik na serwerze, wszystkie 300 zgłoszeń | 38%, 0 błędów na 114 | 45%, 1% błędów na 135 | 0% |
+| dopasowana tylko na zgłoszeniach 1-100, część CERT | 73%, 1 błąd na 22 (próg 0.929) | brak progu | brak progu |
 
-| pytanie | dostarczona | dopasowana |
-|---|---|---|
-| kategoria | 0.122 | 0.087 |
-| pilność | 0.140 | 0.071 |
-| człowiek? | 0.126 | 0.121 |
+Co z tego wynika:
+
+- **Z własną kalibracją basal kieruje około jednej trzeciej zgłoszeń do właściwego zespołu, bez błędów na
+  odłożonych zgłoszeniach.** Ustawia też pilność czterech na dziesięć. Kalibracja dostarczona z modelem nie
+  automatyzuje w tym helpdesku nic.
+- **Uczciwe są wiersze CERT.** Wiersz „wszystkie 300” obejmuje zgłoszenia, na których dopasowano progi.
+- **Więcej danych daje mniejszy, ale prawdziwszy odsetek.** Na 100 łatwych zgłoszeniach CERT dawał 73%. Na 300, z
+  chaotycznymi, daje 35%.
+- **Progi są dopasowane, ale jeszcze niepotwierdzone przy 5%.** `basal-calibrate` ostrzega, że w CERT jest 31 i 37
+  zaakceptowanych decyzji. Potwierdzenie 5% przy 0 błędach wymaga 59. To razem około 500 oznaczonych zgłoszeń.
+- **`needs_human` nie dostaje progu przy żadnej liczbie danych w tym przykładzie.** To, kto musi decydować, jest
+  kwestią polityki firmy, a model nie jest tu wystarczająco pewny. Zostaw to pytanie ludziom albo rozbij je na
+  konkretne pytania tak/nie, np. „czy klient żąda zwrotu pieniędzy?”.
+- **Dopasowanie obniża błąd kalibracji (ECE na CERT)**, najbardziej dla pilności:
+
+  | pytanie | dostarczona | dopasowana |
+  |---|---|---|
+  | pilność | 0.184 | 0.027 |
+  | kategoria | 0.089 | 0.046 |
+  | człowiek? | 0.086 | 0.055 |
+
+- **Większość pomyłek w kategorii to zgłoszenia wysłane do `other`.** W przebiegu na serwerze trafiło tam 12
+  reklamacji i 11 zgłoszeń technicznych. Następny krok to ostrzejszy opis `other` w `RULES`. Po zmianie trzeba
+  kalibrować ponownie.
 
 ## Ograniczenia
 
