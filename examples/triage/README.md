@@ -111,7 +111,7 @@ The webhook answers like this (`answers` cut short):
 
 A preset is a starting point. `RULES` in `run.py` gives each option a description of what it covers at this
 helpdesk. For example, `account` becomes "login, password, verification codes, data, address, users, closing the
-account". On the 100 tickets this raised category accuracy from 70% to 91% (see "Results"). Do this before you
+account". On the 300 tickets this raised category accuracy from 68% to 87% (see "Results"). Do this before you
 calibrate, because the calibration belongs to the exact questions you serve:
 
 - write the descriptions in the language of the tickets;
@@ -121,7 +121,7 @@ calibrate, because the calibration belongs to the exact questions you serve:
 ## 5. Calibrate on your own tickets
 
 The model ships a calibration fitted on basal's own data. On a helpdesk the model can be accurate and still be
-confident in a different way. Then the shipped threshold accepts too few answers: here 0%. `basal-calibrate` fits the
+confident in a different way. Then the shipped threshold accepts too few answers: here 1%. `basal-calibrate` fits the
 temperatures and the thresholds on your labelled tickets.
 
 **Step 1. Label tickets.** Take real tickets and record the right answers in `gold`, in the format of
@@ -153,7 +153,7 @@ belong to them.
 | `accuracy` per type | how often the answer is right, before any threshold |
 | `ECE on CERT shipped -> fitted` | the calibration error. Lower is better; the fit should lower it |
 | `automated on CERT`, `max_error 0.05` | **the main number**: the share basal routes automatically, and its error, on tickets the fit did not see |
-| `0.05 per type: choice 0.93 (73%)` | the threshold of each question type; `none (defers)` means that type always goes to a person |
+| `0.05 per type: choice 0.93 (35%)` | the threshold of each question type; `none (defers)` means that type always goes to a person |
 | `warning: ... too few to confirm on CERT` | the threshold is fitted, but not yet confirmed. Label more tickets |
 
 `--report-only` prints the report without writing a file. `--save-rows rows.jsonl` stores the probabilities, and
@@ -212,7 +212,8 @@ basal-serve, on the internal network.
 basal-run --preset triage --lang pl --input export.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
 ```
 
-`basal-run --preset` sends the preset without `RULES`. For your own rules, write request lines (`run.py
+In basal 2.5.2, `basal-run --preset` fails on every line with `KeyError: 'q'`; the fix is a one-line change in
+`basal/run.py`. `basal-run --preset` sends the preset without `RULES`. For your own rules, write request lines (`run.py
 --calibration-input` writes them; drop `gold`), or use `run.py --input export.jsonl --output answers.jsonl`.
 
 **Agents (LangChain, LlamaIndex, CrewAI, MCP)**:
@@ -243,41 +244,62 @@ For MCP, `basal-serve --mcp on` serves `/mcp`, and `basal-mcp` bridges to hosts 
 
 ## Results
 
-Measured on an Apple M1 Max with basal 2.5.2. A run over 100 tickets takes about 40 s on the 4.5B model.
+Measured on an Apple M1 Max with basal 2.5.2 and basal-2.0-4.5B-MLX-8bit, `--lang pl`.
+
+- **The tickets:** 300 in all. Tickets 1-100 are short and clear. Tickets 101-300 come from four kinds of business:
+  an online shop, B2B software, a telecom, and mixed messy e-mails (forwarded threads, capitals, no diacritics, two
+  issues in one message).
+- **The run:** about 7.5 minutes over the 300 tickets, about 1.5 s a ticket, with 8 requests in flight.
+- **Calibration:** about 12 minutes with `basal-calibrate`.
 
 ### Accuracy
 
-The 4.5B rows were run with `--lang pl`. The mini rows were run earlier, before `--lang pl` was added, so their
-wording followed each ticket's language.
+| tickets | questions | category | urgency | needs_human |
+|---|---|---|---|---|
+| 1-300 | preset | 68% | 65% | 77% |
+| 1-300 | `--rules` | 87% | 85% | 79% |
+| 1-100 | preset | 70% | 66% | 80% |
+| 1-100 | `--rules` | 91% | 80% | 81% |
 
-| model | tickets | questions | category | urgency | needs_human |
-|---|---|---|---|---|---|
-| basal-2.0-mini-MLX-8bit | 1-40 | preset | 82% | 55% | 52% |
-| basal-2.0-mini-MLX-8bit | 1-40 | `--rules` | 95% | 55% | 72% |
-| basal-2.0-4.5B-MLX-8bit | 1-100 | preset | 70% | 66% | 80% |
-| basal-2.0-4.5B-MLX-8bit | 1-100 | `--rules` | 91% | 80% | 81% |
+The mini model (basal-2.0-mini-MLX-8bit), on tickets 1-40 before `--lang pl` was added, scored:
 
-### Automation at 5% error, basal-2.0-4.5B-MLX-8bit, 100 tickets
-
-| calibration | category automated | error when automated | urgency, needs_human |
+| questions | category | urgency | needs_human |
 |---|---|---|---|
-| shipped (`CALIBRATION.json`) | 0% (threshold 0.977) | - | no threshold: every answer abstains |
-| fitted on the 100 tickets | 83% (threshold 0.929) | 1 of 83 | no threshold: every answer abstains |
-| the same, on its CERT split only | 73% | 1 of 22 | - |
+| preset | 82% | 55% | 52% |
+| `--rules` | 95% | 55% | 72% |
 
-- **The 83% row is optimistic:** it is measured on the same tickets the thresholds were fitted on.
-- **The honest number is CERT:** 73% automated with 1 error in 22.
-- **The 5% threshold is not yet confirmed.** `basal-calibrate` reports that CERT has too few decisions.
-- **`urgency` and `needs_human` get no threshold.** Too few of their answers are both confident and right, so those
-  questions stay with people.
+### Automation at 5% error (`--rules --max-error 0.05`)
 
-The fit lowers the calibration error (ECE on CERT):
+| calibration | category | urgency | needs_human |
+|---|---|---|---|
+| shipped (`CALIBRATION.json`) | 1% automated | no threshold | no threshold |
+| fitted on 300 tickets, CERT split (88 tickets the fit did not see) | **35% automated, 0 errors in 31** (threshold 0.934) | **42% automated, 1 error in 37** (threshold 0.907) | no threshold |
+| the same file, served, all 300 tickets | 38%, 0 errors in 114 | 45%, 1% error in 135 | 0% |
+| fitted on tickets 1-100 only, CERT split | 73%, 1 error in 22 (threshold 0.929) | no threshold | no threshold |
 
-| question | shipped | fitted |
-|---|---|---|
-| category | 0.122 | 0.087 |
-| urgency | 0.140 | 0.071 |
-| needs_human | 0.126 | 0.121 |
+What the numbers say:
+
+- **With your own calibration, basal routes about a third of the tickets to the right team with no errors on held-out
+  tickets.** It also sets the urgency of four in ten. The shipped calibration automates nothing on this helpdesk.
+- **The CERT rows are the honest ones.** The "all 300" row includes the tickets the thresholds were fitted on.
+- **More data, a smaller but truer share.** On the 100 easy tickets the CERT share was 73%. On 300, with the messy
+  ones, it is 35%.
+- **The thresholds are fitted, but not yet confirmed at 5%.** `basal-calibrate` warns that CERT has 31 and 37
+  accepted decisions. Confirming 5% with 0 errors needs 59. That is about 500 labelled tickets in all.
+- **`needs_human` gets no threshold at any data size here.** Who has to decide is a policy question, and the model
+  is not confident enough about it. Keep it with people, or split it into concrete yes/no questions, for example
+  "does the customer ask for money back?".
+- **The fit lowers the calibration error (ECE on CERT)** most for urgency:
+
+  | question | shipped | fitted |
+  |---|---|---|
+  | urgency | 0.184 | 0.027 |
+  | category | 0.089 | 0.046 |
+  | needs_human | 0.086 | 0.055 |
+
+- **Most category mistakes are tickets sent to `other`.** In the served run, 12 complaints and 11 technical tickets
+  went to `other`. A sharper description of `other` in `RULES` is the next thing to try. After changing it,
+  calibrate again.
 
 ## Limits
 
