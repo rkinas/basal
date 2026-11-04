@@ -69,7 +69,7 @@ def shards(model_dir):
     index = d / "model.safetensors.index.json"
     if index.exists():
         out = {}
-        for k, v in json.loads(index.read_text())["weight_map"].items():
+        for k, v in json.loads(index.read_text(encoding="utf-8"))["weight_map"].items():
             p = Path(v)
             # the shard paths are reused under the output folder: nothing absolute, nothing that leaves the model
             if p.is_absolute() or ".." in p.parts or not (d / p).resolve().is_relative_to(d.resolve()):
@@ -86,7 +86,7 @@ def shards(model_dir):
 def config_key(path):
     """config.json as compared: rope_theta folded into rope_parameters (the transformers 5 layout), keys that do not
     describe the architecture dropped."""
-    c = json.loads(Path(path).read_text())
+    c = json.loads(Path(path).read_text(encoding="utf-8"))
     if "rope_theta" in c:
         c.setdefault("rope_parameters", {"rope_theta": c["rope_theta"], "rope_type": "default"})
         if c.get("rope_scaling") is None:
@@ -98,7 +98,7 @@ def config_key(path):
 def tokenizer_key(path):
     """What fixes the meaning of a token id: vocabulary, BPE merges (string or pair form) and added tokens with their
     flags."""
-    t = json.loads(Path(path).read_text())
+    t = json.loads(Path(path).read_text(encoding="utf-8"))
     m = t.get("model", {})
     merges = [tuple(x.split(" ", 1)) if isinstance(x, str) else tuple(x) for x in m.get("merges") or []]
     return m.get("type"), m.get("vocab"), merges, t.get("added_tokens", [])
@@ -106,7 +106,7 @@ def tokenizer_key(path):
 
 def tokenizer_settings(path):
     """tokenizer.json without the sections that do not change token ids, merges in pair form."""
-    t = json.loads(Path(path).read_text())
+    t = json.loads(Path(path).read_text(encoding="utf-8"))
     t = {k: v for k, v in t.items() if k not in TOKENIZER_IGNORE}
     m = t.get("model", {})
     if m.get("merges"):
@@ -138,7 +138,7 @@ def check_pair(old, new, allow_tokenizer_difference=False):
             raise SystemExit(f"{name} missing in {missing[0]}: cannot check that the checkpoints share an "
                              "architecture / tokenizer")
     for d in (old, new):
-        if "quantization_config" in json.loads((Path(d) / "config.json").read_text()):
+        if "quantization_config" in json.loads((Path(d) / "config.json").read_text(encoding="utf-8")):
             raise SystemExit(f"{d} is quantized (quantization_config): interpolate the unquantized checkpoints and "
                              "quantize the result")
     po, pn = Path(old) / "config.json", Path(new) / "config.json"
@@ -248,11 +248,11 @@ def interpolate(old, new, alpha, out, meta_from=None, allow_tokenizer_difference
                 continue
             (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(f, tmp / rel)
-        info = json.loads((tmp / "basal.json").read_text()) if (tmp / "basal.json").exists() else {}
+        info = json.loads((tmp / "basal.json").read_text(encoding="utf-8")) if (tmp / "basal.json").exists() else {}
         info.update({"name": f"{info.get('name', new.name)}-interp-a{alpha:g}",
                      "interpolation": {"old": str(old), "new": str(new), "alpha": alpha,
                                        "rule": "(1 - alpha) * old + alpha * new, fp32 accumulate"}})
-        (tmp / "basal.json").write_text(json.dumps(info, indent=1) + "\n")
+        (tmp / "basal.json").write_text(json.dumps(info, indent=1) + "\n", encoding="utf-8")
         if out.exists():
             out.rmdir()  # empty, checked above
         tmp.rename(out)

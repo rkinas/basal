@@ -12,6 +12,7 @@ readout of one fp32 forward per prompt, before any temperature); --url fills exp
 `orders` is the server's --orders (run it once per value)."""
 import argparse
 import json
+import os
 import random
 from types import SimpleNamespace
 
@@ -236,7 +237,8 @@ def main():
     srv = SimpleNamespace(tok=tok, fmt=2)  # Server.state_cut needs the tokenizer and the format
     table = None
     n = 0
-    with open(a.out, "w") as f:
+    part = f"{a.out}.part"  # the vectors file is replaced only when complete (a failed run kept a truncated one)
+    with open(part, "w", encoding="utf-8") as f:
         for name, covers, request, orders in cases(tok):
             prompts = []
             for item in to_items(request["state"], request["questions"], len(CODES)):
@@ -273,6 +275,7 @@ def main():
                                ensure_ascii=False) + "\n")
             n += 1
             print(name, len(prompts), "prompts", max(len(p["input_ids"]) for p in prompts), "tokens", flush=True)
+    os.replace(part, a.out)
     print(n, "requests ->", a.out)
 
 

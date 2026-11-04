@@ -15,7 +15,7 @@ from matplotlib.patches import Patch
 from matplotlib.text import Text
 
 HERE = Path(__file__).parent
-D = json.loads((HERE / "apple_engines.json").read_text())
+D = json.loads((HERE / "apple_engines.json").read_text(encoding="utf-8"))
 MODELS = ("4.5B", "1.5B")
 COLORS = {"basal": "#1f6fb4", "llama.cpp": "#e07b1f", "mlx-lm based": "#2a9d55"}
 TV_FLOOR = 1e-4  # TV below this is drawn at the floor of the log scale
