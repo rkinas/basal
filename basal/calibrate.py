@@ -99,7 +99,7 @@ import torch
 
 from . import __version__
 from . import tasks as task_types
-from .cli import positive
+from .cli import add_api_key, headers, positive, refused
 from .engine import resolve
 from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
@@ -448,9 +448,9 @@ async def two_passes(srv, bodies, task_bodies, concurrency, settle):
         worker.cancel()
 
 
-async def over_http(endpoint, bodies, concurrency):
+async def over_http(endpoint, bodies, concurrency, api_key=None):
     import httpx
-    async with httpx.AsyncClient(timeout=600) as c:
+    async with httpx.AsyncClient(timeout=600, headers=headers(api_key)) as c:
         async def decide(b):
             r = await c.post(endpoint, json=b)
             if r.status_code != 200:
@@ -1491,6 +1491,7 @@ def parser():
     ap.add_argument("--out", default="CALIBRATION.custom.json", help="calibration file to write")
     ap.add_argument("--url", default=None,
                     help="a running basal-serve started with --no-calibration (instead of the engine in process)")
+    add_api_key(ap)
     ap.add_argument("--calibration", default=None,
                     help="the calibration to compare with and to keep for small types (default: the file basal-serve "
                          "loads for --model and the engine)")
@@ -1589,7 +1590,10 @@ def main(argv=None):
             raise SystemExit("with --url, give --model (its shipped calibration is compared with and kept for small "
                              "types), --calibration FILE or --no-calibration")
         try:
-            entry = uncalibrated(httpx.get(base + "/v1/models", timeout=30).json()["models"][0], base)
+            r = httpx.get(base + "/v1/models", timeout=30, headers=headers(a.api_key))
+            if refused(base, r.status_code, a.api_key):
+                raise SystemExit(f"--url {a.url}: {refused(base, r.status_code, a.api_key)}")
+            entry = uncalibrated(r.json()["models"][0], base)
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
             raise SystemExit(f"--url {a.url}: no basal server answers ({e})") from None
         mode = a.mode or entry.get("mode")
@@ -1606,7 +1610,7 @@ def main(argv=None):
         a.layout = getattr(a, "layout", None) or entry.get("layout") or (model_layout(md) if md is not None
                                                                           else "canonical")
         baseline, base_file = compared(md, kind, a.calibration, quant, orders, a.no_calibration, preset, a.layout)
-        settle(asyncio.run(over_http(base + "/v1/systemone", bodies, a.concurrency)) if bodies else [])
+        settle(asyncio.run(over_http(base + "/v1/systemone", bodies, a.concurrency, a.api_key)) if bodies else [])
         task_responses = []
     else:
         a.model = a.model or add_engine_args(argparse.ArgumentParser()).get_default("model")  # basal-serve's

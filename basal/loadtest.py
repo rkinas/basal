@@ -20,6 +20,7 @@ import httpx
 
 from . import synth
 from .bench import DEFAULT_QUESTIONS, questions_or_exit
+from .cli import add_api_key, headers, refused
 
 
 def body(q, early_exit=None, questions=1):
@@ -65,9 +66,12 @@ async def run(a):
     # a prefix cache across requests (vLLM, SGLang, llama.cpp) cannot answer a timed request from an earlier phase
     n = 10 + a.n_seq + a.n_conc
     bodies = request_bodies(a, n)
-    async with httpx.AsyncClient(timeout=300) as c:
+    async with httpx.AsyncClient(timeout=300, headers=headers(getattr(a, "api_key", None))) as c:
         for b in bodies[:10]:  # warm-up
-            (await c.post(a.url, json=b)).raise_for_status()
+            r = await c.post(a.url, json=b)
+            if refused(a.url, r.status_code, getattr(a, "api_key", None)):
+                raise SystemExit(f"basal-loadtest: {refused(a.url, r.status_code, a.api_key)}")
+            r.raise_for_status()
         lat = []
         for b in bodies[10: 10 + a.n_seq]:
             t0 = time.perf_counter()
@@ -109,8 +113,11 @@ async def determinism(a, bodies):
     def probs(r):
         r.raise_for_status()
         return [list(ans["probabilities"].values()) for ans in r.json()["answers"].values()]
-    async with httpx.AsyncClient(timeout=300) as c:
-        alone = [probs(await c.post(a.url, json=b)) for b in probe]
+    async with httpx.AsyncClient(timeout=300, headers=headers(getattr(a, "api_key", None))) as c:
+        first = await c.post(a.url, json=probe[0])
+        if refused(a.url, first.status_code, getattr(a, "api_key", None)):
+            raise SystemExit(f"basal-loadtest: {refused(a.url, first.status_code, a.api_key)}")
+        alone = [probs(first)] + [probs(await c.post(a.url, json=b)) for b in probe[1:]]
         sem = asyncio.Semaphore(a.concurrency)
 
         async def one(b):
@@ -153,6 +160,7 @@ def main():
     ap.add_argument("--determinism", type=nonnegative, default=0,
                     help="N: compare N answers given alone and under load (instead of the load test)")
     ap.add_argument("--out", default=None)
+    add_api_key(ap)
     a = ap.parse_args()
     if a.concurrency < 1:
         raise SystemExit("basal-loadtest: --concurrency must be at least 1")

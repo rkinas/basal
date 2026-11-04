@@ -408,7 +408,7 @@ def test_saved_rows_keep_the_serving_identity_of_the_fit(tmp_path, monkeypatch):
         "type": "choice", "criteria": ["a", "b"], "gold": "a"}}}) + "\n", encoding="utf-8")
     entry = dict(name="stub", mode="eager", prompt_format=2, orders=1, layout="qfirst",
                  adapter="stub-adapter@sha256:abc", temperature_per_prim={})
-    monkeypatch.setattr(httpx, "get", lambda *args, **kw: SimpleNamespace(json=lambda: {"models": [entry]}))
+    monkeypatch.setattr(httpx, "get", lambda *args, **kw: SimpleNamespace(status_code=200, json=lambda: {"models": [entry]}))
     monkeypatch.setattr(calibrate_module, "resolve", lambda *args, **kw: md)
 
     async def readouts(*args):

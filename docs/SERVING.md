@@ -556,7 +556,10 @@ Send the secret as `Authorization: Bearer <secret>` or `X-API-Key: <secret>` (wh
 accepted even if the other is stale). `GET /health` remains open, and so do `HEAD /health` and the path with a
 trailing slash `/health/`, for the probe of a load balancer; every other method and path needs a key.
 `GET /v1/keys` requires an admin key and reports each key's in-memory `last_used` time. File changes take effect
-without restarting the server. MCP at `/mcp` uses the same authentication.
+without restarting the server. MCP at `/mcp` uses the same authentication. `basal-run`, `basal-loadtest` and
+`basal-calibrate --url` send a key given with `--api-key KEY` or in `BASAL_API_KEY` (the variable keeps it out of the
+process list), and stop with a message when the server refuses it (HTTP 401); `basal-navigate search` and `basal-mcp`
+take `--api-key`.
 
 `--cors-origins` accepts a comma-separated list of browser origins, for example
 `--cors-origins https://app.example,https://admin.example`. CORS is disabled by default; use `*` to allow all origins.

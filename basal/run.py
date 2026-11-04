@@ -27,7 +27,7 @@ from pathlib import Path
 
 import httpx
 
-from .cli import positive
+from .cli import add_api_key, headers, positive, refused
 from .textio import open_text
 
 LOCAL = ("id", "gold", "group", "family")  # a line's own fields (as basal-calibrate reads them), never sent
@@ -71,6 +71,10 @@ def summarise(item, resp):
     return out
 
 
+class KeyRefused(Exception):
+    """The server refused the API key (HTTP 401 / 403): every other line would fail the same way."""
+
+
 def failed(i, error, answers=None):
     return {"id": i, "answers": answers, "latency_ms": None, "error": str(error)}
 
@@ -107,7 +111,8 @@ async def run(a, transport=None):
     window = collections.deque()  # the lines in flight, in input order (a bounded reorder buffer)
     n_items = n_err = 0
     lat, graded = [], []
-    async with httpx.AsyncClient(timeout=300, transport=transport) as c:
+    key = getattr(a, "api_key", None)
+    async with httpx.AsyncClient(timeout=300, transport=transport, headers=headers(key)) as c:
         async def one(i, it):
             if isinstance(it, Exception):
                 return failed(i, it)
@@ -119,6 +124,8 @@ async def run(a, transport=None):
                     return failed(it["id"], f"not a valid line: {type(e).__name__}: {e}")
                 try:
                     r = await c.post(a.url, json=body)
+                    if refused(a.url, r.status_code, key):
+                        raise KeyRefused(refused(a.url, r.status_code, key))
                     resp = r.json()
                 except (httpx.HTTPError, ValueError) as e:
                     resp = {"error": str(e) or type(e).__name__}
@@ -143,7 +150,7 @@ async def run(a, transport=None):
         done = False
         t0 = time.perf_counter()
         with open(part, "w", encoding="utf-8") as f:
-            try:
+            try:  # (KeyRefused ends the run below, after the answers so far are kept)
                 for i, it in enumerate(lines(a.input)):
                     window.append(asyncio.ensure_future(one(i, it)))
                     while len(window) >= 4 * a.concurrency or window and window[0].done():
@@ -152,8 +159,11 @@ async def run(a, transport=None):
                     put(f, await window.popleft())
                 done = True
             finally:
-                for t in window:
-                    t.cancel()
+                for t in window:  # the lines in flight are dropped (an exception of a finished one is read)
+                    if not t.done():
+                        t.cancel()
+                    elif not t.cancelled():
+                        t.exception()
                 if not done:
                     f.flush()
                     print(f"basal-run: stopped; the {n_items} answers so far are in {part}", file=sys.stderr)
@@ -178,6 +188,7 @@ def main():
     ap.add_argument("--url", default="http://127.0.0.1:8000/v1/systemone")
     ap.add_argument("--concurrency", type=positive, default=16, help="requests in flight (the server batches them)")
     ap.add_argument("--early-exit", dest="early_exit", default=None, help="e.g. 0.99 (server mode fast-exit)")
+    add_api_key(ap)
     a = ap.parse_args()
     if a.list_presets:
         from .presets import names, questions
@@ -190,7 +201,10 @@ def main():
         from .presets import names
         if a.preset not in names():
             ap.error(f"--preset {a.preset}: one of {', '.join(names())}")
-    asyncio.run(run(a))
+    try:
+        asyncio.run(run(a))
+    except KeyRefused as e:
+        raise SystemExit(f"basal-run: {e}") from None
 
 
 if __name__ == "__main__":
