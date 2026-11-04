@@ -197,8 +197,8 @@ class TPUBackend(GraphBackend):
     BATCHES = [1, 2, 4, 8, 16, 32]
     LETTER_SLOTS = 256  # output-head rows read per position (format 2: up to 255 option codes); fixed, so new code ids
     #                     never recompile
-    streams = True  # run_shared(..., done=callback): a group is reported as soon as its forwards are read out
-    inflight = 1    # one engine call at a time (one device; the call's forwards are dispatched back to back)
+    KIND = "tpu"  # streams (a group is reported as soon as its forwards are read out), one call at a time (one device):
+    # engine.KIND_CAPS
     LONG_LENS = [4096, 6144, 8192, 12288, 16384, 24576, 32768]  # above LENS[-1]; multiples of Q_BLOCK and KV_BLOCK
     Q_BLOCK = 1024  # queries per attention block for lengths above LENS[-1]
     KV_BLOCK = 1024  # keys per attention block for lengths above LENS[-1]
@@ -229,7 +229,7 @@ class TPUBackend(GraphBackend):
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.prefill = PREFILL
-        self.shared = shared
+        self._init_packing(None, shared)  # (the host side of the packing; the forwards run in JAX on self.device)
         self.cfg, self.params = load_params(model_dir, dtype, self.device, adapter)
         self.adapter_modules = len(adapter.deltas) if adapter else 0
         full, qb, kvb = self.LENS[-1], self.Q_BLOCK, self.KV_BLOCK

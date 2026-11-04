@@ -194,7 +194,7 @@ class StrixHaloFastBackend(GraphBackend):
     longer than that runs alone in one forward, as GraphBackend runs one past its largest graph (the server keeps
     prompts within the model's context; activations grow linearly, attention memory does not grow with length)."""
 
-    streams, inflight = False, 1  # its own run_shared: no early readouts, one call at a time
+    KIND = "strix"  # one call at a time, no early readouts (engine.KIND_CAPS)
     TOKEN_BUDGET = 16384  # tokens per forward (the GGUF context): ~0.4 GB of FFN activations
     # tile configs measured on the 8060S (Triton 3.7, ROCm 7.2), inside the full forward where it mattered
     ATTN = dict(BT=8, BN=32, num_warps=8, num_stages=1)  # ~20 TFLOPS at 6k tokens
@@ -256,10 +256,8 @@ class StrixHaloFastBackend(GraphBackend):
         self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.bfloat16)
         self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0  # on the CPU
         self.model = self.model.cuda().eval()
-        self.dev = next(self.model.parameters()).device
+        self._init_packing(next(self.model.parameters()).device)
         self.prefill = PREFILL
-        self.shared = True
-        self._wrows = {}
         cfg = self.model.config
         if problems := self.unsupported(cfg):
             raise ValueError("--mode strix cannot run this model: " + "; ".join(problems))

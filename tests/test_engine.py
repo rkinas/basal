@@ -378,3 +378,48 @@ def test_eager_codes_read_back_once():
     for b, lid in enumerate(ids):
         want = real(h[b] @ m.lm_head.weight[lid].float().T, -1)
         assert torch.allclose(torch.tensor(got[b]), want, atol=1e-6) and len(got[b]) == len(lid)
+
+
+def test_backend_capabilities_come_from_one_table():
+    """Every engine kind of server.MODES has its capabilities in engine.KIND_CAPS, every backend class names its kind,
+    and streams / inflight are read from there (vLLM's overlapping calls as its own)."""
+    import importlib
+    import re
+    from pathlib import Path
+
+    import basal.engine as eng
+    from basal import tpu
+    from basal.gdn_graph import GDNGraphBackend, GDNMPSBackend
+    from basal.server import MODES
+    assert {k for k, _, _ in MODES.values()} == set(eng.KIND_CAPS)
+    classes = [eng.EagerBackend, eng.GraphBackend, eng.ExitGraphBackend, eng.MPSBackend, eng.GGUFBackend,
+               eng.VLLMBackend, eng.SGLangBackend, eng.MLXBackend, eng.OllamaBackend, eng.LlamaCppBackend,
+               tpu.TPUBackend, GDNGraphBackend, GDNMPSBackend]
+    try:  # (basal/strix.py imports Triton at load)
+        classes.append(importlib.import_module("basal.strix").StrixHaloFastBackend)
+    except ImportError:
+        src = (Path(eng.__file__).parent / "strix.py").read_text()
+        assert re.search(r'class StrixHaloFastBackend\(GraphBackend\):(.|\n)*?\n    KIND = "strix"', src)
+    for cls in classes:
+        be = cls.__new__(cls)
+        caps = eng.KIND_CAPS[cls.KIND]
+        assert (be.streams, be.inflight) == (caps.streams, caps.inflight), cls.__name__
+    assert (eng.GraphBackend.__new__(eng.GraphBackend).inflight, GDNMPSBackend.__new__(GDNMPSBackend).inflight) == (2, 1)
+
+
+def test_mps_refuses_shared_prefixes_through_the_transformers_forward_of_a_sliding_model(monkeypatch):
+    """The C1 class: --mode mps sharing prefixes through one mask of the transformers forward (the engine's own Gemma 4
+    forward off) would read sliding-window layers whole: refused at construction; without sliding layers it builds."""
+    import pytest
+
+    import basal.engine as eng
+    from test_gemma4_graph import tiny as gtiny
+
+    def init(self, model_dir, *a, **kw):
+        self.model, self.g4 = (gtiny("e4b", torch.float32) if model_dir == "gemma" else tiny()), None
+    monkeypatch.setattr(eng.EagerBackend, "__init__", init)
+    with pytest.raises(ValueError, match="sliding-window layers would read whole states"):
+        eng.MPSBackend("gemma", device="cpu")
+    be = eng.MPSBackend("llama", device="cpu")
+    assert be.shared and be.state_cache is None and be.dev.type == "cpu"
+    assert eng.MPSBackend("gemma", device="cpu", shared=False).shared is False  # (eager forwards: whole prompts)

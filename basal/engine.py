@@ -112,7 +112,66 @@ def _memo_media(proc):
     return proc
 
 
-class EagerBackend:
+def has_sliding_window(cfg):
+    """Whether a decoder config has sliding-window attention layers (Gemma 4's layer_types, or a sliding_window in use)."""
+    types = getattr(cfg, "layer_types", None)
+    if types:
+        return "sliding_attention" in types
+    return bool(getattr(cfg, "sliding_window", None)) and getattr(cfg, "use_sliding_window", True) is not False
+
+
+class Capabilities(NamedTuple):
+    """What the engine of one kind (server.MODES: eager, graph, exit, mps, ...) can do, the one place this is said: its
+    class reads streams / inflight from it, and the server's option checks (server.options_refused) read the rest."""
+    streams: bool = False           # run_shared(..., done=callback) reports each group as soon as it is read out
+    inflight: int = 1               # engine calls the server may run at once
+    state_cache: bool = False       # --state-cache-gb
+    prefix_cache: bool = False      # --prefix-cache on
+    batches: bool = False           # --batches (compact rows ...)
+    attn: bool = False              # --attn (the kernel of the causal forwards)
+    media: bool = False             # --media on (images, audio)
+    two_way: bool = False           # models trained with two-way reading (basal.json "two_way")
+    option_isolation: bool = False  # models with isolated option blocks (basal.json "option_isolation")
+    in_process: bool = True         # the model runs in this process (--deterministic, the long lane)
+
+
+KIND_CAPS = {
+    "eager": Capabilities(media=True, two_way=True, option_isolation=True),
+    "graph": Capabilities(streams=True, inflight=2, state_cache=True, prefix_cache=True, batches=True, attn=True,
+                          two_way=True),
+    "exit": Capabilities(state_cache=True, batches=True, attn=True),
+    "mps": Capabilities(),
+    "mlx": Capabilities(state_cache=True, prefix_cache=True),
+    "gguf": Capabilities(),
+    "strix": Capabilities(),
+    "tpu": Capabilities(streams=True),
+    "vllm": Capabilities(media=True, in_process=False),
+    "sglang": Capabilities(in_process=False),
+    "ollama": Capabilities(in_process=False),
+    "llamacpp": Capabilities(in_process=False),
+}
+
+
+class Capable:
+    """A backend's capabilities: those of its KIND (KIND_CAPS), or its own (_caps: vLLM's overlapping calls)."""
+    KIND = None
+
+    @property
+    def caps(self):
+        return self.__dict__.get("_caps") or KIND_CAPS[self.KIND]
+
+    @property
+    def streams(self):
+        return self.caps.streams
+
+    @property
+    def inflight(self):
+        return self.caps.inflight
+
+
+class EagerBackend(Capable):
+    KIND = "eager"
+
     # one forward at a time (text batches and media requests share _head_in), one media request at a time (the
     # processor's media memo); class defaults, so a backend built without __init__ (tests) has them too
     lock = threading.Lock()
@@ -1302,6 +1361,8 @@ class GraphBackend(EagerBackend):
     lean, flex = None, False      # the lean layer (basal/lean.py) and its FlexAttention pass 2, when enabled
     state_cache = None            # StateCache: keys / values of request states, reused across requests
     gemma = None                  # basal/gemma4_graph.py: the forward of a Gemma 4 model (basal-omni)
+    shared = True                 # prompts sharing a prefix packed together (the prefix trie, SOAM)
+    two_way = None                # basal.json "two_way" of a two-way model: each prompt a row of its own
     softcap = None                # the model's final logit softcap (Gemma), applied to the fp32 code logits
     _out = None                   # Llama graphs: the output buffers their captures share (_shared_out)
     _side = None                  # the stream the captures warm up on (one: each new stream pins a cuBLAS workspace)
@@ -1462,6 +1523,13 @@ class GraphBackend(EagerBackend):
         if not (warm and self.__dict__.get("one_forward")):
             self.one_forward = self._one_forward_tokens()
         self._shape_line()
+
+    def _init_packing(self, dev, shared=True):
+        """The packing state of an engine that runs its own forwards over GraphBackend's packing (the prefix trie, SOAM,
+        token-budget chunks, the code readout) without GraphBackend.__init__ (mps, gguf, strix, tpu), set explicitly:
+        the device, whether prefixes are shared, and none of the CUDA graph engine's caches or readings."""
+        self.dev, self.shared, self._wrows = dev, shared, {}
+        self.graphs, self.compact, self.prefix, self.state_cache, self.two_way = {}, False, False, None, None
 
     def _gemma_init(self, kernels, quant, compile, merge, fp8_scaling="row", fp8_bf16_layers=0, nvfp4_amax=None,
                     nvfp4_scope="all", global_attn="flex"):
@@ -2256,7 +2324,7 @@ class GraphBackend(EagerBackend):
         ids = torch.full((b, L), self.tok.pad_token_id, dtype=torch.long, device=self.dev)
         if self.gemma is not None:
             ro = torch.zeros((b, 1), dtype=torch.long, device=self.dev)
-            if getattr(self, "two_way", None):  # and each row's last token when it is read two-way, else -1
+            if self.two_way:  # and each row's last token when it is read two-way, else -1
                 twl = torch.full((b,), -1, dtype=torch.long, device=self.dev)
                 gemma = self.gemma
                 return self._capture(key, lambda i, kv, r, w: gemma.forward(i, kv, r, twl=w), ids,
@@ -2835,15 +2903,15 @@ class GraphBackend(EagerBackend):
         units = []
         for k, g in enumerate(groups):
             prompts, lids = g[0], g[1]
-            cut = g[2] if len(g) > 2 and getattr(self, "state_cache", None) is not None else None
+            cut = g[2] if len(g) > 2 and self.state_cache is not None else None
             toks = self.encode(prompts)
-            if getattr(self, "two_way", None):  # each prompt alone, flagged where it is read two-way
+            if self.two_way:  # each prompt alone, flagged where it is read two-way
                 for a, (tk, x, tw) in enumerate(zip(toks, lids, two_way_rows(toks, self.two_way))):
                     pk = _Rows(self._pack([tk]))
                     pk.two_way = tw
                     units.append((pk, [x], k, a))
                 continue
-            if not getattr(self, "shared", True):
+            if not self.shared:
                 units += [(self._pack([tk]), [x], k, a) for a, (tk, x) in enumerate(zip(toks, lids))]
                 continue
             todo = [(0, len(toks))]
@@ -2865,8 +2933,8 @@ class GraphBackend(EagerBackend):
         return res
 
     # -- public calls --------------------------------------------------------------------------------------------
-    streams = True  # run_shared(..., done=callback) reports every group as soon as its forwards are read out
-    inflight = 2    # calls the server may run at once: one call's host work overlaps the other's forwards
+    KIND = "graph"  # streams (run_shared(..., done=callback) reports every group as soon as its forwards are read out)
+    # and two calls in flight (one call's host work overlaps the other's forwards): KIND_CAPS
     # a forward's input copies, replay and readout are enqueued by one call at a time, all on the device's default
     # stream (every thread's current stream; nothing here sets another), so the graphs' static inputs, the key / value
     # buffer and the shared graph outputs (_shared_out) are reused only after the previous call's reads, in launch order
@@ -3049,7 +3117,7 @@ class ExitGraphBackend(GraphBackend):
     chunk stops there (a batch stops only as a whole). `policy` selects the thresholds per request: "off" = always the
     final layer, or an agreement level calibrated in advance ("0.999", "0.995", "0.99", "0.98")."""
 
-    streams, inflight = False, 1  # its own run_shared: no early readouts, one call at a time
+    KIND = "exit"  # its own run_shared: no early readouts, one call at a time (KIND_CAPS)
 
     LENS = [128, 192, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 3072]
     BATCHES = [1, 2, 4, 8, 16, 32]
@@ -3183,7 +3251,7 @@ class MPSBackend(GraphBackend):
     request's state is then computed once instead of once per prompt as in EagerBackend. Rows are padded on the right
     to the longest packed row of the chunk."""
 
-    streams, inflight = False, 1  # its own run_shared: no early readouts, one call at a time
+    KIND = "mps"  # its own run_shared: no early readouts, one call at a time (KIND_CAPS)
 
     def __new__(cls, model_dir=None, *args, **kwargs):
         """MPSBackend(model_dir, ...) of a Qwen3.5 model with prefix sharing is refused (gdn_mps_refused) before
@@ -3205,9 +3273,12 @@ class MPSBackend(GraphBackend):
         mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
         device = device or ("mps" if mps else "cpu")
         EagerBackend.__init__(self, model_dir, dtype, device, adapter=adapter)
-        self.dev = torch.device(device)
-        self.shared = shared
-        self._wrows = {}
+        cfg = self.model.config.get_text_config() if hasattr(self.model.config, "get_text_config") else self.model.config
+        if shared and self.g4 is None and has_sliding_window(cfg):
+            raise ValueError(f"{model_dir}: --mode mps shares prefixes through one mask of the transformers forward, which "
+                             "every layer reads as it is: the sliding-window layers would read whole states. Use the "
+                             "engine's own Gemma 4 forward (--eager-forward basal, the default) or --mode eager")
+        self._init_packing(torch.device(device), shared)
 
     def _oversize(self, pack, n):
         """On the CPU (cascade_ok models) the branch pass runs in parts of whole top-level subtrees over one root
@@ -3348,7 +3419,7 @@ def vllm_adapter_refused(name, what):
             "it with --mode fast or eager, or serve a checkpoint written by basal-fuse-adapter with --mode vllm")
 
 
-class VLLMBackend:
+class VLLMBackend(Capable):
     """vLLM backend: bf16 checkpoints and the ModelOpt FP8 / NVFP4 ports, with the engine settings of a --vllm-preset
     (VLLM_PRESETS, vllm_args). One generated token restricted to the option letters; with
     logprobs_mode="processed_logprobs" the log-probabilities are computed after that restriction, so the softmax over
@@ -3359,6 +3430,7 @@ class VLLMBackend:
     so it is raised to the model's prompt format limit: 255 for format 2). vLLM 0.31 accepts at most 128
     logprob_token_ids; a question with more options takes the top-k of the restricted distribution instead, which on
     CUDA (processed log-probabilities) are exactly the allowed codes."""
+    KIND = "vllm"
 
     LOGPROB_TOKEN_IDS = 128  # longest logprob_token_ids list vLLM accepts
     OVERLAP_CALLS = 4        # --vllm-overlap on: engine calls the server runs at once
@@ -3396,7 +3468,8 @@ class VLLMBackend:
                      enable_prefix_caching=True, logprobs_mode="processed_logprobs", max_logprobs=max(16, max_options)),
               **kw}
         if overlap:  # several calls in flight, batched by vLLM's scheduler (_VLLMOverlap)
-            self.llm, self.lock, self.inflight = _VLLMOverlap(**kw), nullcontext(), self.OVERLAP_CALLS
+            self.llm, self.lock = _VLLMOverlap(**kw), nullcontext()
+            self._caps = KIND_CAPS["vllm"]._replace(inflight=self.OVERLAP_CALLS)
         else:
             from vllm import LLM
             self.llm = LLM(**kw)
@@ -3461,11 +3534,12 @@ class VLLMBackend:
         return _split(flat, groups)
 
 
-class SGLangBackend:
+class SGLangBackend(Capable):
     """SGLang offline engine (1.5). One generated token; the engine returns the log-probabilities of the option letters
     at the answer position (`token_ids_logprob`), and the softmax over them equals the readout of the other backends
     (a softmax over a subset of log-softmax values is the softmax over the same logits). RadixAttention shares the
     state between the option orders of one question and between the questions of one request."""
+    KIND = "sglang"
 
     def __init__(self, model_dir, dtype="bfloat16", mem=0.6, max_len=4096, adapter=None):
         import sglang
@@ -3567,7 +3641,7 @@ class _PackedRow:
         return keys, values
 
 
-class MLXBackend:
+class MLXBackend(Capable):
     """Apple Silicon (MLX / mlx-lm): the MLX exports (the -MLX-8bit / -MLX-fp4 repositories) or a bf16 Hugging Face
     directory. Same prompts, tokens and letter readout as the PyTorch backends. The shared prefix of a group (both
     option orders of a question; with SOAM every question and order of a request, i.e. the state) is computed once into
@@ -3599,6 +3673,7 @@ class MLXBackend:
     continues them (as the CUDA graph engine carries the state into each branch); a right-padded row reads its last real
     token, which the padding after it cannot reach. No packed rows and no --mlx-forward basal for it (mlx-lm's forward). Other recurrent models (Mamba,
     Qwen3-Next and hybrids) are refused: their states are not carried here."""
+    KIND = "mlx"
 
     MAX_ROWS = 16      # suffix rows per forward
     TOKEN_BUDGET = 8192  # rows x padded length per forward without a shared prefix
@@ -4218,7 +4293,7 @@ class GGUFBackend(GraphBackend):
     per llama_decode, from its first token (N_SEQ = 1: every group is split into single prompts), so a request's
     state is computed once per question and option order."""
 
-    streams, inflight = False, 1  # its own run_shared: no early readouts, one call at a time
+    KIND = "gguf"  # its own run_shared: no early readouts, one call at a time (KIND_CAPS)
 
     N_CTX = 16384  # KV cells per chunk: room for a single long prompt
     context, context_reason = N_CTX, f"the in-process llama.cpp context ({N_CTX} cells)"
@@ -4235,7 +4310,7 @@ class GGUFBackend(GraphBackend):
         self.C = C
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.prefill = PREFILL
-        self.shared = True
+        self._init_packing(torch.device("cpu"))  # (llama.cpp runs the forwards; the packing is on the host)
         C.llama_backend_init()
         mp = C.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
@@ -4364,7 +4439,7 @@ class GGUFBackend(GraphBackend):
         return self._assemble(groups, units, probs)
 
 
-class _HTTPLetters:
+class _HTTPLetters(Capable):
     """Shared part of the HTTP backends (Ollama, llama.cpp server): one request per prompt (one generated token with
     the top log-probabilities at the answer position), sent sequentially so that the engine's prompt cache reuses the
     state between the option orders and the questions of a request; `parallel` > 1 sends that many at once (for an
@@ -4419,6 +4494,7 @@ class OllamaBackend(_HTTPLetters):
     prompt (`raw: true`: no Ollama template) to /api/generate with one generated token and `logprobs` /
     `top_logprobs`; Ollama tokenizes it with the GGUF vocabulary. Letters missing from the top list get -1e9 (their
     log-probability is below the TOP-th token, i.e. practically zero next to the letters that are listed)."""
+    KIND = "ollama"
 
     takes_text = True  # Ollama accepts text only; the server skips its own tokenization
     max_codes = 20  # Ollama refuses top_logprobs > 20, so a question can have at most 20 options
@@ -4477,6 +4553,7 @@ class LlamaCppBackend(_HTTPLetters):
     token ids (exactly the server's tokens) and `n_probs`; the log-probabilities are those of the raw logits
     (`post_sampling_probs` off). The prompt cache (`cache_prompt`) shares the state between requests of one slot.
     llama.cpp has no cap on `n_probs` below the vocabulary, so a question with k options asks for max(20, k + 10)."""
+    KIND = "llamacpp"
 
     def __init__(self, model_dir, url="http://127.0.0.1:8080", parallel=1, timeout=120.0):
         super().__init__(model_dir, url, parallel, timeout)

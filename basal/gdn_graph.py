@@ -1420,7 +1420,7 @@ class GDNMPSBackend(GDNGraphBackend, MPSBackend):
     on the CPU, without CUDA graphs or compilation; the Gated DeltaNet layers run transformers' torch kernels, as
     --mode eager does there."""
 
-    streams, inflight = False, 1  # (MPSBackend's: one call at a time)
+    KIND = "mps"  # one call at a time, no early readouts (engine.KIND_CAPS)
 
     def __init__(self, model_dir, dtype="bfloat16", shared=True, device=None, adapter=None):
         mps = getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
