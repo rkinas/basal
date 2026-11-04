@@ -86,3 +86,15 @@ def test_reference_lookup_by_name():
     assert selfcheck.find(name) == EXAMPLES[0]
     with pytest.raises(SystemExit, match="shipped references"):
         selfcheck.find("no-such-model")
+
+
+def test_a_server_with_bucket_temperatures_only_is_calibrated(monkeypatch):
+    """A format-2 calibration can temper choice questions by option count alone: that server is not raw."""
+    entry = {"name": "m", "mode": "eager", "temperature_per_prim": {}, "temperature_per_bucket": {"choice": {"2-10": 1.7}}}
+    monkeypatch.setattr(selfcheck, "call", lambda *a, **k: {"models": [entry]})
+    assert selfcheck.server_info("http://x")["uncalibrated"] is False
+    with pytest.raises(SystemExit, match="--no-calibration"):
+        selfcheck.make_reference("http://x", "/nonexistent/ref.json")
+    assert selfcheck.uncalibrated({"temperature_per_prim": {}, "temperature_per_bucket": {}})
+    assert selfcheck.uncalibrated({"temperature_per_prim": {"choice": 1.0}})               # all 1.0: raw
+    assert not selfcheck.uncalibrated({"temperature_per_prim": {"noul": 1.3}})
