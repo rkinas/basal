@@ -571,3 +571,30 @@ def test_multimodal_gemma4_merges_the_text_decoder_only(tmp_path):
                                       r"\.self_attn\.q_proj\.linear)")
     with pytest.raises(SystemExit, match="vision_tower.*not a module of the text decoder"):
         adapter_module.read(tmp_path / "both")
+
+
+def test_a_bf16_adapter_reads_as_its_float32_values(tmp_path):
+    """PEFT / Unsloth save adapters in bf16: read as their values in float32 (the numpy safetensors reader has no
+    bf16)."""
+    from safetensors.torch import save_file as save_torch
+    ds = deltas()
+    p = write_adapter(tmp_path / "p", "peft", ds)
+    tensors = {f"base_model.model.model.{k}.lora_{s}.weight": torch.from_numpy(x).to(torch.bfloat16)
+               for k, (a, b) in ds.items() for s, x in (("A", a), ("B", b))}
+    save_torch(tensors, str(p / "adapter_model.safetensors"))
+    ad = adapter_module.read(p)
+    for k, (a, b) in ds.items():
+        for got, want in zip(ad.deltas[k], (a, b)):
+            assert got.dtype == np.float32
+            assert np.array_equal(got, torch.from_numpy(want).to(torch.bfloat16).float().numpy())
+
+
+def test_torch_merge_refuses_integer_weights(tmp_path):
+    """Weights that are not floating point (an int8 quantised linear) cannot take a merge: refused, not corrupted."""
+    tiny_llama(tmp_path / "model")
+    ad = adapter_module.read(write_adapter(tmp_path / "ad", "peft", deltas()))
+    m = AutoModelForCausalLM.from_pretrained(tmp_path / "model", dtype=torch.float32)
+    q = m.model.layers[1].self_attn.q_proj
+    q.weight = torch.nn.Parameter(torch.zeros_like(q.weight, dtype=torch.int8), requires_grad=False)
+    with pytest.raises(SystemExit, match="int8 weights cannot take a merge"):
+        adapter_module.merge_torch(m, ad)
