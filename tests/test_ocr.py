@@ -258,7 +258,7 @@ def test_paddlex_error_is_gateway_error_not_null(monkeypatch):
 
 
 def test_pdf_refused_before_http_call():
-    with pytest.raises(ValueError, match="not a readable image"):
+    with pytest.raises(RequestError, match="not a readable image"):
         asyncio.run(ocr.OCRClient("paddlex", "http://localhost:8080").read(
             base64.b64encode(b"%PDF-1.7\nno images").decode(), 0))
 
@@ -812,3 +812,237 @@ def test_other_literal_remains_regular_criterion_in_plain_choice():
                "criteria": ["A", "other"]}}
     items = to_items("state", q, max_opts=10)
     assert items[0]["keys"] == ["A", "other"]
+
+
+# --- OCR security and resource-limit regressions ---
+
+@pytest.mark.parametrize("context", ["text", "none", "both", "image"])
+def test_media_cap_enforced_before_any_ocr_calls(context):
+    fake = Fake(["Kwota 10,00"])
+    body = request({"q": question()})
+    body["media"] = [
+        dict(MEDIA, name="faktura.png" if i == 0 else f"doc-{i}.png",
+             context=context) for i in range(ocr.media_module.MAX_ITEMS + 1)
+    ]
+    with pytest.raises(RequestError, match="at most 8"):
+        run(fake, body)
+    assert fake.ocr_client.calls == []
+    assert fake.called == 0
+
+
+def test_media_cap_applies_when_none_drops_all_images_without_ocr():
+    fake = Fake([], configured=False)
+    body = {"state": "test", "media": [
+        {"type": "image", "data": "unused", "context": "none"}
+        for _ in range(ocr.media_module.MAX_ITEMS + 1)],
+        "questions": {"q": {"type": "choice", "criteria": ["A", "B"]}}}
+    with pytest.raises(RequestError, match="at most 8"):
+        run(fake, body)
+    assert fake.called == 0
+
+
+def test_media_cap_allows_eight_text_ocr_images():
+    fake = Fake(["faktura"])
+    body = {"state": "test", "media": [
+        dict(MEDIA, name=f"doc-{i}.png", context="text")
+        for i in range(ocr.media_module.MAX_ITEMS)],
+        "questions": {"q": {"type": "choice", "criteria": ["A", "B"]}}}
+    out = run(fake, body)
+    assert fake.called == 1
+    assert len(fake.ocr_client.calls) == ocr.media_module.MAX_ITEMS
+    assert out["usage"]["ocr"]["images"] == ocr.media_module.MAX_ITEMS
+
+
+@pytest.mark.parametrize("bad_image", [
+    "%%%invalid-base64%%%",
+    base64.b64encode(b"%PDF-1.7\nno raster image").decode(),
+    base64.b64encode(b"no readable image").decode(),
+])
+def test_invalid_ocr_images_return_http_422_without_contacting_paddlex(bad_image):
+    from basal.server import http_app
+    fake = Fake([])
+    fake.ocr_client = ocr.OCRClient("paddlex", "http://unreachable.invalid:8080")
+    app = http_app(fake, "eager")
+    body = request({"q": question()})
+    body["media"][0]["data"] = bad_image
+
+    async def call():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://basal.test") as client:
+            return await client.post("/v1/systemone", json=body)
+
+    res = asyncio.run(call())
+    assert res.status_code == 422, res.text
+    assert res.json()["code"] == "INVALID_REQUEST"
+    assert fake.called == 0
+
+
+def test_oversized_base64_and_pixel_count_are_client_errors(monkeypatch):
+    monkeypatch.setattr(ocr.media_module, "MAX_BYTES", 5)
+    with pytest.raises(RequestError, match="more than"):
+        asyncio.run(ocr.OCRClient("paddlex", "http://unused").read(_image_base64(), 0))
+    monkeypatch.setattr(ocr.media_module, "MAX_BYTES", 20 * 1024 * 1024)
+    monkeypatch.setattr(ocr.media_module, "MAX_PIXELS", 20)
+    from PIL import Image
+    with pytest.warns(Image.DecompressionBombWarning):
+        with pytest.raises(RequestError, match="pixels"):
+            asyncio.run(ocr.OCRClient("paddlex", "http://unused").read(_image_base64(), 0))
+
+
+def _mock_paddlex(monkeypatch, handler):
+    original = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        ocr.httpx, "AsyncClient",
+        lambda **kwargs: original(transport=transport, **kwargs),
+    )
+
+
+def test_ocr_content_length_limit_checked_before_body_is_read(monkeypatch):
+    monkeypatch.setattr(ocr, "MAX_OCR_RESPONSE_BYTES", 100)
+    chunks_read = []
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            chunks_read.append(True)
+            yield b"{}"
+
+    def handler(req):
+        assert req.headers["accept-encoding"] == "identity"
+        return httpx.Response(200, headers={"Content-Length": "100000000"},
+                              stream=Stream())
+
+    _mock_paddlex(monkeypatch, handler)
+    with pytest.raises(ocr.OCRServiceError, match="exceeds"):
+        asyncio.run(ocr.OCRClient("paddlex", "http://localhost:8080").read(_image_base64(), 0))
+    assert chunks_read == []
+
+
+def test_ocr_unknown_length_body_is_bounded_while_streaming(monkeypatch):
+    monkeypatch.setattr(ocr, "MAX_OCR_RESPONSE_BYTES", 100)
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(10):
+                yield b"X" * 40
+
+    _mock_paddlex(monkeypatch, lambda _: httpx.Response(200, stream=Stream()))
+    with pytest.raises(ocr.OCRServiceError, match="exceeds") as ex:
+        asyncio.run(ocr.OCRClient("paddlex", "http://localhost:8080").read(_image_base64(), 0))
+    assert error_body(ex.value)[1] == 502
+
+
+def test_ocr_rejects_compressed_upstream_response_before_decompression(monkeypatch):
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"invalid gzip"
+
+    _mock_paddlex(monkeypatch, lambda _: httpx.Response(
+        200, headers={"Content-Encoding": "gzip"}, stream=Stream()))
+    with pytest.raises(ocr.OCRServiceError, match="not be compressed"):
+        asyncio.run(ocr.OCRClient("paddlex", "http://localhost:8080").read(_image_base64(), 0))
+
+
+@pytest.mark.parametrize("raw", [
+    b"bad JSON",
+    b"[" * 1500 + b"]" * 1500,  # json.loads raises RecursionError, not ValueError
+])
+def test_upstream_invalid_or_deeply_nested_json_is_502(monkeypatch, raw):
+    _mock_paddlex(monkeypatch, lambda _: httpx.Response(200, content=raw))
+    with pytest.raises(ocr.OCRServiceError):
+        asyncio.run(ocr.OCRClient("paddlex", "http://localhost:8080").read(_image_base64(), 0))
+
+
+def test_ocr_wall_clock_timeout_despite_continuous_stream(monkeypatch):
+    class Trickle(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(200):
+                await asyncio.sleep(0.01)  # never exceeds per-read httpx timeout
+                yield b" "
+
+    _mock_paddlex(monkeypatch, lambda _: httpx.Response(200, stream=Trickle()))
+    import time
+    started = time.monotonic()
+    with pytest.raises(ocr.OCRServiceError, match="TimeoutError") as ex:
+        asyncio.run(ocr.OCRClient("paddlex", "http://localhost:8080",
+                                  timeout=0.06).read(_image_base64(), 0))
+    assert time.monotonic() - started < 0.8
+    assert error_body(ex.value)[1] == 502
+
+
+def test_ocr_wall_clock_deadline_also_includes_json_parsing(monkeypatch):
+    import time
+    original_loads = json.loads
+
+    def slow_decode(payload):
+        time.sleep(0.065)
+        return original_loads(payload)
+
+    _mock_paddlex(monkeypatch, lambda _: httpx.Response(200, content=b'{"errorCode":0}'))
+    monkeypatch.setattr(ocr.json, "loads", slow_decode)
+    with pytest.raises(ocr.OCRServiceError, match="TimeoutError"):
+        asyncio.run(ocr.OCRClient("paddlex", "http://localhost:8080",
+                                  timeout=0.04).read(_image_base64(), 0))
+
+
+def test_failed_ocr_cancels_and_awaits_sibling_reads():
+    class FailAndWait:
+        def __init__(self):
+            self.started_second = asyncio.Event()
+            self.cancelled_second = False
+
+        async def read(self, data, index):
+            if index == 0:
+                await self.started_second.wait()
+                raise ocr.OCRServiceError("first OCR failed")
+            self.started_second.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.cancelled_second = True
+                raise
+
+    fake = Fake([])
+    fake.ocr_client = FailAndWait()
+    body = {"state": "", "questions": {
+        "q": {"type": "choice", "criteria": ["A", "B"]}},
+        "media": [dict(MEDIA, name=f"image-{i}.png", context="text") for i in range(2)]}
+    with pytest.raises(ocr.OCRServiceError, match="first OCR failed"):
+        run(fake, body)
+    assert fake.ocr_client.cancelled_second
+    assert fake.called == 0
+
+
+def test_cancelled_basal_request_cleans_up_all_ocr_tasks():
+    class HangingReads:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.started_count = 0
+            self.cancelled_count = 0
+
+        async def read(self, data, index):
+            self.started_count += 1
+            if self.started_count == 2:
+                self.started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.cancelled_count += 1
+                raise
+
+    fake = Fake([])
+    fake.ocr_client = HangingReads()
+    body = {"state": "", "questions": {
+        "q": {"type": "choice", "criteria": ["A", "B"]}},
+        "media": [dict(MEDIA, name=f"image-{i}.png", context="text") for i in range(2)]}
+
+    async def cancel_request():
+        task = asyncio.create_task(fake.serve(body))
+        await fake.ocr_client.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert fake.ocr_client.cancelled_count == 2
+        assert fake.in_flight == 0
+
+    asyncio.run(cancel_request())

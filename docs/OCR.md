@@ -258,6 +258,24 @@ model. An unreachable service, HTTP error, or malformed PaddleX response
 returns HTTP **502** (not a null match). Invalid inputs and unsupported
 question types return HTTP **422**.
 
+### Resource limits and upstream failure handling
+
+The original request is limited to **8 media items** (`media.MAX_ITEMS`)
+before any OCR HTTP calls start, even if `context: "text"` or `"none"`
+would remove some or all images before model inference. Each OCR image
+uses the normal Base64, image-size and pixel-count validation; invalid
+client images return HTTP **422**, not an upstream error.
+
+PaddleX responses must be **uncompressed** (requested with
+`Accept-Encoding: identity`) and no larger than **8 MiB**. Basal checks
+the declared `Content-Length` when present, and counts bytes while
+streaming before decoding JSON. Oversized responses, malformed JSON
+(including excessive nesting), and upstream failures return HTTP **502**.
+`--ocr-timeout` is an overall wall-clock deadline per image, in addition
+to HTTPX's per-operation inactivity timeouts, including the bounded JSON
+parsing step. When one image fails, other OCR reads launched for the same
+request are cancelled and awaited before reporting the error.
+
 Only raster **images** are supported by this integration. PDF and audio
 are not routed to OCR. Existing Base64 image size and decompression limits
 apply. The choice candidates must fit the served model's option limit

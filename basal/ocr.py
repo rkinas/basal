@@ -14,6 +14,7 @@ from .prompt import RequestError, lang_of
 OTHER_KEY = "__other__"
 MAX_TEXT_LINES = 4096
 MAX_TEXT_CHARS = 200_000
+MAX_OCR_RESPONSE_BYTES = 8 * 1024 * 1024  # bound untrusted upstream HTTP bodies before JSON parsing
 MAX_MATCHES = 4096
 
 
@@ -34,16 +35,51 @@ class OCRClient:
         self.url = url.rstrip("/") + "/ocr"
         self.timeout = timeout
 
-    async def read(self, image_base64, index):
-        raw = media_module._raw(image_base64, index)
-        media_module._image(raw, index)  # reject PDF and malformed/oversized/decompression-bomb images
-        data = base64.b64encode(raw).decode("ascii")
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-                response = await client.post(self.url, json={"file": data, "fileType": 1, "visualize": False})
+    async def _request(self, data):
+        """Read a bounded, uncompressed PaddleX body before decoding any JSON."""
+        async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+            async with client.stream("POST", self.url,
+                                     json={"file": data, "fileType": 1, "visualize": False},
+                                     headers={"Accept-Encoding": "identity"}) as response:
                 response.raise_for_status()
-                payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
+                # aiter_raw avoids decompressing a large upstream body before the size check.
+                if response.headers.get("content-encoding", "identity").lower() not in ("", "identity"):
+                    raise OCRServiceError("PaddleX OCR response must not be compressed")
+                declared = response.headers.get("content-length")
+                if declared and declared.isascii() and declared.isdigit():
+                    if len(declared) > len(str(MAX_OCR_RESPONSE_BYTES)) or int(declared) > MAX_OCR_RESPONSE_BYTES:
+                        raise OCRServiceError(f"PaddleX OCR response exceeds {MAX_OCR_RESPONSE_BYTES} bytes")
+                body = bytearray()
+                if response.is_stream_consumed:
+                    # Some in-memory HTTPX mock responses are already buffered.
+                    # Real streamed upstream responses use the bounded branch below.
+                    buffered = response.content
+                    if len(buffered) > MAX_OCR_RESPONSE_BYTES:
+                        raise OCRServiceError(f"PaddleX OCR response exceeds {MAX_OCR_RESPONSE_BYTES} bytes")
+                    body.extend(buffered)
+                else:
+                    async for chunk in response.aiter_raw(chunk_size=64 * 1024):
+                        if len(body) + len(chunk) > MAX_OCR_RESPONSE_BYTES:
+                            raise OCRServiceError(f"PaddleX OCR response exceeds {MAX_OCR_RESPONSE_BYTES} bytes")
+                        body.extend(chunk)
+        return json.loads(body)
+
+    async def read(self, image_base64, index):
+        try:
+            raw = media_module._raw(image_base64, index)
+            media_module._image(raw, index)  # enforce all image limits before contacting PaddleX
+        except ValueError as exc:
+            raise RequestError(str(exc)) from exc
+        data = base64.b64encode(raw).decode("ascii")
+        started = time.monotonic()
+        try:
+            # httpx timeout is per read/write/connect inactivity, not a total wall-clock limit.
+            # wait_for also cancels a slow streaming response (supported on Python 3.10+).
+            payload = await asyncio.wait_for(self._request(data), timeout=self.timeout)
+            if time.monotonic() - started >= self.timeout:
+                # The bounded synchronous JSON parse may overrun the deadline.
+                raise asyncio.TimeoutError()
+        except (httpx.HTTPError, ValueError, RecursionError, TimeoutError) as exc:
             raise OCRServiceError(f"PaddleX OCR request failed ({type(exc).__name__})") from exc
         if not isinstance(payload, dict) or payload.get("errorCode") != 0:
             raise OCRServiceError("PaddleX OCR returned an unsuccessful response")
@@ -145,6 +181,8 @@ async def prepare(body, client, max_options):
         if "other" in q:
             raise RequestError(f"question {name!r}: use __other__ instead of other")
     entries = body.get("media")
+    if isinstance(entries, list) and len(entries) > media_module.MAX_ITEMS:
+        raise RequestError(f"{len(entries)} media items, at most {media_module.MAX_ITEMS} per request")
     has_criteria = any("generated_criteria" in q or "__other__" in q for q in questions.values())
     has_context = isinstance(entries, list) and any(isinstance(m, dict) and "context" in m for m in entries)
     if not has_criteria and not has_context:
@@ -203,7 +241,16 @@ async def prepare(body, client, max_options):
     names = [name for name in by_name if name in requested]
     if not names and not has_criteria and not drop:
         return body, {}, None
-    read = await asyncio.gather(*(client.read(by_name[n][1].get("data"), by_name[n][0]) for n in names))
+    tasks = [asyncio.create_task(client.read(by_name[n][1].get("data"), by_name[n][0])) for n in names]
+    try:
+        read = await asyncio.gather(*tasks)
+    except BaseException:
+        # gather does not cancel sibling tasks when one raises. Stop and await them
+        # before the request returns; also clean up if our own request is cancelled.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     texts = dict(zip(names, read))
 
     prepared, empty, sources, counts = {}, {}, {}, {}
