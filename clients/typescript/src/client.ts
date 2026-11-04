@@ -7,6 +7,7 @@ import type {
   ChoiceAnswer,
   Criteria,
   DecisionResponse,
+  FallbackChoiceAnswer,
   Health,
   ImageInput,
   GuardDecision,
@@ -149,18 +150,19 @@ export class Basal {
     return (await this.request(state, questions, options)).answers;
   }
 
-  /** One choice question. `criteria`: {key: description}, or a list of keys. */
+  /** One choice question. `criteria`: {key: description}, or a list of keys. Through basal-router --fallback the
+   *  answer may be the fallback LLM's (`answered_by: "fallback"`, probabilities possibly null). */
   async choice(
     state: unknown,
     question: string,
     criteria: Criteria,
     extra: { coverage?: number; max_error?: number; option_keys?: "show" | "hide" } & CallOptions = {},
-  ): Promise<ChoiceAnswer> {
+  ): Promise<ChoiceAnswer | FallbackChoiceAnswer> {
     const { coverage, max_error, option_keys, ...options } = extra;
     // basal-serve reads a list of keys as the map {key: null}; other servers need the map
     const crit = Array.isArray(criteria) ? Object.fromEntries(criteria.map((k) => [k, null])) : criteria;
     const q = defined({ type: "choice", instructions: question, criteria: crit, coverage, max_error, option_keys });
-    return (await this.decide(state, { q } as Questions, options))["q"] as ChoiceAnswer;
+    return (await this.decide(state, { q } as Questions, options))["q"] as ChoiceAnswer | FallbackChoiceAnswer;
   }
 
   /** One yes/no question; `sides.yes` and `sides.no` describe the two outcomes (optional). */

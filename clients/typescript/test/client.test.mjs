@@ -64,6 +64,25 @@ describe("decide against basal-serve", () => {
     assert.equal(r.answers.t.tool, "lookup");
   });
 
+  test("a rank question and its answer have the declared shape (types.ts RankQuestion / RankAnswer)", async () => {
+    const r = await b.request("query", {
+      hits: { type: "rank", instructions: "Does {candidate} help?", candidates: { x: "first", y: "second", z: "third" }, top: 2 },
+    });
+    const a = r.answers.hits;
+    assert.equal(a.type, "rank");
+    assert.deepEqual(Object.keys(a).sort(), ["candidates", "experimental", "ranking", "requests", "top", "type"]);
+    assert.equal(a.candidates, 3);
+    assert.equal(a.experimental, true);
+    assert.ok(Number.isInteger(a.requests) && a.requests >= 1);
+    assert.deepEqual(a.ranking.map((e) => e.key).sort(), ["x", "y", "z"]);
+    assert.equal(a.top, a.ranking[0].key);
+    for (const e of a.ranking) {
+      assert.equal(typeof e.score, "number");
+      assert.ok(Object.keys(e).every((k) => ["key", "score", "choice", "yes"].includes(k)), JSON.stringify(e));
+    }
+    assert.equal(typeof r.usage.latency_ms, "number");
+  });
+
   test("answer sets (coverage) and abstain (max_error)", async () => {
     const a = await b.choice("x", "Which?", CHOICE, { coverage: 0.9, max_error: 0.05 });
     assert.deepEqual(a.answer_set, ["a", "b"]);

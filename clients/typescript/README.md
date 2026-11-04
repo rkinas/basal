@@ -47,7 +47,9 @@ full.usage.skipped;
 
 Per-request fields (`facts`, `think`, `early_exit`, `lang`, `detail`, `media`, `images`, and any other field, sent
 as it is) go in the last argument, with an optional `signal` (`AbortSignal`) to cancel. Question fields `ask_if`,
-`depends_on`, `coverage`, `max_error`, `option_keys` and `evidence` are in the types. `basal.models()` and
+`depends_on`, `coverage`, `max_error`, `option_keys` and `evidence` are in the types, as are rank questions
+(`{type: "rank", instructions: "Does {candidate} ...?", candidates}`, answered with a `RankAnswer`) and the
+answers of basal-router `--fallback` (`answered_by: "fallback"`: probabilities and confidence may be null). `basal.models()` and
 `basal.health()` read `GET /v1/models` and `GET /health`.
 
 ## Errors

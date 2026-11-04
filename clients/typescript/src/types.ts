@@ -87,6 +87,36 @@ export interface ToolQuestion extends QuestionBase {
   max?: number;
 }
 
+/** A candidate of a rank question: its text, or {key?, text, group?} (the key defaults to its index). */
+export type RankCandidate = Json | { key?: string | number; text: Json; group?: Json };
+
+/** Ranks up to --rank-max-candidates (10,000) candidates in one request (2.5, experimental; basal/rank.py). Not with
+ *  ask_if, depends_on, coverage, max_error or evidence. */
+export interface RankQuestion {
+  type: "rank";
+  /** Names the candidate with {candidate}, e.g. "Does {candidate} answer the question?". */
+  instructions: string;
+  candidates: Record<string, Json> | RankCandidate[];
+  label?: string;
+  list_title?: string;
+  /** Candidates per screening request (default 50; 0: one request when they fit). */
+  chunk?: number;
+  /** The final choice over the best `top` (0: none; 1 is refused). */
+  top?: number;
+  choice_instructions?: string;
+  choice_context?: "auto" | "screen" | "shortlist";
+  order?: "state_first" | "candidates_first";
+  /** {key: weight >= 0}: a candidate's score is its P(yes) times its weight. */
+  prior?: Record<string, number>;
+  /** The candidates returned in the ranking (default: all). */
+  limit?: number;
+  ask_if?: never;
+  depends_on?: never;
+  coverage?: never;
+  max_error?: never;
+  evidence?: never;
+}
+
 /** Task types (2.1, experimental; docs/TASKS.md): their fields are open, the answers are returned as documented there. */
 export interface TaskQuestion extends QuestionBase {
   type: "classify" | "verify" | "compress" | "extract";
@@ -100,6 +130,7 @@ export type Question =
   | MultiQuestion
   | ActQuestion
   | ToolQuestion
+  | RankQuestion
   | TaskQuestion;
 
 export type Questions = Record<string, Question>;
@@ -123,8 +154,12 @@ interface AnswerExtras {
   /** Present with "abstain" when no threshold is certified for the target (a note, not a number). */
   max_error?: string;
   evidence?: EvidenceSpan[];
-  /** "unvalidated" when the calibration file does not belong to the served engine or option orders. */
-  calibration?: "validated" | "unvalidated";
+  /** "unvalidated" when the calibration file does not belong to the served engine or option orders; "text" with
+   *  media (the temperatures and thresholds were fitted on text). */
+  calibration?: "validated" | "unvalidated" | "text";
+  /** basal-router --escalate: the level (1 = the first model) and the model that answered. */
+  level?: number;
+  model?: string;
 }
 
 export interface ChoiceAnswer extends AnswerExtras {
@@ -132,6 +167,21 @@ export interface ChoiceAnswer extends AnswerExtras {
   choice: string;
   probabilities: Record<string, number>;
   confidence: number;
+  answered_by?: undefined;
+}
+
+/** A choice answered by basal-router's --fallback LLM (when basal's top probability was below --fallback-below): not
+ *  calibrated, and without probabilities when the LLM gives no log-probabilities. Tell it apart by `answered_by`. */
+export interface FallbackChoiceAnswer extends AnswerExtras {
+  type: "choice";
+  choice: string;
+  answered_by: "fallback";
+  probabilities: Record<string, number> | null;
+  confidence: number | null;
+  model: string;
+  calibrated: false;
+  /** basal's own answer. */
+  basal: { choice?: string; confidence: number | null; model?: string };
 }
 
 export interface NoulAnswer extends AnswerExtras {
@@ -188,22 +238,44 @@ export interface ToolAnswer extends AnswerExtras {
   tools?: string[];
 }
 
+export interface RankAnswer extends AnswerExtras {
+  type: "rank";
+  /** Best first: the score (P(yes) times the prior), the final choice's probability on the shortlisted ones, and the
+   *  P(yes) before the prior when there is one. */
+  ranking: Array<{ key: string; score: number; choice?: number; yes?: number }>;
+  top: string;
+  candidates: number;
+  requests: number;
+  experimental: true;
+}
+
 /** Answers of the task types (docs/TASKS.md), which are not typed further here. */
 export interface TaskAnswer extends AnswerExtras {
   type: string;
   [field: string]: unknown;
 }
 
-export type Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer | TaskAnswer;
+export type Answer =
+  | ChoiceAnswer
+  | FallbackChoiceAnswer
+  | NoulAnswer
+  | ScoreAnswer
+  | MultiAnswer
+  | ActAnswer
+  | ToolAnswer
+  | RankAnswer
+  | TaskAnswer;
 
 /** The answer type of a question type. */
 export interface AnswerOf {
-  choice: ChoiceAnswer;
+  /** FallbackChoiceAnswer only through basal-router --fallback. */
+  choice: ChoiceAnswer | FallbackChoiceAnswer;
   noul: NoulAnswer;
   score: ScoreAnswer;
   multi: MultiAnswer;
   act: ActAnswer;
   tool: ToolAnswer;
+  rank: RankAnswer;
 }
 
 export type AnswerFor<Q> = Q extends { type: infer T }
@@ -248,15 +320,22 @@ export interface Usage {
   latency_ms: number;
   /** Names of the questions skipped by ask_if. */
   skipped?: string[];
-  truncated?: boolean;
+  /** --context-overflow truncate: how the state was cut to fit the context. */
+  truncated?: { state_tokens: number; head_tokens: number; tail_tokens: number; dropped_tokens: number; head_share: number };
   second_order_branches?: number;
+  /** With media or images. */
+  media?: { images: number; audio: number; media_tokens: number; detail: string };
+  longest_prompt_tokens?: number;
   [field: string]: unknown;
 }
 
 export interface DecisionResponse<A = Record<string, Answer | null>> {
   model: string;
   answers: A;
-  usage?: Usage;
+  /** basal-serve always sends it. */
+  usage: Usage;
+  /** basal-router --fallback: the questions sent to the fallback LLM and those it answered. */
+  fallback?: { below: number; asked: string[]; answered: string[] };
 }
 
 export interface ModelInfo {
