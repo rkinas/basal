@@ -39,8 +39,9 @@ basal-serve --model my-pico --mode eager --port 8000
 ```
 
 1. **Split.** The lines go by `group` (or `id`; as in basal-calibrate, twins and one customer's lines stay together)
-   into a training part and a held-out part, 25% (`--holdout`). Training sees the first part only. The held-out lines are
-   written to `my-pico/heldout.jsonl`.
+   into a training part and a held-out part, 25% (`--holdout`). Lines that share a group on any question (a
+   per-question `group`) go to the same part, so no group is on both sides. Training sees the first part only. The
+   held-out lines are written to `my-pico/heldout.jsonl`.
 2. **Train.** LoRA (rank 16, the decoder's linear layers) on the prompt `basal-serve` builds, in the model's own format, with
    the loss on the option codes at the answer position, which is what the server reads. Each example is shown in the
    option order you wrote and in the reversed one, the two orders `basal-serve` averages. Two epochs, 16 examples per
