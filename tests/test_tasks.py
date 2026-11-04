@@ -306,3 +306,16 @@ def test_extract_answers_map_back_to_typed_enum_values():
     res = finish(out('"__missing__"', []), body, plans, {})["answers"]["e"]
     assert res["data"]["v"] == "__missing__"                            # a value, not "not stated"
     assert finish(out("__missing__", []), body, plans, {})["answers"]["e"]["data"]["v"] is None
+
+
+def test_parse_number_reads_a_polish_thousands_dot_and_stops_at_a_list():
+    assert parse_number("2.500 zł", lang="pl") == 2500 and parse_number("-1.234", True, "pl") == -1234
+    assert parse_number("2.500", lang="en") == 2.5 and parse_number("3.141") == 3.141   # English: a decimal point
+    assert parse_number("2,5 zł", lang="pl") == 2.5 and parse_number("1.234.567", lang="en") == 1234567
+    assert parse_number("1, 2, 3") == 1 and parse_number("Rok 2024, 10 osób") == 2024    # ", " ends the number
+    assert parse_number("1 234,56 zł") == 1234.56 and parse_number("1,234.56") == 1234.56
+    from basal.calibrate import task_units
+    q = {"type": "extract", "schema": {"type": "object", "properties": {"kwota": {"type": "number"}}}}
+    state = "Faktura na kwotę 2.500 zł do zapłaty w ciągu 14 dni."
+    assert task_units("e", q, {"kwota": "2.500"}, state) == [("kwota", ("number", 2500))]          # read as served
+    assert task_units("e", q, {"kwota": "2.500"}, state, "en") == [("kwota", ("number", 2.5))]

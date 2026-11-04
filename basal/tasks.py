@@ -314,12 +314,17 @@ def _set_path(obj, path, value):
     obj[last] = value
 
 
-NUM = re.compile(r"[-+]?\d[\d\s .,']*")
+# digits with their separators: a space only before a digit, "." and "," only between digits ("1, 2" is two numbers)
+NUM = re.compile(r"[-+]?\d(?:[\d']|[\s ](?=\d)|[.,](?=\d))*")
+THOUSANDS_DOT = re.compile(r"[-+]?\d{1,3}\.\d{3}")  # 2.500: two thousand five hundred in Polish
 
 
-def parse_number(text, integer=False):
+def parse_number(text, integer=False, lang=None):
     """The first number in text -> an int (no decimal part: exact) or a float; None when there is none, integer=True
-    and it has a fractional part, or it does not fit a float (the field then reports an error)."""
+    and it has a fractional part, or it does not fit a float (the field then reports an error). A comma with at most
+    two digits after it is a decimal comma ("12,5"), dots and commas in groups of three are thousands ("1.234.567",
+    "1,234.56"); one dot before exactly three digits ("2.500") is a thousands dot in Polish (lang "pl", as in the
+    helper facts) and a decimal point otherwise."""
     m = NUM.search((text or "").replace("\u2212", "-"))  # U+2212, the minus of typeset text, is a minus
     if not m:
         return None
@@ -329,7 +334,7 @@ def parse_number(text, integer=False):
         s = s.replace("." if dec == "," else ",", "").replace(",", ".")
     elif "," in s:
         s = s.replace(",", ".") if len(s.split(",")[-1]) <= 2 and s.count(",") == 1 else s.replace(",", "")
-    elif s.count(".") > 1:
+    elif s.count(".") > 1 or lang == "pl" and THOUSANDS_DOT.fullmatch(s):
         s = s.replace(".", "")
     try:
         v = int(s) if "." not in s else Decimal(s)  # an int is exact: 9007199254740993 stays itself (not ...992)
@@ -556,7 +561,7 @@ def finish(out, body, plans, cal, second=None):
                             f.update(text=txt, start=s0, end=e0, line_probability=a["confidence"],
                                      span_probability=p_span, confidence=a["confidence"] * p_span)
                             if kind in ("number", "integer"):
-                                f["value"] = parse_number(txt, kind == "integer")
+                                f["value"] = parse_number(txt, kind == "integer", p["lang"])
                                 if f["value"] is None:
                                     f["error"] = f"not a {kind}"
                             else:

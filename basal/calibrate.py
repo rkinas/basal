@@ -205,8 +205,9 @@ def _at(obj, keys):
     return True, obj
 
 
-def field_gold(path, kind, spec, v):
-    """The gold of an extract field -> the value basal-serve would return for it (None = not stated)."""
+def field_gold(path, kind, spec, v, lang=None):
+    """The gold of an extract field -> the value basal-serve would return for it (None = not stated); a number given as
+    text is read as basal-serve reads it in the question's language."""
     if v is None:
         return None
     if kind == "enum":
@@ -223,7 +224,7 @@ def field_gold(path, kind, spec, v):
             return s in YES
         raise ValueError(f"field {path!r}: gold {v!r} is not true / false")
     if kind in ("number", "integer"):
-        x = v if isinstance(v, (int, float)) and not isinstance(v, bool) else task_types.parse_number(str(v))
+        x = v if isinstance(v, (int, float)) and not isinstance(v, bool) else task_types.parse_number(str(v), lang=lang)
         if x is None:
             raise ValueError(f"field {path!r}: gold {v!r} is not a number")
         return x
@@ -249,13 +250,14 @@ def field_correct(kind, value, gold):
     return type(value) is type(gold) and value == gold  # enum 1 is not true, nor "1"
 
 
-def task_units(name, q, gold, state):
+def task_units(name, q, gold, state, lang=None):
     """A labelled task question -> its labelled decisions [(part, gold)]: classify one (part None), verify one per
     labelled claim, extract one per labelled field. The question must expand as basal-serve expands it."""
     t = q["type"]
     if t == "compress":
         raise ValueError("compress has no automated flag, so there is nothing to certify: leave it out")
-    task_types.expand({"state": state, "questions": {name: q}})  # the errors basal-serve would give
+    _, plans = task_types.expand({"state": state, "questions": {name: q}, **({"lang": lang} if lang else {})})
+    lang = plans[name].get("lang")  # the errors basal-serve would give, and the language it reads numbers in
     if t == "classify":
         if q.get("multi_label"):
             raise ValueError("multi-label classify has no automated flag (it reports set_confidence): ask it "
@@ -298,7 +300,7 @@ def task_units(name, q, gold, state):
     for path, kind, spec in task_types.leaves(q.get("schema") or {}):
         found, v = _at(gold, keys[path])
         if found and kind != "enum_list":  # a label set has no certified threshold
-            out.append((path, (kind, field_gold(path, kind, spec, v))))
+            out.append((path, (kind, field_gold(path, kind, spec, v, lang))))
     if not out:
         raise ValueError("gold labels no field (enum, boolean, string, number or integer) of the schema")
     return out
@@ -362,7 +364,7 @@ def read(path):
                     continue
                 clean = {k: v for k, v in q.items() if k not in ("gold", "group", "family") + CONDITIONAL}
                 try:
-                    labelled = task_units(name, clean, q["gold"], rec["state"])
+                    labelled = task_units(name, clean, q["gold"], rec["state"], rec.get("lang"))
                 except (ValueError, KeyError, TypeError) as e:
                     errors.append(f"{at}: {str(e).removeprefix(f'question {name!r}: ')}")
                     continue
