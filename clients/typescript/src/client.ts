@@ -49,11 +49,27 @@ export function complete<A>(answer: A): A {
   return answer;
 }
 
-const PL = /[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]|(?<![\p{L}\p{N}_])(?:i|w|z|nie|się|jest|na|do|że|od)(?![\p{L}\p{N}_])/gu;
+// lang_of of basal/presets.py: its \b is a Unicode word boundary, and (?-i:...) words count in lower case only (a
+// pattern of each kind here, as JavaScript before ES2025 has no inline flags; their matches cannot overlap).
+const W = "[\\p{L}\\p{N}_]";
+const word = (alternatives: string) => `(?<!${W})(?:${alternatives})(?!${W})`;
+const PL = [
+  new RegExp(`[ąćęłńóśźż]|${word("nie|się|sie|jest|są|że|ze|jak|czy|mnie|mam|mogę|moge|dla|przez|już|juz|ale|bo|też" +
+    "|tez|jestem|mój|moj|moje|moim|kiedy|dlaczego|proszę|prosze")}`, "giu"),
+  new RegExp(`${word("w|z|na|co|od|po|mi")}(?!/)`, "gu"),
+];
+const EN = [
+  new RegExp(word("the|and|is|are|of|my|it|in|for|not|this|that|with|you|your|me|can|cannot|does|please|have|has" +
+    "|was|be|how|why|where|what|when"), "giu"),
+  new RegExp(word("I"), "gu"),
+];
+const signs = (patterns: RegExp[], text: string) => patterns.reduce((n, p) => n + [...text.matchAll(p)].length, 0);
 
-/** "pl" when the text looks Polish (diacritics, common words), else "en" (as basal/presets.py). */
+/** "pl" when the text has more signs of Polish (diacritics, common words, also typed without diacritics) than common
+ *  English words, else "en": basal/presets.py's lang_of, checked on the cases of test/presets_fixture.json. */
 export function langOf(text: string): "pl" | "en" {
-  return [...(text ?? "").matchAll(PL)].length >= 2 ? "pl" : "en";
+  const t = text ?? "";
+  return signs(PL, t) > signs(EN, t) ? "pl" : "en";
 }
 
 /** Names of the ready question sets. */

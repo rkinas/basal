@@ -1,5 +1,89 @@
 {
  "presets": {
+  "triage": {
+   "pl": {
+    "urgency": {
+     "type": "score",
+     "instructions": "Jak pilna jest sprawa?",
+     "criteria": [
+      "niska",
+      "średnia",
+      "wysoka"
+     ]
+    },
+    "category": {
+     "type": "choice",
+     "instructions": "Czego dotyczy zgłoszenie?",
+     "criteria": {
+      "complaint": "reklamacja lub skarga",
+      "billing": "płatności lub faktury",
+      "technical": "problem techniczny",
+      "account": "konto lub dane klienta",
+      "other": "coś innego"
+     }
+    },
+    "needs_human": {
+     "type": "noul",
+     "instructions": "Czy sprawa wymaga decyzji człowieka?"
+    }
+   },
+   "en": {
+    "urgency": {
+     "type": "score",
+     "instructions": "How urgent is this case?",
+     "criteria": [
+      "low",
+      "medium",
+      "high"
+     ]
+    },
+    "category": {
+     "type": "choice",
+     "instructions": "What is the request about?",
+     "criteria": {
+      "complaint": "a complaint",
+      "billing": "payments or invoices",
+      "technical": "a technical problem",
+      "account": "the account or customer data",
+      "other": "something else"
+     }
+    },
+    "needs_human": {
+     "type": "noul",
+     "instructions": "Does the case need a human decision?"
+    }
+   }
+  },
+  "moderation": {
+   "pl": {
+    "harmful": {
+     "type": "noul",
+     "instructions": "Czy tekst zawiera treści obraźliwe, groźby lub nękanie?"
+    },
+    "spam": {
+     "type": "noul",
+     "instructions": "Czy tekst jest spamem lub reklamą?"
+    },
+    "personal_data": {
+     "type": "noul",
+     "instructions": "Czy tekst ujawnia dane osobowe innej osoby?"
+    }
+   },
+   "en": {
+    "harmful": {
+     "type": "noul",
+     "instructions": "Does the text contain insults, threats or harassment?"
+    },
+    "spam": {
+     "type": "noul",
+     "instructions": "Is the text spam or advertising?"
+    },
+    "personal_data": {
+     "type": "noul",
+     "instructions": "Does the text reveal someone else's personal data?"
+    }
+   }
+  },
   "compliance": {
    "pl": {
     "personal_data": {
@@ -146,36 +230,6 @@
     }
    }
   },
-  "moderation": {
-   "pl": {
-    "harmful": {
-     "type": "noul",
-     "instructions": "Czy tekst zawiera treści obraźliwe, groźby lub nękanie?"
-    },
-    "spam": {
-     "type": "noul",
-     "instructions": "Czy tekst jest spamem lub reklamą?"
-    },
-    "personal_data": {
-     "type": "noul",
-     "instructions": "Czy tekst ujawnia dane osobowe innej osoby?"
-    }
-   },
-   "en": {
-    "harmful": {
-     "type": "noul",
-     "instructions": "Does the text contain insults, threats or harassment?"
-    },
-    "spam": {
-     "type": "noul",
-     "instructions": "Is the text spam or advertising?"
-    },
-    "personal_data": {
-     "type": "noul",
-     "instructions": "Does the text reveal someone else's personal data?"
-    }
-   }
-  },
   "route_intent": {
    "pl": {
     "intent": {
@@ -223,60 +277,6 @@
      ]
     }
    }
-  },
-  "triage": {
-   "pl": {
-    "urgency": {
-     "type": "score",
-     "instructions": "Jak pilna jest sprawa?",
-     "criteria": [
-      "niska",
-      "średnia",
-      "wysoka"
-     ]
-    },
-    "category": {
-     "type": "choice",
-     "instructions": "Czego dotyczy zgłoszenie?",
-     "criteria": {
-      "complaint": "reklamacja lub skarga",
-      "billing": "płatności lub faktury",
-      "technical": "problem techniczny",
-      "account": "konto lub dane klienta",
-      "other": "coś innego"
-     }
-    },
-    "needs_human": {
-     "type": "noul",
-     "instructions": "Czy sprawa wymaga decyzji człowieka?"
-    }
-   },
-   "en": {
-    "urgency": {
-     "type": "score",
-     "instructions": "How urgent is this case?",
-     "criteria": [
-      "low",
-      "medium",
-      "high"
-     ]
-    },
-    "category": {
-     "type": "choice",
-     "instructions": "What is the request about?",
-     "criteria": {
-      "complaint": "a complaint",
-      "billing": "payments or invoices",
-      "technical": "a technical problem",
-      "account": "the account or customer data",
-      "other": "something else"
-     }
-    },
-    "needs_human": {
-     "type": "noul",
-     "instructions": "Does the case need a human decision?"
-    }
-   }
   }
  },
  "langs": [
@@ -290,6 +290,10 @@
   ],
   [
    "Zażółć gęślą jaźń",
+   "pl"
+  ],
+  [
+   "ZAŻÓŁĆ GĘŚLĄ JAŹŃ",
    "pl"
   ],
   [
@@ -313,7 +317,1451 @@
    "en"
   ],
   [
+   null,
+   "en"
+  ],
+  [
    "Sprawa jest pilna",
+   "pl"
+  ],
+  [
+   "Aplikacja na iPhone wylogowuje mnie co kilka minut.",
+   "pl"
+  ],
+  [
+   "nie dziala logowanie",
+   "pl"
+  ],
+  [
+   "NIE DZIALA LOGOWANIE",
+   "pl"
+  ],
+  [
+   "Czy moge zmienic adres dostawy?",
+   "pl"
+  ],
+  [
+   "Mam problem z faktura",
+   "pl"
+  ],
+  [
+   "Prosze o kontakt",
+   "pl"
+  ],
+  [
+   "to jest pilne",
+   "pl"
+  ],
+  [
+   "Czego dotyczy zgłoszenie?",
+   "pl"
+  ],
+  [
+   "Klient zgłasza, że nie działa logowanie do konta",
+   "pl"
+  ],
+  [
+   "The customer cannot log in to the account",
+   "en"
+  ],
+  [
+   "App logs me out every few minutes on iPhone.",
+   "en"
+  ],
+  [
+   "i cant login",
+   "en"
+  ],
+  [
+   "Please do",
+   "en"
+  ],
+  [
+   "Why do I have to do this?",
+   "en"
+  ],
+  [
+   "ACME Co. invoice",
+   "en"
+  ],
+  [
+   "Order nr 123 w/o invoice",
+   "en"
+  ],
+  [
+   "PO 12345 not received",
+   "en"
+  ],
+  [
+   "Meeting in Kraków",
+   "en"
+  ],
+  [
+   "The customer from Łódź cannot log in",
+   "en"
+  ],
+  [
+   "Login broken",
+   "en"
+  ],
+  [
+   "niejest jestnie",
+   "en"
+  ],
+  [
+   "nie_dziala",
+   "en"
+  ],
+  [
+   "nie2 sie3",
+   "en"
+  ],
+  [
+   "w_z na-co",
+   "pl"
+  ],
+  [
+   "Ćma i ŻUBR",
+   "pl"
+  ],
+  [
+   "I I",
+   "en"
+  ],
+  [
+   "I/O na/po",
+   "en"
+  ],
+  [
+   "nie",
+   "pl"
+  ],
+  [
+   "nie nie",
+   "pl"
+  ],
+  [
+   "NIE NIE",
+   "pl"
+  ],
+  [
+   "nie/x nie/x",
+   "pl"
+  ],
+  [
+   "xnie niex",
+   "en"
+  ],
+  [
+   "się",
+   "pl"
+  ],
+  [
+   "się się",
+   "pl"
+  ],
+  [
+   "SIĘ SIĘ",
+   "pl"
+  ],
+  [
+   "się/x się/x",
+   "pl"
+  ],
+  [
+   "xsię sięx",
+   "pl"
+  ],
+  [
+   "sie",
+   "pl"
+  ],
+  [
+   "sie sie",
+   "pl"
+  ],
+  [
+   "SIE SIE",
+   "pl"
+  ],
+  [
+   "sie/x sie/x",
+   "pl"
+  ],
+  [
+   "xsie siex",
+   "en"
+  ],
+  [
+   "jest",
+   "pl"
+  ],
+  [
+   "jest jest",
+   "pl"
+  ],
+  [
+   "JEST JEST",
+   "pl"
+  ],
+  [
+   "jest/x jest/x",
+   "pl"
+  ],
+  [
+   "xjest jestx",
+   "en"
+  ],
+  [
+   "są",
+   "pl"
+  ],
+  [
+   "są są",
+   "pl"
+  ],
+  [
+   "SĄ SĄ",
+   "pl"
+  ],
+  [
+   "są/x są/x",
+   "pl"
+  ],
+  [
+   "xsą sąx",
+   "pl"
+  ],
+  [
+   "że",
+   "pl"
+  ],
+  [
+   "że że",
+   "pl"
+  ],
+  [
+   "ŻE ŻE",
+   "pl"
+  ],
+  [
+   "że/x że/x",
+   "pl"
+  ],
+  [
+   "xże żex",
+   "pl"
+  ],
+  [
+   "ze",
+   "pl"
+  ],
+  [
+   "ze ze",
+   "pl"
+  ],
+  [
+   "ZE ZE",
+   "pl"
+  ],
+  [
+   "ze/x ze/x",
+   "pl"
+  ],
+  [
+   "xze zex",
+   "en"
+  ],
+  [
+   "jak",
+   "pl"
+  ],
+  [
+   "jak jak",
+   "pl"
+  ],
+  [
+   "JAK JAK",
+   "pl"
+  ],
+  [
+   "jak/x jak/x",
+   "pl"
+  ],
+  [
+   "xjak jakx",
+   "en"
+  ],
+  [
+   "czy",
+   "pl"
+  ],
+  [
+   "czy czy",
+   "pl"
+  ],
+  [
+   "CZY CZY",
+   "pl"
+  ],
+  [
+   "czy/x czy/x",
+   "pl"
+  ],
+  [
+   "xczy czyx",
+   "en"
+  ],
+  [
+   "mnie",
+   "pl"
+  ],
+  [
+   "mnie mnie",
+   "pl"
+  ],
+  [
+   "MNIE MNIE",
+   "pl"
+  ],
+  [
+   "mnie/x mnie/x",
+   "pl"
+  ],
+  [
+   "xmnie mniex",
+   "en"
+  ],
+  [
+   "mam",
+   "pl"
+  ],
+  [
+   "mam mam",
+   "pl"
+  ],
+  [
+   "MAM MAM",
+   "pl"
+  ],
+  [
+   "mam/x mam/x",
+   "pl"
+  ],
+  [
+   "xmam mamx",
+   "en"
+  ],
+  [
+   "mogę",
+   "pl"
+  ],
+  [
+   "mogę mogę",
+   "pl"
+  ],
+  [
+   "MOGĘ MOGĘ",
+   "pl"
+  ],
+  [
+   "mogę/x mogę/x",
+   "pl"
+  ],
+  [
+   "xmogę mogęx",
+   "pl"
+  ],
+  [
+   "moge",
+   "pl"
+  ],
+  [
+   "moge moge",
+   "pl"
+  ],
+  [
+   "MOGE MOGE",
+   "pl"
+  ],
+  [
+   "moge/x moge/x",
+   "pl"
+  ],
+  [
+   "xmoge mogex",
+   "en"
+  ],
+  [
+   "dla",
+   "pl"
+  ],
+  [
+   "dla dla",
+   "pl"
+  ],
+  [
+   "DLA DLA",
+   "pl"
+  ],
+  [
+   "dla/x dla/x",
+   "pl"
+  ],
+  [
+   "xdla dlax",
+   "en"
+  ],
+  [
+   "przez",
+   "pl"
+  ],
+  [
+   "przez przez",
+   "pl"
+  ],
+  [
+   "PRZEZ PRZEZ",
+   "pl"
+  ],
+  [
+   "przez/x przez/x",
+   "pl"
+  ],
+  [
+   "xprzez przezx",
+   "en"
+  ],
+  [
+   "już",
+   "pl"
+  ],
+  [
+   "już już",
+   "pl"
+  ],
+  [
+   "JUŻ JUŻ",
+   "pl"
+  ],
+  [
+   "już/x już/x",
+   "pl"
+  ],
+  [
+   "xjuż jużx",
+   "pl"
+  ],
+  [
+   "juz",
+   "pl"
+  ],
+  [
+   "juz juz",
+   "pl"
+  ],
+  [
+   "JUZ JUZ",
+   "pl"
+  ],
+  [
+   "juz/x juz/x",
+   "pl"
+  ],
+  [
+   "xjuz juzx",
+   "en"
+  ],
+  [
+   "ale",
+   "pl"
+  ],
+  [
+   "ale ale",
+   "pl"
+  ],
+  [
+   "ALE ALE",
+   "pl"
+  ],
+  [
+   "ale/x ale/x",
+   "pl"
+  ],
+  [
+   "xale alex",
+   "en"
+  ],
+  [
+   "bo",
+   "pl"
+  ],
+  [
+   "bo bo",
+   "pl"
+  ],
+  [
+   "BO BO",
+   "pl"
+  ],
+  [
+   "bo/x bo/x",
+   "pl"
+  ],
+  [
+   "xbo box",
+   "en"
+  ],
+  [
+   "też",
+   "pl"
+  ],
+  [
+   "też też",
+   "pl"
+  ],
+  [
+   "TEŻ TEŻ",
+   "pl"
+  ],
+  [
+   "też/x też/x",
+   "pl"
+  ],
+  [
+   "xteż teżx",
+   "pl"
+  ],
+  [
+   "tez",
+   "pl"
+  ],
+  [
+   "tez tez",
+   "pl"
+  ],
+  [
+   "TEZ TEZ",
+   "pl"
+  ],
+  [
+   "tez/x tez/x",
+   "pl"
+  ],
+  [
+   "xtez tezx",
+   "en"
+  ],
+  [
+   "jestem",
+   "pl"
+  ],
+  [
+   "jestem jestem",
+   "pl"
+  ],
+  [
+   "JESTEM JESTEM",
+   "pl"
+  ],
+  [
+   "jestem/x jestem/x",
+   "pl"
+  ],
+  [
+   "xjestem jestemx",
+   "en"
+  ],
+  [
+   "mój",
+   "pl"
+  ],
+  [
+   "mój mój",
+   "pl"
+  ],
+  [
+   "MÓJ MÓJ",
+   "pl"
+  ],
+  [
+   "mój/x mój/x",
+   "pl"
+  ],
+  [
+   "xmój mójx",
+   "pl"
+  ],
+  [
+   "moj",
+   "pl"
+  ],
+  [
+   "moj moj",
+   "pl"
+  ],
+  [
+   "MOJ MOJ",
+   "pl"
+  ],
+  [
+   "moj/x moj/x",
+   "pl"
+  ],
+  [
+   "xmoj mojx",
+   "en"
+  ],
+  [
+   "moje",
+   "pl"
+  ],
+  [
+   "moje moje",
+   "pl"
+  ],
+  [
+   "MOJE MOJE",
+   "pl"
+  ],
+  [
+   "moje/x moje/x",
+   "pl"
+  ],
+  [
+   "xmoje mojex",
+   "en"
+  ],
+  [
+   "moim",
+   "pl"
+  ],
+  [
+   "moim moim",
+   "pl"
+  ],
+  [
+   "MOIM MOIM",
+   "pl"
+  ],
+  [
+   "moim/x moim/x",
+   "pl"
+  ],
+  [
+   "xmoim moimx",
+   "en"
+  ],
+  [
+   "kiedy",
+   "pl"
+  ],
+  [
+   "kiedy kiedy",
+   "pl"
+  ],
+  [
+   "KIEDY KIEDY",
+   "pl"
+  ],
+  [
+   "kiedy/x kiedy/x",
+   "pl"
+  ],
+  [
+   "xkiedy kiedyx",
+   "en"
+  ],
+  [
+   "dlaczego",
+   "pl"
+  ],
+  [
+   "dlaczego dlaczego",
+   "pl"
+  ],
+  [
+   "DLACZEGO DLACZEGO",
+   "pl"
+  ],
+  [
+   "dlaczego/x dlaczego/x",
+   "pl"
+  ],
+  [
+   "xdlaczego dlaczegox",
+   "en"
+  ],
+  [
+   "proszę",
+   "pl"
+  ],
+  [
+   "proszę proszę",
+   "pl"
+  ],
+  [
+   "PROSZĘ PROSZĘ",
+   "pl"
+  ],
+  [
+   "proszę/x proszę/x",
+   "pl"
+  ],
+  [
+   "xproszę proszęx",
+   "pl"
+  ],
+  [
+   "prosze",
+   "pl"
+  ],
+  [
+   "prosze prosze",
+   "pl"
+  ],
+  [
+   "PROSZE PROSZE",
+   "pl"
+  ],
+  [
+   "prosze/x prosze/x",
+   "pl"
+  ],
+  [
+   "xprosze proszex",
+   "en"
+  ],
+  [
+   "w",
+   "pl"
+  ],
+  [
+   "w w",
+   "pl"
+  ],
+  [
+   "W W",
+   "en"
+  ],
+  [
+   "w/x w/x",
+   "en"
+  ],
+  [
+   "xw wx",
+   "en"
+  ],
+  [
+   "z",
+   "pl"
+  ],
+  [
+   "z z",
+   "pl"
+  ],
+  [
+   "Z Z",
+   "en"
+  ],
+  [
+   "z/x z/x",
+   "en"
+  ],
+  [
+   "xz zx",
+   "en"
+  ],
+  [
+   "na",
+   "pl"
+  ],
+  [
+   "na na",
+   "pl"
+  ],
+  [
+   "NA NA",
+   "en"
+  ],
+  [
+   "na/x na/x",
+   "en"
+  ],
+  [
+   "xna nax",
+   "en"
+  ],
+  [
+   "co",
+   "pl"
+  ],
+  [
+   "co co",
+   "pl"
+  ],
+  [
+   "CO CO",
+   "en"
+  ],
+  [
+   "co/x co/x",
+   "en"
+  ],
+  [
+   "xco cox",
+   "en"
+  ],
+  [
+   "od",
+   "pl"
+  ],
+  [
+   "od od",
+   "pl"
+  ],
+  [
+   "OD OD",
+   "en"
+  ],
+  [
+   "od/x od/x",
+   "en"
+  ],
+  [
+   "xod odx",
+   "en"
+  ],
+  [
+   "po",
+   "pl"
+  ],
+  [
+   "po po",
+   "pl"
+  ],
+  [
+   "PO PO",
+   "en"
+  ],
+  [
+   "po/x po/x",
+   "en"
+  ],
+  [
+   "xpo pox",
+   "en"
+  ],
+  [
+   "mi",
+   "pl"
+  ],
+  [
+   "mi mi",
+   "pl"
+  ],
+  [
+   "MI MI",
+   "en"
+  ],
+  [
+   "mi/x mi/x",
+   "en"
+  ],
+  [
+   "xmi mix",
+   "en"
+  ],
+  [
+   "the",
+   "en"
+  ],
+  [
+   "the the",
+   "en"
+  ],
+  [
+   "THE THE",
+   "en"
+  ],
+  [
+   "the/x the/x",
+   "en"
+  ],
+  [
+   "xthe thex",
+   "en"
+  ],
+  [
+   "and",
+   "en"
+  ],
+  [
+   "and and",
+   "en"
+  ],
+  [
+   "AND AND",
+   "en"
+  ],
+  [
+   "and/x and/x",
+   "en"
+  ],
+  [
+   "xand andx",
+   "en"
+  ],
+  [
+   "is",
+   "en"
+  ],
+  [
+   "is is",
+   "en"
+  ],
+  [
+   "IS IS",
+   "en"
+  ],
+  [
+   "is/x is/x",
+   "en"
+  ],
+  [
+   "xis isx",
+   "en"
+  ],
+  [
+   "are",
+   "en"
+  ],
+  [
+   "are are",
+   "en"
+  ],
+  [
+   "ARE ARE",
+   "en"
+  ],
+  [
+   "are/x are/x",
+   "en"
+  ],
+  [
+   "xare arex",
+   "en"
+  ],
+  [
+   "of",
+   "en"
+  ],
+  [
+   "of of",
+   "en"
+  ],
+  [
+   "OF OF",
+   "en"
+  ],
+  [
+   "of/x of/x",
+   "en"
+  ],
+  [
+   "xof ofx",
+   "en"
+  ],
+  [
+   "my",
+   "en"
+  ],
+  [
+   "my my",
+   "en"
+  ],
+  [
+   "MY MY",
+   "en"
+  ],
+  [
+   "my/x my/x",
+   "en"
+  ],
+  [
+   "xmy myx",
+   "en"
+  ],
+  [
+   "it",
+   "en"
+  ],
+  [
+   "it it",
+   "en"
+  ],
+  [
+   "IT IT",
+   "en"
+  ],
+  [
+   "it/x it/x",
+   "en"
+  ],
+  [
+   "xit itx",
+   "en"
+  ],
+  [
+   "in",
+   "en"
+  ],
+  [
+   "in in",
+   "en"
+  ],
+  [
+   "IN IN",
+   "en"
+  ],
+  [
+   "in/x in/x",
+   "en"
+  ],
+  [
+   "xin inx",
+   "en"
+  ],
+  [
+   "for",
+   "en"
+  ],
+  [
+   "for for",
+   "en"
+  ],
+  [
+   "FOR FOR",
+   "en"
+  ],
+  [
+   "for/x for/x",
+   "en"
+  ],
+  [
+   "xfor forx",
+   "en"
+  ],
+  [
+   "not",
+   "en"
+  ],
+  [
+   "not not",
+   "en"
+  ],
+  [
+   "NOT NOT",
+   "en"
+  ],
+  [
+   "not/x not/x",
+   "en"
+  ],
+  [
+   "xnot notx",
+   "en"
+  ],
+  [
+   "this",
+   "en"
+  ],
+  [
+   "this this",
+   "en"
+  ],
+  [
+   "THIS THIS",
+   "en"
+  ],
+  [
+   "this/x this/x",
+   "en"
+  ],
+  [
+   "xthis thisx",
+   "en"
+  ],
+  [
+   "that",
+   "en"
+  ],
+  [
+   "that that",
+   "en"
+  ],
+  [
+   "THAT THAT",
+   "en"
+  ],
+  [
+   "that/x that/x",
+   "en"
+  ],
+  [
+   "xthat thatx",
+   "en"
+  ],
+  [
+   "with",
+   "en"
+  ],
+  [
+   "with with",
+   "en"
+  ],
+  [
+   "WITH WITH",
+   "en"
+  ],
+  [
+   "with/x with/x",
+   "en"
+  ],
+  [
+   "xwith withx",
+   "en"
+  ],
+  [
+   "you",
+   "en"
+  ],
+  [
+   "you you",
+   "en"
+  ],
+  [
+   "YOU YOU",
+   "en"
+  ],
+  [
+   "you/x you/x",
+   "en"
+  ],
+  [
+   "xyou youx",
+   "en"
+  ],
+  [
+   "your",
+   "en"
+  ],
+  [
+   "your your",
+   "en"
+  ],
+  [
+   "YOUR YOUR",
+   "en"
+  ],
+  [
+   "your/x your/x",
+   "en"
+  ],
+  [
+   "xyour yourx",
+   "en"
+  ],
+  [
+   "me",
+   "en"
+  ],
+  [
+   "me me",
+   "en"
+  ],
+  [
+   "ME ME",
+   "en"
+  ],
+  [
+   "me/x me/x",
+   "en"
+  ],
+  [
+   "xme mex",
+   "en"
+  ],
+  [
+   "can",
+   "en"
+  ],
+  [
+   "can can",
+   "en"
+  ],
+  [
+   "CAN CAN",
+   "en"
+  ],
+  [
+   "can/x can/x",
+   "en"
+  ],
+  [
+   "xcan canx",
+   "en"
+  ],
+  [
+   "cannot",
+   "en"
+  ],
+  [
+   "cannot cannot",
+   "en"
+  ],
+  [
+   "CANNOT CANNOT",
+   "en"
+  ],
+  [
+   "cannot/x cannot/x",
+   "en"
+  ],
+  [
+   "xcannot cannotx",
+   "en"
+  ],
+  [
+   "does",
+   "en"
+  ],
+  [
+   "does does",
+   "en"
+  ],
+  [
+   "DOES DOES",
+   "en"
+  ],
+  [
+   "does/x does/x",
+   "en"
+  ],
+  [
+   "xdoes doesx",
+   "en"
+  ],
+  [
+   "please",
+   "en"
+  ],
+  [
+   "please please",
+   "en"
+  ],
+  [
+   "PLEASE PLEASE",
+   "en"
+  ],
+  [
+   "please/x please/x",
+   "en"
+  ],
+  [
+   "xplease pleasex",
+   "en"
+  ],
+  [
+   "have",
+   "en"
+  ],
+  [
+   "have have",
+   "en"
+  ],
+  [
+   "HAVE HAVE",
+   "en"
+  ],
+  [
+   "have/x have/x",
+   "en"
+  ],
+  [
+   "xhave havex",
+   "en"
+  ],
+  [
+   "has",
+   "en"
+  ],
+  [
+   "has has",
+   "en"
+  ],
+  [
+   "HAS HAS",
+   "en"
+  ],
+  [
+   "has/x has/x",
+   "en"
+  ],
+  [
+   "xhas hasx",
+   "en"
+  ],
+  [
+   "was",
+   "en"
+  ],
+  [
+   "was was",
+   "en"
+  ],
+  [
+   "WAS WAS",
+   "en"
+  ],
+  [
+   "was/x was/x",
+   "en"
+  ],
+  [
+   "xwas wasx",
+   "en"
+  ],
+  [
+   "be",
+   "en"
+  ],
+  [
+   "be be",
+   "en"
+  ],
+  [
+   "BE BE",
+   "en"
+  ],
+  [
+   "be/x be/x",
+   "en"
+  ],
+  [
+   "xbe bex",
+   "en"
+  ],
+  [
+   "how",
+   "en"
+  ],
+  [
+   "how how",
+   "en"
+  ],
+  [
+   "HOW HOW",
+   "en"
+  ],
+  [
+   "how/x how/x",
+   "en"
+  ],
+  [
+   "xhow howx",
+   "en"
+  ],
+  [
+   "why",
+   "en"
+  ],
+  [
+   "why why",
+   "en"
+  ],
+  [
+   "WHY WHY",
+   "en"
+  ],
+  [
+   "why/x why/x",
+   "en"
+  ],
+  [
+   "xwhy whyx",
+   "en"
+  ],
+  [
+   "where",
+   "en"
+  ],
+  [
+   "where where",
+   "en"
+  ],
+  [
+   "WHERE WHERE",
+   "en"
+  ],
+  [
+   "where/x where/x",
+   "en"
+  ],
+  [
+   "xwhere wherex",
+   "en"
+  ],
+  [
+   "what",
+   "en"
+  ],
+  [
+   "what what",
+   "en"
+  ],
+  [
+   "WHAT WHAT",
+   "en"
+  ],
+  [
+   "what/x what/x",
+   "en"
+  ],
+  [
+   "xwhat whatx",
+   "en"
+  ],
+  [
+   "when",
+   "en"
+  ],
+  [
+   "when when",
+   "en"
+  ],
+  [
+   "WHEN WHEN",
+   "en"
+  ],
+  [
+   "when/x when/x",
+   "en"
+  ],
+  [
+   "xwhen whenx",
+   "en"
+  ],
+  [
+   "I",
+   "en"
+  ],
+  [
+   "I/x I/x",
+   "en"
+  ],
+  [
+   "xI Ix",
    "en"
   ]
  ],

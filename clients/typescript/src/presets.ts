@@ -1,4 +1,4 @@
-// Generated from basal/presets.py (test/presets_fixture.json checks that they agree). Edit the Python file, not this one.
+// Generated from basal/presets.py by scripts/ts_presets.py (test/presets_fixture.json checks that they agree). Edit the Python file, not this one.
 import type { GuardPolicy, Questions } from "./types.js";
 
 export const PRESETS = {

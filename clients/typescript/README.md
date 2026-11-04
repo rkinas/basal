@@ -77,5 +77,7 @@ BASAL_PYTHON=/path/to/env/bin/python npm test
 ```
 
 The stub reads the probabilities from weights written at the end of each option (`"first ~0.6"`); the tests use that
-to know the answer they expect. `test/presets_fixture.json` holds the Python presets, to check that
-`src/presets.ts` (generated from `basal/presets.py`) has not drifted.
+to know the answer they expect. `python scripts/ts_presets.py` writes `src/presets.ts` and `test/presets_fixture.json`
+from `basal/presets.py`: the fixture holds the Python presets and the answers of its `lang_of`, `guard` and `route` on
+shared cases, which these tests compare `langOf`, `guard` and `route` with. A Python test
+(`tests/test_ts_presets.py`) fails when a change of `basal/presets.py` has not been regenerated into both files.
