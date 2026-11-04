@@ -3216,7 +3216,10 @@ class MPSBackend(GraphBackend):
 
     @torch.no_grad()
     def run_shared(self, groups, policy=None):
-        if not self.shared:
+        # Gemma 4 (basal-omni): the engine's own forward, as --mode eager runs it: its masks per layer type keep the
+        # sliding window (one trie mask through the transformers forward reaches every layer as it is), and each
+        # group's shared prefix is computed once
+        if not self.shared or self.g4 is not None:
             return EagerBackend.run_shared(self, groups)
         units = self._units(groups)
         probs = [None] * len(units)
