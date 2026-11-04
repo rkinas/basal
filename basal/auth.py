@@ -27,7 +27,11 @@ class ApiKeys:
             if signature == self._signature and now - self._loaded_at <= 2:
                 return self._records
             from .textio import read_text
-            data = json.loads(read_text(self.path))
+            try:
+                data = json.loads(read_text(self.path))
+            except json.JSONDecodeError:  # the file is being rewritten in place: read it once more after the write
+                time.sleep(0.05)
+                data = json.loads(read_text(self.path))
             records = data["keys"]
             if not isinstance(records, list) or any(not isinstance(k, dict) or
                     not isinstance(k.get("name"), str) or not isinstance(k.get("sha256"), str) or
