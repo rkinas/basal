@@ -595,6 +595,12 @@ def check_calibration(cal, fmt, path):
         for b in bs:
             if not re.fullmatch(r"\d+-\d+", b) or int(b.split("-")[0]) > int(b.split("-")[1]):
                 raise SystemExit(f"{path}: temperature_per_bucket[{t!r}] has a bad bucket {b!r} (\"lo-hi\", e.g. \"2-10\")")
+    temps = [(f"temperature_per_prim[{t!r}]", T) for t, T in (cal.get("temperature_per_prim") or {}).items()]
+    temps += [(f"temperature_per_bucket[{t!r}][{b!r}]", T) for t, bs in (cal.get("temperature_per_bucket") or {}).items()
+              for b, T in bs.items()]
+    for where, T in temps:  # temper() divides by T: 0 or NaN gives NaN probabilities (HTTP 500), T < 0 inverts the ranking
+        if isinstance(T, bool) or not isinstance(T, (int, float)) or not math.isfinite(T) or T <= 0:
+            raise SystemExit(f"{path}: {where} is {T!r}, a temperature is a finite number above 0")
     if cal.get("prompt", fmt) != fmt:
         raise SystemExit(f"{path} was fitted for prompt format {cal['prompt']}, the model uses format {fmt}")
 
