@@ -1917,7 +1917,7 @@ class Server:
             question, options = q["branches"][b[1]]
             for perm, lid in zip(b[2], b[4]):
                 msgs.append(media_messages(q["state"], question, [options[c] for c in perm], m["kinds"], q["lang"],
-                                           self.fmt))
+                                           self.fmt, self.tok))
                 ids.append(lid)
                 where.append(j)
         limit = getattr(self, "context", None)

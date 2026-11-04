@@ -341,7 +341,7 @@ def render(tok, state, question, options, lang=None, fmt=1, layout="canonical"):
     return text + PREFILL
 
 
-def media_messages(state, question, options, kinds, lang=None, fmt=2):
+def media_messages(state, question, options, kinds, lang=None, fmt=2, tok=None):
     """Chat messages of one option order with media where the state goes (basal-omni; basal/media.py): the user turn
     is the template's head ("Stan:\n" / "State:\n"), one image / audio part per entry of `kinds`, then the state text
     (after a newline, when there is one) and the rest of the template; the prompt the basal-omni evaluation reads
@@ -350,7 +350,8 @@ def media_messages(state, question, options, kinds, lang=None, fmt=2):
     if fmt != 1 and not 2 <= len(options) <= len(f["codes"]):
         raise ValueError(f"{len(options)} options (supported: 2..{len(f['codes'])})")
     t = f["templates"][lang or lang_of(state + question)]
-    opts = "\n".join(f"{f['codes'][k]}. {o}" for k, o in enumerate(options))
+    state, question = defang(tok, state), defang(tok, question)
+    opts = "\n".join(f"{f['codes'][k]}. {option_text(o, tok)}" for k, o in enumerate(options))
     head, tail = t["user"].split("{state}")
     parts = [{"type": "text", "text": head}] + [{"type": k} for k in kinds]
     parts.append({"type": "text", "text": ("\n" + state if state else "") + tail.format(q=question, opts=opts)})
