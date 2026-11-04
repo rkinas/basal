@@ -106,9 +106,10 @@ def compare(ref, got):
     keys = list(ref)
     r, g = [ref[k] for k in keys], [got.get(k, 0.0) for k in keys]
     a, b = max(range(len(r)), key=r.__getitem__), max(range(len(g)), key=g.__getitem__)
-    hi = sorted(r, reverse=True)
+    order = sorted(range(len(r)), key=r.__getitem__, reverse=True)
     dps = [abs(x - y) for x, y in zip(r, g)]
-    return a == b, a == b or hi[0] - hi[1] < TIE, max(dps), sum(dps), len(keys)
+    # near tie: the reference's top two are within TIE and the server's top is the other one of the two
+    return a == b, a == b or (len(r) > 1 and r[order[0]] - r[order[1]] < TIE and b == order[1]), max(dps), sum(dps), len(keys)
 
 
 def check(url, reference, gate, note):
