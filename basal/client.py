@@ -14,8 +14,10 @@ response (with "usage"). Keyword options of a method go into the question ("opti
 request fields ("facts", "lang", "think", "media", ...) are client defaults or keywords of decide.
 
 Errors follow the server's status codes, all a BasalError (a RuntimeError) with .status: InvalidRequest (422, change the
-request), OutOfMemory (503, the GPU ran out of memory; retried `retries` times, waiting backoff, 2 x backoff, ...) and
-ServerError (500 and any other status).
+request), OutOfMemory (503, the GPU ran out of memory; retried `retries` times, waiting backoff, 2 x backoff, ...),
+NotReady (an OutOfMemory: a 503 of a server still starting, or of a router with no replica ready; retried the same
+way), AuthError (a ServerError: 401 / 403, a missing, wrong or not permitted API key) and ServerError (500 and any
+other status). The message is the server's error text (an OpenAI-style error: "<type>: <message>").
 
 It also talks to other servers of the same /v1/systemone request shape, such as vLLM's structured-diffusion example
 (examples/features/structured_diffusion): `api_key` sends "Authorization: Bearer <key>", choice criteria given as a
@@ -56,12 +58,34 @@ class ServerError(BasalError):
     """500 or any other status."""
 
 
+class AuthError(ServerError):
+    """401 / 403: the API key is missing, wrong, or not allowed this route (a ServerError, as these were before)."""
+
+
+class NotReady(OutOfMemory):
+    """503 from a server still loading its model ({"status": "starting"}) or a router with no replica ready: the same
+    request succeeds later. An OutOfMemory, as it was before, and retried the same way."""
+
+
 def _error(r):
     try:
-        message = r.json().get("error", r.text)
-    except (ValueError, AttributeError):
-        message = r.text
-    cls = {422: InvalidRequest, 503: OutOfMemory}.get(r.status_code, ServerError)
+        data = r.json()
+    except ValueError:
+        data = None
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):  # OpenAI-style: {"error": {"message", "type", ...}}
+        message = err.get("message") or r.text
+        message = f"{err['type']}: {message}" if err.get("type") else message
+    else:
+        message = r.text if err is None else err
+    starting = isinstance(data, dict) and data.get("status") == "starting" or (
+        isinstance(err, str) and "no basal replica is ready" in err)
+    if r.status_code in (401, 403):
+        cls = AuthError
+    elif r.status_code == 503:
+        cls = NotReady if starting else OutOfMemory
+    else:
+        cls = {422: InvalidRequest}.get(r.status_code, ServerError)
     return cls(r.status_code, message)
 
 

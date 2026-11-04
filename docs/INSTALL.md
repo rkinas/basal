@@ -152,8 +152,9 @@ async def main():
 asyncio.run(main())
 ```
 
-Errors are `InvalidRequest` (422), `OutOfMemory` (503) and `ServerError` (500), all `BasalError` with `.status` (a
-`RuntimeError`, as before). `http=` takes your own `httpx.Client` / `httpx.AsyncClient` (headers, proxies, transport).
+Errors are `InvalidRequest` (422), `OutOfMemory` (503), `NotReady` (an `OutOfMemory`: the 503 of a server still
+starting or a router with no replica ready, retried the same way), `AuthError` (a `ServerError`: 401 / 403) and
+`ServerError` (500 and any other status), all `BasalError` with `.status` (a `RuntimeError`, as before). `http=` takes your own `httpx.Client` / `httpx.AsyncClient` (headers, proxies, transport).
 
 ### FP8 checkpoints (basal engine)
 
