@@ -355,6 +355,8 @@ def act_spec(name, q, outcomes):
         w = float(costs["wrong"])
         C = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
         if "defer" in costs:
+            if "defer" in outcomes:
+                raise RequestError(f"question {name!r}: an outcome named 'defer' clashes with the defer action of costs")
             C["defer"] = {z: float(costs["defer"]) for z in outcomes}
         defer = "defer" if "defer" in costs else None
         if q.get("defer_action") is not None and q["defer_action"] != defer:  # the short form has one defer action: "defer"
