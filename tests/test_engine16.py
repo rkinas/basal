@@ -575,3 +575,20 @@ def test_many_long_branches_are_split():
     assert len(units) > 1
     assert all(len(pk[0]) - pk[2].index(1) <= 40 for pk, *_ in units if 1 in pk[2])
     check(be, [(toks, [[10, 11]] * 6)])
+
+
+def test_long_warm_up_runs_after_one_forward_is_set(monkeypatch):
+    """warm() sets one_forward from the memory its graphs left before it runs the long shapes, so they warm up the path a
+    request of their length takes (one forward, not chunks)."""
+    be = Stub(tiny())
+    seen = []
+    monkeypatch.setattr(Stub, "_one_forward_tokens", lambda self: 1000)
+    monkeypatch.setattr(Stub, "_capture_deferred", lambda self: None)
+    real = Stub.run_shared
+
+    def spy(self, groups, *a, **kw):
+        seen.append(self.one_forward)
+        return real(self, groups, *a, **kw)
+    monkeypatch.setattr(Stub, "run_shared", spy)
+    be.warm()
+    assert seen and all(n == 1000 for n in seen)

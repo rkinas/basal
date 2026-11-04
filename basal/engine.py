@@ -1481,8 +1481,9 @@ class GraphBackend(EagerBackend):
         self.pool = torch.cuda.graph_pool_handle()
         self.graphs = {}
         if warm:
-            self.warm()
-        self.one_forward = self._one_forward_tokens()
+            self.warm()  # (sets one_forward before its long-shape warm-up)
+        if not (warm and self.__dict__.get("one_forward")):
+            self.one_forward = self._one_forward_tokens()
         self._shape_line()
 
     def _gemma_init(self, kernels, quant, compile, merge, fp8_scaling="row", fp8_bf16_layers=0, nvfp4_amax=None,
@@ -1781,6 +1782,9 @@ class GraphBackend(EagerBackend):
         cfg = self.model.config
         cfg = cfg.get_text_config() if hasattr(cfg, "get_text_config") else cfg  # Gemma 4: the decoder's settings
         if getattr(cfg, "max_position_embeddings", 0) >= n + 8:
+            # the longest state run as one forward, from the memory the graphs left: set first, so the long shapes warm
+            # up the path a request of their length takes (one forward, not chunks)
+            self.one_forward = self._one_forward_tokens()
             root = [self.tok.pad_token_id] * n
             self.run_shared([([root + [5]], [[10, 11]])] + ([([root + [5, 6], root + [6, 5]], [[10, 11], [10, 11]])]
                                                              if self.shared else []))
