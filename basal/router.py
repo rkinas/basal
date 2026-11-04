@@ -131,6 +131,85 @@ PLAIN = ("coverage", "max_error", "evidence", "multi")  # question fields whose 
 CERTIFIED = ("abstain", "max_error", "answer_set", "coverage", "coverage_note", "calibration")  # one model's calibration
 
 
+def subset(questions, names):
+    """The questions named in `names`, for a request that asks only some of them again. An ask_if / depends_on that names a
+    question outside the subset is dropped from the copy: the server refuses a request with an unknown name (HTTP 422),
+    which ended the whole level. The gates are applied again over the final answers (gate_answers)."""
+    names = set(names)
+    out = {}
+    for q in questions:
+        if q not in names:
+            continue
+        spec = questions[q]
+        if isinstance(spec, dict) and ("ask_if" in spec or "depends_on" in spec):
+            spec = dict(spec)
+            if isinstance(spec.get("ask_if"), dict):
+                spec["ask_if"] = {x: v for x, v in spec["ask_if"].items() if x in names}
+            if isinstance(spec.get("depends_on"), list):
+                spec["depends_on"] = [x for x in spec["depends_on"] if x in names]
+            for k in ("ask_if", "depends_on"):
+                if k in spec and not spec[k]:
+                    del spec[k]
+        out[q] = spec
+    return out
+
+
+def gate_open(spec, answer, values):
+    """Does the answer of a choice / noul / score question satisfy an ask_if list of values (as basal-serve decides it:
+    noul by the larger of true / false, choice by its option key, score by its top level, a level named by key or text)?
+    A skipped question (null) does not. What this cannot tell (another type, a value it cannot map) leaves the gate open."""
+    if not isinstance(answer, dict):
+        return False
+    kind = spec.get("type", "choice") if isinstance(spec, dict) else None
+    p = answer.get("probabilities")
+    if kind == "noul" and isinstance(p, dict) and "true" in p and "false" in p:
+        got = "true" if p["true"] >= p["false"] else "false"
+        ids = {"yes": "true", "true": "true", "no": "false", "false": "false"}
+        want = {ids.get(("true" if v else "false") if isinstance(v, bool) else v) for v in values}
+    elif kind == "choice" and answer.get("choice") is not None:
+        got, want = answer["choice"], set(values)
+    elif kind == "score" and isinstance(p, dict) and p:
+        got = max(p, key=p.get)
+        crit = spec.get("criteria") or spec.get("levels") or []
+        text = {str(v): str(i) for i, v in enumerate(crit)} if isinstance(crit, list) else {}
+        want = {v if v in p else text.get(v) for v in values}
+    else:
+        return True
+    return None in want or got in want
+
+
+def gate_answers(req, answers):
+    """ask_if again over the FINAL answers (after an escalation or a blend changed a question the gate names): a question
+    whose gate no longer holds is answered null, as basal-serve does -> the names nulled. Repeated until nothing changes,
+    because a question nulled here can be the gate of another."""
+    qs = req.get("questions") if isinstance(req, dict) else None
+    nulled = []
+    changed = isinstance(qs, dict)
+    while changed:
+        changed = False
+        for q, spec in qs.items():
+            ask = spec.get("ask_if") if isinstance(spec, dict) else None
+            if isinstance(ask, dict) and isinstance(answers.get(q), dict) and any(
+                    isinstance(vals, list) and not gate_open(qs.get(x), answers.get(x), vals) for x, vals in ask.items()):
+                answers[q] = None
+                nulled.append(q)
+                changed = True
+    return nulled
+
+
+def note_skipped(resp, names):
+    """The questions the router nulled by ask_if join usage.skipped of the response (docs/API.md: "usage.skipped names it"),
+    after those the replica named, each once."""
+    if not names or not isinstance(resp, dict):
+        return
+    usage = resp.get("usage")
+    if usage is None:
+        usage = resp["usage"] = {}
+    if isinstance(usage, dict):
+        have = usage.get("skipped") if isinstance(usage.get("skipped"), list) else []
+        usage["skipped"] = have + [q for q in dict.fromkeys(names) if q not in have]
+
+
 def blendable(question, answer):
     """A plain choice / noul / score answer (its option probabilities only) to a question without limits or evidence."""
     return (isinstance(answer, dict) and answer.get("type") in BLENDS and isinstance(answer.get("probabilities"), dict)
@@ -456,7 +535,7 @@ class Router:
             return content
         if not want:
             return content
-        sub = json.dumps(dict(req, questions={q: qs[q] for q in want})).encode()
+        sub = json.dumps(dict(req, questions=subset(qs, want))).encode()
         outs = await asyncio.gather(*(self._send(pool, path, sub, headers) for pool, _ in self.blends))
         others = []
         for (_, w), (st, c, _) in zip(self.blends, outs):
@@ -478,6 +557,7 @@ class Router:
             elif members:  # only one model answered: its answer as it is
                 a["blend"] = {"models": [members[0][1]], "weights": [members[0][0]]}
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
+        note_skipped(resp, gate_answers(req, answers))  # a blended answer can change what a question's ask_if names
         return json.dumps(resp, ensure_ascii=False).encode()
 
     async def _cascade(self, path, body, content, headers, level_out=None):
@@ -503,7 +583,7 @@ class Router:
                    and (top_probability(a) if isinstance(a, dict) else None) is not None and top_probability(a) < below]
             if not low:
                 break
-            sub = dict(req, questions={q: req["questions"][q] for q in low})
+            sub = dict(req, questions=subset(req["questions"], low))
             st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers)
             if st != 200:
                 break
@@ -517,6 +597,11 @@ class Router:
                     level[q] = k + 1
                     if k == 1:
                         done.append(q)
+        nulled = gate_answers(req, answers)  # ask_if over the final answers: a child whose gate changed is null
+        for q in nulled:
+            level.pop(q, None)
+            done = [x for x in done if x != q]
+        note_skipped(resp, nulled)
         self.answered["escalated"] += len(done)
         self.answered["first"] += sum(1 for a in answers.values() if isinstance(a, dict)) - len(done)
         for k in level.values():
