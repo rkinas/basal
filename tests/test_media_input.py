@@ -184,3 +184,18 @@ RAW = bytes([251, 255, 254, 250, 253, 252] * 40)  # its base64 has "+" and "/" (
 def test_s20_base64_as_the_tools_write_it_is_accepted(wrap):
     import base64
     assert media._raw(wrap(base64.b64encode(RAW).decode()), 0) == RAW
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+def test_s20_urlsafe_base64_without_its_padding_is_accepted(n):
+    raw = bytes([251, 255, 254, 250, 253, 252] * 40)[: 240 + n]
+    s = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    assert media._raw(s, 0) == raw and media._raw("data:image/png;base64," + s, 0) == raw
+    assert media._raw(base64.urlsafe_b64encode(raw).decode(), 0) == raw  # with the padding, as before
+
+
+def test_s20_a_broken_padding_is_still_refused():
+    with pytest.raises(ValueError, match="not valid base64"):
+        media._raw("QUJD=", 0)
+    with pytest.raises(ValueError, match="not valid base64"):
+        media._raw("QUJDR", 0)  # 5 characters can never be base64

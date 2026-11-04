@@ -47,6 +47,8 @@ def _raw(data, n):
     if data[:5].lower() == "data:" and "," in data:  # a data URL: data:<type>;base64,<payload> (the scheme is case-insensitive)
         data = data.split(",", 1)[1]
     data = "".join(data.split())  # MIME-wrapped base64 (every 76 characters) is the output of base64 tools
+    if "=" not in data and len(data) % 4 in (2, 3):  # urlsafe base64 is often sent without its padding
+        data += "=" * (4 - len(data) % 4)
     if len(data) * 3 // 4 > MAX_BYTES:
         raise ValueError(f"media {n}: more than {MAX_BYTES // (1024 * 1024)} MB")
     try:
