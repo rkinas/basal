@@ -57,7 +57,8 @@ def make_ckpt(d, seed, sharded=False, extra=None, shape=(4, 8), config=None, tok
     (d / "config.json").write_text(json.dumps(config))
     (d / "tokenizer.json").write_text(json.dumps(tokenizer))
     (d / "basal.json").write_text(json.dumps({"name": f"m{seed}", "layout": "qfirst", "prompt": prompt}))
-    for f in ("README.md", "SHA256SUMS", "evidence_head.pt", "pytorch_model.bin", "pytorch_model.bin.index.json"):
+    for f in ("README.md", "SHA256SUMS", "evidence_head.pt", "NVFP4_AMAX.json", "pytorch_model.bin",
+              "pytorch_model.bin.index.json"):
         (d / f).write_text("x")
     (d / "think").mkdir()
     (d / "think" / "x.json").write_text("{}")
@@ -229,7 +230,7 @@ def test_streamed_file_matches_save_file(tmp_path):
 def test_meta_files_and_basal_json(pair, tmp_path):
     old, new, _, _ = pair
     out = interpolate(old, new, 0.25, tmp_path / "o")
-    for f in ("README.md", "SHA256SUMS", "evidence_head.pt", "think/x.json", "pytorch_model.bin",
+    for f in ("README.md", "SHA256SUMS", "evidence_head.pt", "NVFP4_AMAX.json", "think/x.json", "pytorch_model.bin",
               "pytorch_model.bin.index.json"):
         assert not (out / f).exists(), f
     assert (out / "config.json").exists() and (out / "tokenizer.json").exists()

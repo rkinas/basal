@@ -142,7 +142,7 @@ def test_merged_model_drops_the_base_models_calibration_and_nvfp4_scales(tmp_pat
     src, out = tmp_path / "src", tmp_path / "out"
     src.mkdir(), out.mkdir()
     for name in ("tokenizer.json", "chat_template.jinja", "CALIBRATION.json", "CALIBRATION.nvfp4.json",
-                 "NVFP4_AMAX.json", "model.safetensors", "basal.json"):
+                 "NVFP4_AMAX.json", "evidence_head.pt", "model.safetensors", "basal.json"):
         (src / name).write_text("x")
     finetune.copy_side_files(src, out)
     assert sorted(f.name for f in out.iterdir()) == ["chat_template.jinja", "tokenizer.json"]
