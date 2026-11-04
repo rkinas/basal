@@ -13,6 +13,7 @@ import math
 
 from .prompt import RequestError
 
+MAX_BODY_BYTES = 256 * 2**20  # --max-body-mb: a request body (8 media items of 20 MB are ~214 MB in base64)
 MAX_DEPTH = 256  # objects and arrays nested in a request body (JSON states nest a few levels; Python's parser and
 #                  the recursive readers after it stop near 1,000, with a 500)
 
@@ -105,3 +106,49 @@ def named_options(crit, option_keys="show"):
     shown = [t if v is None or (option_keys == "hide" and t not in dup) else f"{k}: {t}"
              for (k, v), t in zip(crit.items(), texts)]
     return list(crit), shown
+
+
+def limit_body(app, max_bytes):
+    """ASGI: a request body over max_bytes answers 413 before the app reads it (its Content-Length), or as soon as more
+    of it arrived (a body sent without one: the app sees the client gone, and its answer is replaced by the 413)."""
+    async def too_large(scope, send):
+        msg = f"the request body is larger than this server's limit of {max_bytes} bytes (--max-body-mb)"
+        body = {"error": {"message": msg, "type": "invalid_request_error", "param": None, "code": "PAYLOAD_TOO_LARGE"}} \
+            if scope["path"] in ("/v1/decisions", "/decisions") else {"error": msg, "code": "PAYLOAD_TOO_LARGE"}
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"), (b"connection", b"close")]})
+        await send({"type": "http.response.body", "body": json.dumps(body).encode()})
+
+    async def limited(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+        length = dict(scope.get("headers", ())).get(b"content-length", b"")
+        if length.isdigit() and int(length) > max_bytes:
+            await too_large(scope, send)
+            return
+        seen, over = 0, False
+
+        async def counted():
+            nonlocal seen, over
+            if over:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > max_bytes:
+                    over = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def answer(message):
+            if not over:
+                await send(message)
+        try:
+            await app(scope, counted, answer)
+        except Exception:  # noqa: BLE001  (the app's error over a body it never got whole)
+            if not over:
+                raise
+        if over:
+            await too_large(scope, send)
+    return limited

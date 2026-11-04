@@ -48,6 +48,8 @@ Off by default (the replicas' answers then pass through untouched):
                                           switch); BASAL_FALLBACK_API_KEY, if set, is sent as a bearer token.
   --route SCRIPT=URL[,URL]                requests whose state is mostly in that script (latin, cyrillic, greek,
                                           arabic, hebrew, cjk) go to those replicas instead
+  --max-body-mb MB                        a request body over MB MiB (256, basal-serve's default) answers 413 before
+                                          the router reads it whole
   --replica-timeout S                     a call to a replica that has not answered in S seconds ends: the client
                                           gets 504 (a cascade level or a blend model that times out leaves the
                                           previous answers, as one that is down). Off: no deadline, as a long rank
@@ -100,7 +102,7 @@ import sys
 import time
 
 from .metrics import prometheus
-from .request import named_options, parse_body, text_of
+from .request import MAX_BODY_BYTES, limit_body, named_options, parse_body, text_of
 
 LOAD_FACTOR = 1.25
 VNODES = 64
@@ -724,9 +726,11 @@ class Router:
                  [({"script": k}, n) for k, n in sorted(self.scripts.items())])] if self.scripts else []))
 
 
-def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signal.SIGTERM), on_stop=None, ui=None):
+def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signal.SIGTERM), on_stop=None, ui=None,
+        max_body=MAX_BODY_BYTES):
     """The router's app. procs: the replicas it started (--gpus); on_stop: called at shutdown (main: Replicas.stop);
-    ui: the basal.router_ui.RouterUI of --ui on (its decision routes recorded, GET /ui/state, and the page at /ui)."""
+    ui: the basal.router_ui.RouterUI of --ui on (its decision routes recorded, GET /ui/state, and the page at /ui);
+    max_body: --max-body-mb in bytes (a larger body answers 413 before the router reads it whole, as basal-serve)."""
     from contextlib import asynccontextmanager
     poll_s = POLL_S if poll_s is None else poll_s
 
@@ -798,7 +802,8 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
     from starlette.middleware import Middleware
 
     from .auth import request_ids
-    ids = [Middleware(request_ids)]  # x-request-id on every response, passed on to the replicas
+    ids = [Middleware(request_ids),  # x-request-id on every response, passed on to the replicas
+           Middleware(limit_body, max_body)]  # (413 before a body is read whole)
     routes = [Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
               Route("/v1/decisions", post, methods=["POST"]),
               Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)]
@@ -982,6 +987,9 @@ def main(argv=None):
                     help="--escalate: questions whose top probability is under this are asked again there (default "
                          "0.8); one per --escalate, in the same order")
     ap.add_argument("--route", action="append", default=[], help="SCRIPT=URL[,URL]: states in that script go there")
+    ap.add_argument("--max-body-mb", dest="max_body_mb", type=float, default=MAX_BODY_BYTES / 2**20, metavar="MB",
+                    help="a request body over MB MiB answers 413 before the router reads it whole (basal-serve's "
+                         "default, %(default)s)")
     ap.add_argument("--replica-timeout", dest="replica_timeout", type=float, default=None,
                     help="seconds a replica has to answer a call (then 504; a cascade level or a blend model keeps the "
                          "previous answers); default: no deadline")
@@ -1012,6 +1020,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.replica_timeout is not None and not (math.isfinite(a.replica_timeout) and a.replica_timeout > 0):
         raise SystemExit("basal-router: --replica-timeout must be a number of seconds > 0")
+    if not (math.isfinite(a.max_body_mb) and a.max_body_mb > 0):
+        raise SystemExit("basal-router: --max-body-mb must be a number above 0")
     cascade = levels(a.escalate, a.escalate_below)
     first, blend = blends(a.blend, a.blend_weights, cascade)
     fallback = fallback_config(a, blend)
@@ -1051,8 +1061,8 @@ def main(argv=None):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), ended)
     try:
-        uvicorn.run(app(router, procs=procs, on_stop=replicas.stop, ui=ui), host=a.host, port=a.port,
-                    log_level="warning")
+        uvicorn.run(app(router, procs=procs, on_stop=replicas.stop, ui=ui, max_body=int(a.max_body_mb * 2**20)),
+                    host=a.host, port=a.port, log_level="warning")
     finally:
         replicas.stop()
     if router.dead:

@@ -288,6 +288,8 @@ benchmarking a GPU.
   - **Deadlines:** `--replica-timeout S` ends a call to a replica that has not answered in S seconds: the client gets
     504, and a cascade level or a blend model that times out leaves the previous answers. Off by default (a large rank
     request may need minutes); connecting to a replica is bounded by 10 s either way.
+  - **Body size:** `--max-body-mb` (256 MiB by default, as basal-serve's) answers 413 before the router reads a larger
+    body whole.
   - **API keys:** a client's key header goes on to the replicas, which check it with `--api-keys`
     ([API access](#api-access)).
   - **Replicas it starts** (`--gpus`) end with the router: each runs in its own process group, which the router
@@ -488,7 +490,8 @@ basal-serve --model Remek/basal-omni-1.0-mini --mode fast --ui on   # then open 
 
 `--ui full` also shows the requests themselves: a click on a row of the recent requests opens the request as it was
 sent and its answer (or the error). The server keeps references to the last 200 requests' bodies (images included) and
-answers in memory, with no copy and nothing on disk, and serialises one only when the page asks for it
+answers in memory, at most 256 MiB of them as sent (the oldest go first; the newest is always kept), with no copy and
+nothing on disk, and serialises one only when the page asks for it
 (`GET /ui/request/<id>`). That text is visible to whoever can open the page: on a shared host use `--api-keys`, with
 which a kept request opens only for the key that sent it or an admin key (`"admin": true`; another client's key gets
 403). `--ui on` never keeps a request's text.

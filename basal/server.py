@@ -59,7 +59,7 @@ from .textio import read_text
 from .facts import MAX_CHARS as FACTS_MAX_CHARS, inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
-from .request import check_json, named_options, request_json, text_of
+from .request import MAX_BODY_BYTES, check_json, limit_body, named_options, request_json, text_of
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, defang, lang_of, letter_ids,
                      max_options, media_messages, model_format, model_layout, model_option_isolation, model_two_way,
                      once_ids, option_tokens, reads_request, render, tokens_once)
@@ -225,7 +225,6 @@ def listed_options(name, crit):
     return {k: None for k in crit}
 
 
-MAX_BODY_BYTES = 256 * 2**20  # --max-body-mb: a request body (8 media items of 20 MB are ~214 MB in base64)
 MAX_BRANCHES = 4096  # --max-branches: questions of a request, a multi question or a tool set one per label
 MAX_REQUESTS = 1024  # --max-requests: requests in flight at once (a request beyond them: 503 with Retry-After)
 MAX_PROMPT_MB = 512  # --max-prompt-mb: the text of a request's prompts (each holds the state), counted before rendering
@@ -275,52 +274,6 @@ def check_branches(questions, max_branches=MAX_BRANCHES, tasks_of=None):
         how = " (its task questions expanded)" if tasks_of else ""
         raise RequestError(f"{n} branches{how} (a question counts 1, a multi question or a tool set one per label): "
                            f"more than this server's --max-branches {max_branches}")
-
-
-def limit_body(app, max_bytes):
-    """ASGI: a request body over max_bytes answers 413 before the app reads it (its Content-Length), or as soon as more
-    of it arrived (a body sent without one: the app sees the client gone, and its answer is replaced by the 413)."""
-    async def too_large(scope, send):
-        msg = f"the request body is larger than this server's limit of {max_bytes} bytes (--max-body-mb)"
-        body = {"error": {"message": msg, "type": "invalid_request_error", "param": None, "code": "PAYLOAD_TOO_LARGE"}} \
-            if scope["path"] in ("/v1/decisions", "/decisions") else {"error": msg, "code": "PAYLOAD_TOO_LARGE"}
-        await send({"type": "http.response.start", "status": 413,
-                    "headers": [(b"content-type", b"application/json"), (b"connection", b"close")]})
-        await send({"type": "http.response.body", "body": json.dumps(body).encode()})
-
-    async def limited(scope, receive, send):
-        if scope["type"] != "http":
-            await app(scope, receive, send)
-            return
-        length = dict(scope.get("headers", ())).get(b"content-length", b"")
-        if length.isdigit() and int(length) > max_bytes:
-            await too_large(scope, send)
-            return
-        seen, over = 0, False
-
-        async def counted():
-            nonlocal seen, over
-            if over:
-                return {"type": "http.disconnect"}
-            message = await receive()
-            if message["type"] == "http.request":
-                seen += len(message.get("body", b""))
-                if seen > max_bytes:
-                    over = True
-                    return {"type": "http.disconnect"}
-            return message
-
-        async def answer(message):
-            if not over:
-                await send(message)
-        try:
-            await app(scope, counted, answer)
-        except Exception:  # noqa: BLE001  (the app's error over a body it never got whole)
-            if not over:
-                raise
-        if over:
-            await too_large(scope, send)
-    return limited
 
 
 QUESTION_TYPES = ("choice", "noul", "score", "act", "multi", "tool")  # the types a question can have

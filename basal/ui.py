@@ -11,7 +11,8 @@ page polled in the last 10 seconds; never a torch.cuda call. With --ui off (the 
 imported and basal-serve handles requests as without it.
 
 --ui full also keeps references to the last RECENT requests' parsed bodies and their answers (the bytes already sent),
-no copy and no serialisation on the request path; GET /ui/request/<id> serialises one of them when the page asks
+no copy and no serialisation on the request path, at most FULL_BYTES of them (their bodies and answers as sent, the
+newest always); GET /ui/request/<id> serialises one of them when the page asks
 (behind the same key check as /ui/state; with --api-keys, only for the key that made the request or an admin key: the
 keys are clients, who do not read each other's documents). They live in memory only, like everything here."""
 import bisect
@@ -32,6 +33,7 @@ HERE = Path(__file__).parent
 RING = 16384  # requests kept (recent rows, the last minute's rates and percentiles; folded into the totals at a read)
 FOLD = 2048  # requests folded into the totals at one read at most (a read's work stays bounded; the rest at the next)
 RECENT = 200  # rows of the recent-requests table
+FULL_BYTES = 256 * 2**20  # --ui full: the kept requests' bodies and answers together (as sent), the oldest dropped first
 MEMO_S = 1.0  # GET /ui/state is built at most once per MEMO_S, however many pages poll it
 IDLE_S = 10.0  # telemetry stops sampling this long after the last GET /ui/state
 DECISIONS = ("/v1/systemone", "/v1/basal", "/v1/decisions")  # the routes whose requests are recorded
@@ -317,8 +319,9 @@ class UI:
         self.srv, self.a, self.mode, self.version = srv, a, mode, __version__
         self.ring = deque(maxlen=RING)  # (end perf_counter, endpoint, status, seconds, questions, options[, id])
         # --ui full: (id, parsed body (or its bytes when it was not JSON), answer bytes, ring row, the name of the API
-        # key that made it or None) of the last RECENT
+        # key that made it or None, bytes of body and answer as sent) of the last RECENT, FULL_BYTES of them at most
         self.bodies, self.ids = (deque(maxlen=RECENT), itertools.count(1)) if full else (None, None)
+        self.kept_bytes = 0
         self.wall0, self.perf0 = time.time(), time.perf_counter()
         self.started = started or self.wall0
         self.memo, self.memo_at = None, -math.inf
@@ -351,8 +354,14 @@ class UI:
             row = (t1, endpoint, response.status_code, t1 - t, *size(body), rid)
             ring.append(row)
             key = (getattr(request, "scope", None) or {}).get("basal.api_key")  # (set by protect with --api-keys)
-            bodies.append((rid, body if body is not None else getattr(request, "_body", None),
-                           getattr(response, "body", None), row, key.get("name") if key else None))
+            raw, answer = getattr(request, "_body", None), getattr(response, "body", None)
+            n = len(raw or b"") + len(answer or b"")
+            if len(bodies) == bodies.maxlen:
+                self.kept_bytes -= bodies[0][5]
+            bodies.append((rid, body if body is not None else raw, answer, row, key.get("name") if key else None, n))
+            self.kept_bytes += n
+            while self.kept_bytes > FULL_BYTES and len(bodies) > 1:  # (a large body pushes the older ones out)
+                self.kept_bytes -= bodies.popleft()[5]
             return response
         out = recorded if bodies is None else recorded_full
         out.__name__ = f"recorded_{handler.__name__}"
@@ -373,7 +382,8 @@ class UI:
                 return JSONResponse({"error": "this request was made with another API key (an admin key reads every "
                                      "request)", "code": "FORBIDDEN"}, status_code=403)
             if data is None:
-                return JSONResponse({"error": f"not kept: --ui full keeps the last {RECENT} requests",
+                return JSONResponse({"error": f"not kept: --ui full keeps the last {RECENT} requests "
+                                              f"({FULL_BYTES // 2**20} MiB of bodies and answers at most)",
                                      "code": "NOT_FOUND"}, status_code=404)
             return Response(data, media_type="application/json", headers={"Cache-Control": "no-store"})
         out = [Route(r.path, self.record(r.endpoint, r.path), methods=sorted(r.methods))
@@ -388,7 +398,7 @@ class UI:
         kept = next((b for b in self.bodies if b[0] == rid), None)
         if kept is None:
             return None
-        _, body, answer, row, owner = kept
+        _, body, answer, row, owner, _ = kept
         if key is not None and not key.get("admin", False) and key.get("name") != owner:
             return False
         if isinstance(body, (bytes, bytearray)):
