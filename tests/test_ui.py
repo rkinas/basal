@@ -151,8 +151,15 @@ def test_counters_start_at_zero_and_record_metadata_only():
     assert all(row[3] > 0 and s["ready_at"] <= row[0] <= s["now"] for row in rows)
     assert t["latency"]["p50"] > 0 and t["w10"]["n"] == 7 and t["rate10"] > 0
     text = r.text
-    for word in ("Invoice", "1240", "Alpha", "Gamma", "Which?", "Paid?"):  # request text never reaches the state
+    # request text never reaches the state; words only: a number of the request (1240) can be a digit run of a timing
+    for word in ("Invoice", "PLN", "Alpha", "Gamma", "Which?", "Paid?"):
         assert word not in text
+
+    def strings(x):
+        if isinstance(x, dict):
+            x = list(x.values())
+        return [y for v in x for y in strings(v)] if isinstance(x, list) else [x] if isinstance(x, str) else []
+    assert not any("1240" in x for x in strings(s))  # nor in a string value (the state's numbers are timings)
     _, u2, _ = app_of()  # a new server starts at zero
     assert json.loads(u2.state({"requests": 0, "failed": 0, "seconds": 0.0}))["recent"] == []
 
