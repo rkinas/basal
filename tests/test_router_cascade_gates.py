@@ -126,3 +126,23 @@ def test_router_adds_to_the_skipped_names_the_replica_already_gave():
     resp = {}
     router.note_skipped(resp, [])
     assert resp == {}                                                                # nothing nulled: nothing added
+
+
+def test_images_alias_is_kept_away_from_the_text_fallback():
+    q = {"type": "choice", "criteria": ["yes", "no"]}
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jwXkAAAAASUVORK5CYII="
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "fallback":
+            return httpx.Response(200, json={"model": "t", "choices": [{"message": {"content": '{"answer":"B"}'}}]})
+        return httpx.Response(200, json={"model": "v", "answers": {"q": _ans("yes", .6)}})
+    for key, value in (("media", [{"type": "image", "data": png}]), ("images", ["data:image/png;base64," + png])):
+        calls.clear()
+        _forward({"state": "s", "questions": {"q": q}, key: value}, handler,
+                 fallback={"url": "http://fallback/v1", "model": "t", "below": .8})
+        assert "fallback" not in calls, key
+    calls.clear()                                  # control: text only, a low-confidence answer does go to the fallback
+    _forward({"state": "s", "questions": {"q": q}}, handler, fallback={"url": "http://fallback/v1", "model": "t", "below": .8})
+    assert "fallback" in calls

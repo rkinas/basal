@@ -460,7 +460,7 @@ class Router:
             req, resp = json.loads(body), json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
-            if req.get("media"):
+            if req.get("media") or req.get("images"):  # "images" is the alias of "media": the text model sees no image
                 return content
             go = []
             for q, a in answers.items():
