@@ -11,7 +11,7 @@ import pytest
 import basal.server as server_module
 from basal.calibrate import (InputError, cp_upper, fit, fit_temperature, gold_index, load, main, threshold,
                              uncalibrated, warnings)
-from basal.server import Server, models_payload, parser, temper, to_items
+from basal.server import Server, certified, models_payload, parser, temper, to_items
 from tests.test_server import FakeServer, Tok
 
 WEIGHT = re.compile(r"^[A-J]\. .*~([0-9.e-]+)$", re.M)
@@ -156,10 +156,11 @@ def test_clopper_pearson_bound():
 
 def test_threshold_is_certified_and_keeps_ties_together():
     # 400 correct decisions at 0.99, then a tie of 50 at 0.9 holding 10 errors, then a long correct tail at 0.8
-    cs = [(0.99, True)] * 400 + [(0.9, i >= 10) for i in range(50)] + [(0.8, True)] * 600
+    # (850 decisions: fewer than 2 x 473, so the 1% test starts at the first level with 299, here 0.99)
+    cs = [(0.99, True)] * 400 + [(0.9, i >= 10) for i in range(50)] + [(0.8, True)] * 400
     assert threshold(cs, 0.01) == 0.99                     # including 0.9 breaks the bound; the tail is not reached
     assert cp_upper(10, 450) > 0.01
-    assert threshold(cs, 0.05) == 0.8                      # 10 / 1050 errors: the bound holds all the way down
+    assert threshold(cs, 0.05) == 0.8                      # 10 / 850 errors: the bound holds all the way down
     ties = [(0.95, True)] * 60 + [(0.95, False)] * 4       # one confidence level: accepted or refused as a whole
     assert threshold(ties, 0.05) is None and threshold(ties, 0.2) == 0.95
 
@@ -198,8 +199,9 @@ def test_calibrate_end_to_end_round_trips_through_the_server(tmp_path, engine, c
     for t in ("choice", "noul", "score"):
         assert cal["temperature_source"][t].startswith("fitted")
         assert 1.5 < cal["temperature_per_prim"][t] < 2.7    # true 2.0 (shipped 1.04-1.56), ~200 FIT decisions
-    thr = cal["thresholds"]["0.05"]["confidence"]
-    assert thr is not None and cal["thresholds"]["0.05"]["fit_upper95"] <= 0.05
+    pooled = cal["thresholds"]["0.05"]["confidence"]  # informational, never applied
+    assert pooled is not None and cal["thresholds"]["0.05"]["fit_upper95"] <= 0.05
+    thr = certified(cal, 0.05, "noul")                 # the threshold basal-serve applies: the type's own, or none
 
     srv = Server(parser().parse_args(["--mode", "eager", "--calibration", str(out)]))  # basal-serve's loader
     assert srv.cal == cal and srv.temps == cal["temperature_per_prim"]
@@ -217,7 +219,7 @@ def test_calibrate_end_to_end_round_trips_through_the_server(tmp_path, engine, c
         p = temper(server_module.torch.tensor([p_yes, 1 - p_yes]), cal["temperature_per_prim"]["noul"])
         conf = max(p.tolist())
         assert abs(ans["confidence"] - conf) < 1e-7
-        assert ("refused" in ans) == (conf < thr) and ans["calibration"] == "validated"
+        assert ("refused" in ans) == (thr is None or conf < thr) and ans["calibration"] == "validated"
 
 
 @pytest.mark.parametrize("snapshot", [True, False])

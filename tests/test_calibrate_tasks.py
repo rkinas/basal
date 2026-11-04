@@ -112,9 +112,9 @@ def test_field_correct_and_task_rows():
 def test_fit_tasks_certifies_per_task():
     rng = np.random.default_rng(0)
     rows = []
-    for i in range(3000):
+    for i in range(3000):  # errors thin out at the top (the fixed sequence ends at an error in its first level)
         c = rng.uniform(0.5, 1.0)
-        rows.append(dict(task="classify", group=f"g{i}", c=c, ok=bool(rng.random() < c)))
+        rows.append(dict(task="classify", group=f"g{i}", c=c, ok=bool(rng.random() < min(1.0, c + 0.01))))
     thr, rep = fit_tasks(rows + [dict(task="verify", group="v", c=0.99, ok=True)], [0.05],
                          shipped={"classify": {"0.05": 0.6}})
     assert set(thr) == {"classify"} and 0.9 < thr["classify"]["0.05"] < 1.0
