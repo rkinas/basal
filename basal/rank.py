@@ -7,8 +7,8 @@ a choice question.
    "choice_context": "auto" | "screen" | "shortlist", "order": "state_first" | "candidates_first",
    "prior": {key: weight}, "limit": 100}
 
-Screening: the candidates are numbered in a list ("Passage 7: <text>", under a "[<group>]" line when they have one) and
-packed, in their order, into requests of `chunk` candidates (a group stays in one request when it fits). Each request's
+Screening: the candidates are numbered in a list ("Passage 7: <text>", under a "[<group>]" line when they have one; a text of several lines keeps them, each
+line after the first indented by two spaces so that it cannot pass for an entry) and packed, in their order, into requests of `chunk` candidates (a group stays in one request when it fits). Each request's
 state is the request's own state and its list; every candidate in it is one yes / no question ("{candidate}" in the
 instructions names it), so the request reads its state once (SOAM) and judges its candidates side by side. All requests
 go through the server's queue together. A candidate's score is its calibrated P(yes), times its `prior` weight.
@@ -137,16 +137,22 @@ def chunks(cands, size):
     return out
 
 
+def _flat(text):
+    """One line: every line break str.splitlines knows (\\n \\r \\x0b \\x0c \\x1c-\\x1e \\x85 U+2028 U+2029) becomes a space."""
+    return " ".join(text.splitlines())
+
+
 def listing(cands, idx, label, title):
     """The numbered list of the candidates idx (1, 2, ... in this list) under their group lines -> text, {idx: name}."""
     lines, names, group = ([title + ":"] if title else []), {}, None
     for n, i in enumerate(idx, 1):
         g = cands[i][2]
+        g = None if g is None else _flat(g)
         if g is not None and g != group:
-            lines.append("[" + g.replace("\n", " ") + "]")
+            lines.append("[" + g + "]")
         group = g
         names[i] = f"{label} {n}"
-        lines.append(f"{names[i]}: " + cands[i][1].replace("\n", "\n  "))  # (a continuation line is indented: no forged entry)
+        lines.append(f"{names[i]}: " + "\n  ".join(cands[i][1].splitlines()))  # (a continuation line is indented: no forged entry)
     return "\n".join(lines), names
 
 
