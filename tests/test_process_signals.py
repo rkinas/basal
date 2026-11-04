@@ -1,9 +1,11 @@
 """Regression tests for fix/process-signals (Z-1089)."""
+import shutil
 import signal
 import types
 
 import pytest
 
+from basal import adapter
 from basal import think
 
 
@@ -31,3 +33,17 @@ def test_e1_a_handler_somebody_installed_stays(default_sigterm):
     signal.signal(signal.SIGTERM, mine)
     signals.exit_on_sigterm()
     assert signal.getsignal(signal.SIGTERM) is mine
+
+
+def test_e2_the_temp_dir_of_the_merged_adapter_survives_sigterm_only_as_a_system_exit(monkeypatch):
+    old = signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    monkeypatch.setattr(adapter.atexit, "register", lambda *a, **k: None)
+    try:
+        out = adapter._temp_dir()
+        handler = signal.getsignal(signal.SIGTERM)
+        assert callable(handler)  # not SIG_DFL: atexit (shutil.rmtree) runs on the way out
+        with pytest.raises(SystemExit):
+            handler(signal.SIGTERM, None)
+    finally:
+        signal.signal(signal.SIGTERM, old)
+        shutil.rmtree(out, True)

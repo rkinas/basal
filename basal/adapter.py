@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .signals import exit_on_sigterm
+
 MLX_WEIGHTS, PEFT_WEIGHTS, CONFIG = "adapters.safetensors", "adapter_model.safetensors", "adapter_config.json"
 # a text decoder's layer under the prefixes of mlx-lm, PEFT and transformers (model., base_model.model.model.,
 # language_model.model., base_model.model.model.language_model. ...); anything else (vision_tower.encoder.layers.N,
@@ -250,6 +252,7 @@ def merge_numpy(weights, ad):
 def _temp_dir():
     out = Path(tempfile.mkdtemp(prefix="basal-adapter-"))
     atexit.register(shutil.rmtree, out, True)  # read by the engine's own process until basal-serve exits
+    exit_on_sigterm()  # SIGTERM (kill, docker stop) is an exit too: the merged copy of the checkpoint goes
     return out
 
 
