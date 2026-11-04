@@ -158,6 +158,8 @@ def leaves(schema, path=""):
         if not props:
             raise ValueError(f"extract: object {path or 'root'!r} has no properties")
         for k, sub in props.items():
+            if "." in str(k):  # the path joins names with "." (and splits on it): "a.b" would alias a -> b
+                raise ValueError(f"extract: property name {k!r} must not contain '.'")
             yield from leaves(sub, f"{path}.{k}" if path else str(k))
         return
     if _consts(schema):

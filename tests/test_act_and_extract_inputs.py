@@ -2,6 +2,7 @@
 after the fix; each has a control (a correct input is accepted and gives the same result before and after)."""
 import pytest
 
+from basal import tasks
 from basal.prompt import RequestError
 from basal.server import act_spec
 
@@ -33,3 +34,14 @@ def test_an_outcome_named_defer_does_not_overwrite_the_defer_costs():
         act_spec("q", {"type": "act", "costs": {"wrong": 1, "defer": 0.2}}, ["defer", "accept"])
     spec = act_spec("q", {"type": "act", "costs": {"wrong": 1, "defer": 0.2}}, ["yes", "no"])   # control
     assert spec["costs"]["defer"] == {"yes": 0.2, "no": 0.2} and spec["costs"]["yes"] == {"yes": 0.0, "no": 1.0}
+
+
+# B-095: a dot in a property name
+def test_extract_rejects_a_property_name_with_a_dot():
+    schema = {"type": "object", "properties": {"a.b": {"type": "boolean"},
+                                               "a": {"type": "object", "properties": {"b": {"type": "boolean"}}}}}
+    with pytest.raises(RequestError):
+        tasks.expand({"state": "s", "questions": {"q": {"type": "extract", "schema": schema}}})
+    ok = {"type": "object", "properties": {"a_b": {"type": "boolean"},
+                                           "a": {"type": "object", "properties": {"b": {"type": "boolean"}}}}}
+    assert len(tasks.expand({"state": "s", "questions": {"q": {"type": "extract", "schema": ok}}})[0]["questions"]) == 2
