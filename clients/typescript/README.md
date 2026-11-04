@@ -3,7 +3,7 @@
 A client for `basal-serve`'s `POST /v1/systemone` ([docs/API.md](../../docs/API.md)). It sends the same requests and
 reads the same answers as the Python client (`basal/client.py`), with types for every question type and answer.
 
-- `fetch` only: Node >= 18, Deno, Bun and browsers; no runtime dependencies.
+- `fetch` only: Node >= 18.17 (`AbortSignal.any`), Deno, Bun and browsers; no runtime dependencies.
 - Types for questions, answers (`choice`, `noul`, `score`, `multi`, `act`, `tool`), answer sets, abstain, `ask_if`,
   images, usage and errors. `decide()` returns answers typed by the question's `type`.
 - Not published to npm yet: build it from this directory (below).
@@ -59,7 +59,7 @@ Every failure throws a `BasalError` with `kind`, `status`, `detail` (the server'
 | `validation` | HTTP 422: the request must change | no |
 | `unavailable` | HTTP 503: the GPU ran out of memory, or the server is still starting | yes |
 | `server` | HTTP 500 and any other status | no |
-| `timeout`, `network` | no answer | yes |
+| `timeout`, `network` | no answer, or the response broke off (`timeout` covers the body too) | yes |
 
 Both error formats (`{"error": "..."}` and `basal-serve --error-format openai`) are read. A request you cancel with
 your own `signal` rethrows the abort error.

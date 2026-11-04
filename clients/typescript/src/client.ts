@@ -24,7 +24,7 @@ export interface BasalOptions {
   url?: string;
   /** Sends "Authorization: Bearer <key>" (servers behind a proxy, other /v1/systemone servers). */
   apiKey?: string;
-  /** Seconds, default 60. */
+  /** Seconds, default 60: the whole call, the response body included (a number > 0). */
   timeout?: number;
   /** Default early_exit of every request (--mode fast-exit servers, basal-1.0). */
   earlyExit?: RequestOptions["early_exit"];
@@ -93,7 +93,10 @@ export class Basal {
   constructor(options: BasalOptions = {}) {
     this.origin = (options.url ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
     this.url = `${this.origin}/v1/systemone`;
-    this.timeoutMs = (options.timeout ?? 60) * 1000;
+    const timeout = options.timeout ?? 60;
+    if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0 || timeout * 1000 > 2 ** 32 - 1)
+      throw new RangeError(`timeout: a number of seconds > 0 (49 days at most), not ${String(timeout)}`);
+    this.timeoutMs = Math.max(1, Math.round(timeout * 1000));  // AbortSignal.timeout takes whole milliseconds
     this.headers = { "content-type": "application/json", ...(options.headers ?? {}) };
     if (options.apiKey) this.headers["authorization"] = `Bearer ${options.apiKey}`;
     this.fetchImpl = options.fetch ?? ((...a) => fetch(...a));
@@ -106,19 +109,20 @@ export class Basal {
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const sig = signal ? AbortSignal.any([signal, timeout]) : timeout;
     let r: Response;
-    try {
+    let text: string;
+    try {  // the body too: it can stall or break after the headers came
       r = await this.fetchImpl(`${this.origin}${path}`, {
         method,
         headers: this.headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: sig,
       });
+      text = await r.text();
     } catch (e) {
       if (timeout.aborted) throw new BasalError("timeout", `no answer in ${this.timeoutMs / 1000} s`, { cause: e });
       if (signal?.aborted) throw e;
       throw new BasalError("network", e instanceof Error ? e.message : String(e), { cause: e });
     }
-    const text = await r.text();
     if (r.status !== 200) throw errorFromResponse(r.status, text);
     try {
       return JSON.parse(text);
