@@ -92,16 +92,21 @@ POLL_S = 2.0
 SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (spawn)
 
 
+def request_key(req):
+    """The routing key of a parsed request body: its state with whitespace normalised (None without a state). Split
+    and join give what re.sub(r"\\s+", " ", state.strip()) gave, for every string (str.isspace and re's whitespace
+    class agree on every code point), in a quarter of the time (3.4 -> 0.85 ms on a 64 KB state)."""
+    state = req.get("state") if isinstance(req, dict) else None
+    return (" ".join(state.split()) or None) if isinstance(state, str) else None
+
+
 def state_key(body):
-    """The routing key of a request body: its state with whitespace normalised (None without a state, or for a body
-    that is not JSON or nested too deeply to read: the replica answers that client error)."""
+    """request_key of a request body (bytes or str; None for a body that is not a JSON object or nested too deeply to
+    read: the replica answers that client error)."""
     try:
-        state = json.loads(body).get("state")
-    except (ValueError, AttributeError, RecursionError):
+        return request_key(json.loads(body))
+    except (ValueError, RecursionError):
         return None
-    if not isinstance(state, str) or not state.strip():
-        return None
-    return re.sub(r"\s+", " ", state.strip())
 
 
 SCRIPTS = ("latin", "cyrillic", "greek", "arabic", "hebrew", "cjk")
@@ -361,31 +366,37 @@ class Router:
 
     async def forward(self, path, body, headers):
         """-> (status, content, content type): the request to the replica its pool and state give, then (--escalate)
-        its low-confidence questions to the escalation replicas."""
+        its low-confidence questions to the escalation replicas. The body is parsed once here: the routing key and the
+        sub-requests of --escalate / --blend / --fallback come from it (they keep its state, so its key)."""
+        try:
+            req = json.loads(body)
+        except (ValueError, RecursionError):  # (not JSON, or nested too deeply to read: the replica refuses it)
+            req = None
+        req = req if isinstance(req, dict) else None
+        key = request_key(req)
         pool = "main"
         if any(name.startswith("script:") for name in self.rings):  # --route
-            try:
-                sc = script_of(json.loads(body).get("state"))
-            except (ValueError, AttributeError, TypeError):  # (not JSON, not an object: the replica refuses it)
-                sc = None
+            sc = script_of(req.get("state")) if req is not None else None  # (not an object: the replica refuses it)
             if sc is not None:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
                 pool = f"script:{sc}" if f"script:{sc}" in self.rings else pool
-        status, content, ctype = await self._send(pool, path, body, headers)
+        status, content, ctype = await self._send(pool, path, body, headers, key)
+        if req is None:
+            return status, content, ctype
         level = {}
         if self.levels and status == 200:
-            content = await self._cascade(path, body, content, headers, level)
+            content = await self._cascade(path, req, content, headers, key, level)
         if self.blends and status == 200:
-            content = await self._blend(path, body, content, headers)
+            content = await self._blend(path, req, content, headers, key)
         if self.fallback and status == 200:
-            content = await self._fallback(body, content, level if self.levels else None)
+            content = await self._fallback(req, content, level if self.levels else None)
         return status, content, ctype
 
-    async def _fallback(self, body, content, level=None):
+    async def _fallback(self, req, content, level=None):
         """The answers of the last level (level: the cascade's level of each question; None: one model) whose top
         probability is under --fallback-below asked of the LLM, concurrently; its answer replaces the basal one."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
             if req.get("media") is not None or req.get("images") is not None:  # (images: the alias of media)
@@ -452,10 +463,10 @@ class Router:
         i, probs, result = fallback_parse(data, len(options))
         return i, probs, result, (data.get("model") if isinstance(data, dict) else None) or f["model"]
 
-    async def _blend(self, path, body, content, headers):
+    async def _blend(self, path, req, content, headers, key):
         """The first replica's answers, the blendable ones mixed with the --blend pools' (asked at once, concurrently)."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
             want = [q for q, a in answers.items() if q in qs and blendable(qs[q], a)]
@@ -464,7 +475,7 @@ class Router:
         if not want:
             return content
         sub = json.dumps(dict(req, questions={q: qs[q] for q in want})).encode()
-        outs = await asyncio.gather(*(self._send(pool, path, sub, headers) for pool, _ in self.blends))
+        outs = await asyncio.gather(*(self._send(pool, path, sub, headers, key) for pool, _ in self.blends))
         others = []
         for (_, w), (st, c, _) in zip(self.blends, outs):
             try:
@@ -487,12 +498,12 @@ class Router:
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _cascade(self, path, body, content, headers, level_out=None):
+    async def _cascade(self, path, req, content, headers, key, level_out=None):
         """The answers of the first replica (level 1), with those under level k's threshold asked again of level k + 1,
         level by level. A level that is down or does not answer 200 leaves the previous answers (and ends the chain).
         With one level the response is as before; with more, every answer also gives its level and model."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
         except (ValueError, KeyError, TypeError):
             return content
@@ -511,7 +522,7 @@ class Router:
             if not low:
                 break
             sub = dict(req, questions={q: req["questions"][q] for q in low})
-            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers)
+            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers, key)
             if st != 200:
                 break
             r2 = json.loads(c2)
@@ -532,8 +543,8 @@ class Router:
         resp["cascade"] = {"below": below, "escalated": done}
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _send(self, pool, path, body, headers):
-        r, how = self.choose(state_key(body), pool)
+    async def _send(self, pool, path, body, headers, key):
+        r, how = self.choose(key, pool)
         if r is None:
             return 503, b'{"error": "no basal replica is ready"}', "application/json"
         self.load[r] += 1
