@@ -276,7 +276,7 @@ def main(argv=None):
 
     from . import __version__
     from .engine import resolve
-    from .server import model_identity
+    from .server import default_orders, model_identity
     md = resolve(a.model)
     fmt = model_format(md)
     tok = AutoTokenizer.from_pretrained(md)
@@ -310,7 +310,7 @@ def main(argv=None):
         ind = flat(run_groups(be, alone(multi), 1)) if a.independence == "on" else None
         free(be)
         row = dict(backend=spec, load_s=round(load_s, 1), run_s=round(run_s, 1), **score(sets, ref, got, ind, gold,
-                                                                                    orders=2 if fmt == 1 else 1))
+                                                                                    orders=default_orders(None, fmt)))
         row["readouts_multi"] = len(flat(got["multi"]))
         row["gate"] = gate(row, a.gate)
         rows.append(row)
