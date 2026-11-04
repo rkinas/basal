@@ -599,6 +599,39 @@ def test_pinned_fla_cache_never_times():
         assert gdn_module.fla_pin() == 0
 
 
+def test_fla_pin_pins_only_the_recorded_kernels(monkeypatch, tmp_path):
+    """The table's kernels get their recorded configs (untimed); a kernel the recording never launched keeps its own
+    autotuner (it was pinned to its first candidate: a config never measured, which may not fit the GPU)."""
+    import sys
+    import types
+
+    class Config:
+        def __init__(self, kwargs, **launch):
+            self.kwargs, self.launch = kwargs, launch
+
+    tuner = types.SimpleNamespace
+    recorded, other = tuner(cache={}, configs=["first"]), tuner(cache={}, configs=["first"])
+    triton = types.ModuleType("triton")
+    triton.runtime = types.ModuleType("triton.runtime")
+    triton.runtime.autotuner = types.ModuleType("triton.runtime.autotuner")
+    triton.runtime.autotuner.Config = Config
+    for name, mod in (("triton", triton), ("triton.runtime", triton.runtime),
+                      ("triton.runtime.autotuner", triton.runtime.autotuner)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setitem(sys.modules, "fla", types.SimpleNamespace(__version__="0.5.2"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda *a: "GPU X")
+    monkeypatch.setattr(gdn_module, "_fla_autotuners", lambda: {"fla.ops.k": recorded, "fla.ops.backward_k": other})
+    launch = dict(num_warps=4, num_stages=2, num_ctas=1, maxnreg=None)
+    table = dict(gpu="GPU X", fla="0.5.2", kernels={"fla.ops.k": dict(
+        default=dict(kwargs={"BT": 64}, **launch), keys=[[[64, "torch.bfloat16"], dict(kwargs={"BT": 32}, **launch)]])})
+    (tmp_path / "fla.json").write_text(json.dumps(table), encoding="utf-8")
+    assert gdn_module.fla_pin(tmp_path / "fla.json") == 1
+    assert recorded.cache[(64, "torch.bfloat16")].kwargs == {"BT": 32}
+    assert recorded.cache[(128, "torch.float32")].kwargs == {"BT": 64}  # (any other key: the kernel's default)
+    assert other.cache == {} and (64, "torch.bfloat16") not in other.cache  # timed at its first launch, as fla does
+
+
 @pytest.mark.skipif(not torch.cuda.is_available() or gdn_module.fla_rule() is None, reason="needs CUDA and fla")
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-4), ("bfloat16", 0.03)])
 def test_graphs_equal_eager_on_cuda(monkeypatch, tmp_path, dtype, tol):
