@@ -61,6 +61,10 @@ state / by load, failures, readiness, answers per cascade level, blended answers
 (Prometheus); /v1/models: the first ready replica's of that pool. --ui on: GET /ui, one live page of the router and every replica
 (each replica's own panels when it runs with --ui on); GET /ui/state, its JSON.
 
+Request ids: the client's X-Request-Id (or a req_<hex> the router makes when it has none or an invalid one) goes to
+every replica the request reaches and comes back as the response's x-request-id, so the replicas' logs and the client
+name one request alike.
+
 API keys: a client's Authorization / X-API-Key header is passed on, as it came, to every replica its request reaches
 (--replicas, --escalate, --blend, --route; never to --fallback), so replicas started with --api-keys (the same key file
 on each) check it as if called directly. The router checks no key itself: its /health and /metrics stay open.
@@ -579,6 +583,8 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
 
     async def post(request):
         headers = {"content-type": "application/json", **key_headers(request.headers.raw)}
+        if request.scope.get("basal.request_id"):  # (request_ids below: the client's, or one it made)
+            headers["x-request-id"] = request.scope["basal.request_id"]
         status, content, ctype = await router.forward(request.url.path, await request.body(), headers)
         return Response(content, status_code=status, media_type=ctype)
 
@@ -623,11 +629,15 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
         if on_stop is not None:  # (uvicorn's shutdown: before it re-raises the signal that stopped it)
             await asyncio.get_running_loop().run_in_executor(None, on_stop)
 
+    from starlette.middleware import Middleware
+
+    from .auth import request_ids
+    ids = [Middleware(request_ids)]  # x-request-id on every response, passed on to the replicas
     routes = [Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
               Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)]
     if ui is None:
-        return Starlette(routes=routes, lifespan=lifespan)
-    return ui.page(Starlette(routes=ui.routes(routes), lifespan=lifespan))
+        return Starlette(routes=routes, lifespan=lifespan, middleware=ids)
+    return ui.page(Starlette(routes=ui.routes(routes), lifespan=lifespan, middleware=ids))
 
 
 class Replicas:

@@ -111,13 +111,15 @@ def protect(app, keys, cors_origins=()):
 
 
 def request_ids(app):
-    """Echo X-Request-Id (or a generated req_<hex>) as x-request-id on every response."""
+    """Echo X-Request-Id (or a generated req_<hex>) as x-request-id on every response; the app finds it in
+    scope["basal.request_id"] (basal-router passes it on to the replicas)."""
     async def with_request_id(scope, receive, send):
         if scope["type"] != "http":
             await app(scope, receive, send)
             return
         supplied = dict(scope.get("headers", ())).get(b"x-request-id", b"").decode("latin1")
         request_id = supplied if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied) else f"req_{uuid.uuid4().hex}"
+        scope["basal.request_id"] = request_id
 
         async def send_with_id(message):
             if message["type"] == "http.response.start":
