@@ -265,16 +265,35 @@ def test_cascade_why(monkeypatch):
     class NoFlash:
         def __getattr__(self, name):
             raise AttributeError(name)
-    varlen = pytest.importorskip("torch.nn.attention.varlen")  # (its first import reads torch.ops.aten)
-
-    def varlen_attn(query, key, value, cu_seq_q, cu_seq_k, max_q, max_k, *, enable_gqa=False, seqused_k=None):
-        """The signature of a torch whose varlen_attn takes per-sequence key counts (2.13; 2.11's has no seqused_k)."""
-    monkeypatch.setattr(varlen, "varlen_attn", varlen_attn)
     monkeypatch.setattr(E.torch.ops, "aten", NoFlash())
     monkeypatch.setattr(E, "torch_varlen_available", lambda dtype: None)
     be = Stub(tiny())
     be.dev = torch.device("cuda")
     assert be._cascade_why is None and not E.cascade_ok(be.model.config)
+
+
+def test_torch_varlen_needs_the_flash_op_not_the_varlen_attn_wrapper(monkeypatch):
+    """Compact rows and the CUDA cascade call aten::_flash_attention_forward directly: on an sm80+ GPU they run with
+    torch 2.11, whose varlen_attn takes neither enable_gqa nor seqused_k, as long as the op takes seqused_k and the
+    window sizes; an op without them is refused."""
+    import basal.engine as E
+    varlen = pytest.importorskip("torch.nn.attention.varlen")  # (its first import reads torch.ops.aten)
+
+    def varlen_attn(query, key, value, cu_seq_q, cu_seq_k, max_q, max_k, return_aux=None, scale=None,
+                    window_size=(-1, -1)):
+        """torch 2.11's signature."""
+    monkeypatch.setattr(varlen, "varlen_attn", varlen_attn)
+    monkeypatch.setattr(E.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(E.torch.cuda, "get_device_capability", lambda *a: (8, 9))
+    monkeypatch.setattr(E.torch.backends.cuda, "is_flash_attention_available", lambda: True)
+    assert E.torch_varlen_available(torch.bfloat16) is None
+
+    def aten(schema):
+        op = type("Op", (), {"default": type("D", (), {"_schema": schema})()})()
+        return type("Aten", (), {"_flash_attention_forward": op})()
+    monkeypatch.setattr(E.torch.ops, "aten", aten("aten::_flash_attention_forward(Tensor query, Tensor key, Tensor "
+                                                  "value, ..., *, float? scale=None) -> (Tensor output, ...)"))
+    assert "seqused_k" in E.torch_varlen_available(torch.bfloat16)
 
 
 def test_pass2_graphs():

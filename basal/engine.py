@@ -442,8 +442,10 @@ def _direct_attention(impl):
 
 
 def torch_varlen_available(dtype):
-    """None if torch's varlen attention (torch.nn.attention.varlen.varlen_attn: torch's built-in FlashAttention 2 on
-    packed sequences, with GQA) can run compact rows here, else why not."""
+    """None if torch's varlen attention (FlashAttention 2 on packed sequences, grouped-query, per-sequence key counts:
+    the op aten::_flash_attention_forward, which torch.nn.attention.varlen.varlen_attn wraps) can run compact rows and
+    the CUDA cascade here, else why not. The op is called directly: torch 2.11's varlen_attn takes neither enable_gqa
+    nor seqused_k, but its op takes grouped-query heads and seqused_k as 2.13's does."""
     if not torch.cuda.is_available():
         return "needs CUDA"
     if torch.cuda.get_device_capability()[0] < 8:
@@ -452,13 +454,9 @@ def torch_varlen_available(dtype):
         return "needs bf16 / fp16 activations"
     if not torch.backends.cuda.is_flash_attention_available():  # Windows wheels: built without USE_FLASH_ATTENTION
         return "this torch is built without FlashAttention"
-    try:
-        from torch.nn.attention.varlen import varlen_attn
-    except ImportError:
-        return "needs torch with torch.nn.attention.varlen"
-    import inspect
-    if "enable_gqa" not in inspect.signature(varlen_attn).parameters:
-        return "this torch's varlen_attn has no enable_gqa"
+    schema = str(torch.ops.aten._flash_attention_forward.default._schema)
+    if "seqused_k" not in schema or "window_size_right" not in schema:
+        return "this torch's FlashAttention op takes no seqused_k / window sizes"
     return None
 
 
@@ -697,9 +695,9 @@ def _graph_tokens(key):
 def _varlen_attention(q, k, v, cu, scale, layer=0, impl="fa3"):
     """Causal attention of compact rows: [1, heads, T, d] in (prompts packed back to back, cu = their cumulative token
     counts, int32, empty prompts at the end), [1, T, heads, d] out. impl (the backend's compact_kernel): "fa3" =
-    FlashAttention 3's varlen kernel, "torch varlen" = torch's varlen_attn (torch's FlashAttention 2, any sm80+ GPU);
-    both are torch custom ops, so the compiled forward has no graph break. FA3: the same rows as the padded forward on
-    an H100.
+    FlashAttention 3's varlen kernel, "torch varlen" = torch's FlashAttention 2 on packed sequences (the op
+    aten::_flash_attention_forward, as varlen_attn calls it; any sm80+ GPU, torch 2.11 too); both are torch ops, so the
+    compiled forward has no graph break. FA3: the same rows as the padded forward on an H100.
     With a template prefix cu = (cu_q, cu_k, gather, prefix): every prompt's keys / values are its template prefix's
     (prefix[layer] = (K, V) [prefix tokens, kv heads, d], computed at start-up) followed by its own; gather picks them
     from prefix + own tokens, and the queries (own tokens) attend bottom-right causally."""
@@ -712,10 +710,10 @@ def _varlen_attention(q, k, v, cu, scale, layer=0, impl="fa3"):
         v = torch.cat([pv, v]).index_select(0, gather)
     else:
         cu_k = cu
-    if impl == "torch varlen":
-        from torch.nn.attention.varlen import varlen_attn
-        return varlen_attn(q[0].transpose(0, 1), k, v, cu, cu_k, T, k.shape[0], scale=scale, window_size=(-1, 0),
-                           enable_gqa=True)[None]
+    if impl == "torch varlen":  # the op varlen_attn runs, with the arguments it passes (window (-1, 0): causal)
+        return torch.ops.aten._flash_attention_forward(
+            q[0].transpose(0, 1), k, v, cu, cu_k, T, k.shape[0], 0.0, True, False, scale=scale, window_size_left=-1,
+            window_size_right=0)[0][None]
     import flash_attn_interface as fa3
     o = fa3.flash_attn_varlen_func(q[0].transpose(0, 1), k, v, cu, cu_k, T, k.shape[0], softmax_scale=scale,
                                    causal=True)
@@ -1394,7 +1392,7 @@ class GraphBackend(EagerBackend):
             self.BATCHES = self.FINE_BATCHES
         # compact rows need a varlen kernel: FlashAttention 3's (Hopper; auto: compact where it runs; Gemma 4 with its
         # fa3 kernels: FA3 varlen in the sliding layers, a flex block mask per prompt in the 512-wide global ones), or,
-        # with --batches compact on other GPUs, torch's varlen_attn (its FlashAttention 2, sm80+; Llama models) or, for
+        # with --batches compact on other GPUs, torch's FlashAttention 2 varlen op (sm80+; Llama models) or, for
         # Gemma 4 with the flex kernels (Blackwell workstation GPUs), flex block masks per prompt in every layer
         fa3 = self.attn == "fa3" and (self.gemma is None or self.gemma.kernels.get("sliding_attention") == "fa3"
                                       and self.gemma.kernels.get("full_attention") != "math")
@@ -1896,20 +1894,14 @@ class GraphBackend(EagerBackend):
     @functools.cached_property
     def _cascade_why(self):
         """None if pass 2 can run as a cascade here, else why not: CUDA, a Llama-style model with attention layers
-        only (attention_only; the CPU flash op that cascade_ok also asks for plays no part here), torch's varlen
-        attention with grouped-query heads and per-sequence key counts in this dtype, the transformers forward (not
-        --lean, which has its own pass 2)."""
+        only (attention_only; the CPU flash op that cascade_ok also asks for plays no part here), torch's FlashAttention
+        varlen op with grouped-query heads and per-sequence key counts in this dtype (torch_varlen_available; torch 2.11
+        and newer), the transformers forward (not --lean, which has its own pass 2)."""
         if self.dev.type != "cuda" or self.gemma is not None or self.lean is not None:
             return "CUDA graph engine, Llama, without --lean"
         if not attention_only(self.model.config):
             return "sliding-window or linear-attention layers"
-        why = torch_varlen_available(self._dtype)
-        if why is None:
-            import inspect
-            from torch.nn.attention.varlen import varlen_attn
-            if "seqused_k" not in inspect.signature(varlen_attn).parameters:
-                why = "this torch's varlen_attn has no seqused_k"
-        return why
+        return torch_varlen_available(self._dtype)
 
     one_forward = 0  # tokens of the longest state run as one forward (_one_forward_tokens; 0: every one in chunks)
     # of the free memory after warm-up a state beyond the largest graph may take in one forward (else in chunks; one
