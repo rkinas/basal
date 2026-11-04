@@ -38,6 +38,7 @@ only these temperatures: thresholds, coverage and the engine-level types (act, m
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -387,10 +388,12 @@ def main(argv=None):
             if done.returncode != 0:
                 sys.exit(f"basal-export-gguf: llama.cpp's converter failed (exit {done.returncode}); "
                          "see its output above")
-        try:
-            ranked, total = fix_gguf(raw, out, model_dir, decision)
+        part = Path(tmp) / out.name  # written in full first, then renamed: an interrupted export leaves no
+        try:  # truncated file under the output's name (nor overwrites an older one)
+            ranked, total = fix_gguf(raw, part, model_dir, decision)
         except ValueError as e:
             sys.exit(f"basal-export-gguf: {e}")
+        os.replace(part, out)
     print(f"wrote {out}: {ranked}/{total} token scores from BPE merges, add_space_prefix=false")
     if decision:
         print(f"  decision model for /v1/systemone ({SYSTEMONE_TYPE}, at most {SYSTEMONE_MAX_OPTIONS} options), "

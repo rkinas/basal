@@ -102,10 +102,8 @@ def nvfp4_args(a, md=None, quant=None):
         path = Path(md) / NVFP4_AMAX
     if not path:
         return {}
-    import json
-    with open(path) as f:
-        amax = json.load(f)
-    return dict(nvfp4_amax=amax.get("amax", amax), nvfp4_scope=getattr(a, "nvfp4_scope", "all"))
+    from .gemma4_graph import load_nvfp4_amax
+    return dict(nvfp4_amax=load_nvfp4_amax(str(path)), nvfp4_scope=getattr(a, "nvfp4_scope", "all"))
 
 
 def nvfp4_calibration_refused(md, kind, quant, a):

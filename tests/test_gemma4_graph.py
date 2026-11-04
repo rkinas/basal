@@ -425,3 +425,16 @@ def test_edited_state_over_stale_memory_answers_as_separate(kind, monkeypatch):
         for r, e in zip(res[0], separate(m, toks, lids)):
             assert torch.isfinite(torch.tensor(r)).all() and torch.allclose(torch.tensor(r), e, atol=1e-5)
     assert be.state_cache.stats()["prefix_hits"] == 1
+
+
+def test_nvfp4_amax_file_is_read_wrapped_or_plain(tmp_path):
+    """The shipped NVFP4_AMAX.json wraps its values ({"amax": {...}}): the graph engine reads it as the server does,
+    from a path too (--quant-load cpu passes the file through)."""
+    import json
+
+    from basal.gemma4_graph import load_nvfp4_amax
+    vals = {"0.q_proj": 1.5, "0.mlp.down_proj": 3.0}
+    (tmp_path / "w.json").write_text(json.dumps({"amax": vals, "calibration": "x"}))
+    (tmp_path / "p.json").write_text(json.dumps(vals))
+    assert load_nvfp4_amax(str(tmp_path / "w.json")) == vals == load_nvfp4_amax(str(tmp_path / "p.json"))
+    assert load_nvfp4_amax({"amax": vals}) == vals and load_nvfp4_amax(vals) == vals

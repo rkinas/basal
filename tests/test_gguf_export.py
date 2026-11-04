@@ -250,3 +250,26 @@ def test_cli_systemone_refusal_names_the_reason(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as e:
         main([str(tmp_path), str(tmp_path / "x.gguf"), "--gguf", str(raw), "--systemone"])
     assert "prompt-format-2 model" in str(e.value.code) and not (tmp_path / "x.gguf").exists()
+
+
+def test_an_interrupted_export_leaves_no_truncated_file(tmp_path, monkeypatch):
+    """The output is written in full under a temporary name, then renamed: an export stopped while writing leaves
+    neither a truncated file under the output's name nor a damaged older one."""
+    raw = write_model(tmp_path)
+    out = tmp_path / "fixed.gguf"
+    out.write_bytes(b"the older export")
+    real = __import__("basal.gguf_export", fromlist=["fix_gguf"]).fix_gguf
+
+    def stopped(src, dst, *a, **kw):
+        real(src, dst, *a, **kw)
+        with open(dst, "r+b") as f:  # as if the process died before the end of the file
+            f.truncate(100)
+        raise KeyboardInterrupt
+    monkeypatch.setattr("basal.gguf_export.fix_gguf", stopped)
+    with pytest.raises(KeyboardInterrupt):
+        main([str(tmp_path), str(out), "--gguf", str(raw)])
+    assert out.read_bytes() == b"the older export"
+    assert sorted(p.name for p in tmp_path.rglob("*.gguf")) == sorted([raw.name, "fixed.gguf"])  # no part left
+    monkeypatch.setattr("basal.gguf_export.fix_gguf", real)
+    main([str(tmp_path), str(out), "--gguf", str(raw)])
+    assert gguf.GGUFReader(out).fields["tokenizer.ggml.scores"].contents() == [-1000, 0, 0, -1, -2]
