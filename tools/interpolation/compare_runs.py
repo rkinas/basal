@@ -9,7 +9,7 @@ import sys
 
 
 def load(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         header = json.loads(f.readline())
         rows = {(r["line"], r["name"]): r for r in map(json.loads, f)}
     return header, rows

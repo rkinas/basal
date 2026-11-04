@@ -67,7 +67,7 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="panel_pl.jsonl")
     args = p.parse_args()
-    with open(args.out, "w") as out:
+    with open(args.out, "w", encoding="utf-8") as out:
         for name, (repo, config, split, conv) in TASKS.items():
             ds = load_dataset(repo, config, split=split)
             idx = random.Random(f"{args.seed}-{name}").sample(range(len(ds)), min(args.per_task, len(ds)))

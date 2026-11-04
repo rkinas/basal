@@ -86,7 +86,7 @@ def main():
     p.add_argument("--tasks", nargs="*", default=list(TASKS))
     p.add_argument("--out", default="panel_en.jsonl")
     args = p.parse_args()
-    with open(args.out, "w") as out:
+    with open(args.out, "w", encoding="utf-8") as out:
         for name in args.tasks:
             repo, config, split, conv = TASKS[name]
             ds = load_dataset(repo, config, split=split)
