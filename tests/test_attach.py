@@ -153,3 +153,24 @@ def test_calibrate_fits_the_attached_model(tmp_path, capsys):
     assert all(cal["temperature_source"][t].startswith("fitted") for t in ("choice", "noul", "score"))
     srv, _ = ask(out, {"refund": QUESTIONS["refund"]}, "--calibration", str(cal_path))
     assert srv.temps == cal["temperature_per_prim"]
+
+
+@pytest.mark.parametrize("where", ["same", "alias", "inside", "contains"])
+def test_out_that_overlaps_the_base_is_refused_before_any_write(tmp_path, where):
+    """--out the base's own directory (also through a symlink), a directory inside it or one containing it: refused
+    before anything is written, so the base's files stay as they were (they were replaced by links to themselves)."""
+    base = tmp_path / "models" / "base"
+    base.mkdir(parents=True)
+    files = {"config.json": b'{"model_type": "qwen3"}', "model.safetensors": b"\x00weights\x01"}
+    for name, data in files.items():
+        (base / name).write_bytes(data)
+    out = {"same": base, "inside": base / "attached", "contains": tmp_path / "models"}.get(where)
+    if where == "alias":
+        out = tmp_path / "alias"
+        out.symlink_to(base, target_is_directory=True)
+    with pytest.raises(SystemExit, match="base model's"):
+        attach(base, out, force=True)
+    assert sorted(p.name for p in base.iterdir()) == sorted(files)
+    for name, data in files.items():
+        assert not (base / name).is_symlink() and (base / name).read_bytes() == data
+    assert not (base / "attached").exists()
