@@ -68,6 +68,17 @@ def readout(tok, fmt):
     return out
 
 
+def check_out(src, out):
+    """SystemExit before anything is written when the output directory is the base's own directory (also through a
+    symlink), lies inside it or contains it: the links would replace the base's files with links to themselves."""
+    s, o = Path(src).resolve(), Path(out).resolve()
+    if o == s:
+        raise SystemExit(f"--out {out}: the base model's own directory; give a new directory")
+    if o.is_relative_to(s) or s.is_relative_to(o):
+        raise SystemExit(f"--out {out}: {'inside' if o.is_relative_to(s) else 'contains'} the base model's directory "
+                         f"{src}; give a directory outside it")
+
+
 def attach(base, out, fmt=1, chat_template=None, revision=None, force=False):
     """Write the basal model directory `out` for the base model `base` (a directory or a Hugging Face repo id) ->
     the basal.json written."""
@@ -79,6 +90,7 @@ def attach(base, out, fmt=1, chat_template=None, revision=None, force=False):
     if (src / "basal.json").exists():
         raise SystemExit(f"{base} is already a basal model (it has basal.json): serve it as it is")
     out = Path(out)
+    check_out(src, out)
     if out.exists() and any(out.iterdir()) and not force:
         raise SystemExit(f"--out {out}: not empty (--force replaces the links and files basal-attach writes)")
     out.mkdir(parents=True, exist_ok=True)
