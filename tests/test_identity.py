@@ -50,3 +50,27 @@ def test_bench_identity_exit_status(monkeypatch, gates, status):
     monkeypatch.setattr(identity, "main", lambda argv: seen.append(argv) or [{"gate": g} for g in gates])
     monkeypatch.setattr(sys, "argv", ["basal-bench", "--identity", "--model", "m"])
     assert bench.main() == status and seen == [["--model", "m"]]
+
+
+@pytest.mark.parametrize("given", [False, True])
+def test_identity_nvfp4_reads_the_model_folders_amax(monkeypatch, tmp_path, given):
+    """--quant nvfp4: the engine under test gets the calibrated input amax, from --nvfp4-amax or the model folder's
+    NVFP4_AMAX.json as basal-serve reads it (basal-omni refuses NVFP4 without it)."""
+    import json
+
+    (tmp_path / "NVFP4_AMAX.json").write_text(json.dumps({"amax": {"0.q_proj": 2.5}}), encoding="utf-8")
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps({"0.q_proj": 7.0}), encoding="utf-8")
+    seen = []
+
+    class Built(Exception):
+        pass
+
+    def backend(*args, **kw):
+        seen.append(kw)
+        raise Built
+
+    monkeypatch.setattr(identity, "GraphBackend", backend)
+    with pytest.raises(Built):
+        identity.main(["--model", str(tmp_path), "--quant", "nvfp4"] + (["--nvfp4-amax", str(other)] if given else []))
+    assert seen[0]["nvfp4_amax"] == ({"0.q_proj": 7.0} if given else {"0.q_proj": 2.5})

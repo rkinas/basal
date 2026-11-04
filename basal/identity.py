@@ -44,7 +44,7 @@ import torch
 from .agree import QUESTIONS, build, compare, decisions, orders  # noqa: F401 (shared with basal-agree)
 from .engine import ATTN, GraphBackend, resolve
 from .jsonl import read_lines
-from .server import default_orders, lean_arg, merge_arg
+from .server import default_orders, lean_arg, merge_arg, nvfp4_args
 from .prompt import model_format
 
 GATE = 0.999
@@ -86,6 +86,8 @@ def main(argv=None):
     ap.add_argument("--model", default="Remek/basal-1.5-4.5B")
     ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"])
     ap.add_argument("--quant", default=None, choices=["fp8", "nvfp4"])
+    ap.add_argument("--nvfp4-amax", dest="nvfp4_amax", default=None,
+                    help="--quant nvfp4: the calibrated input amax (as basal-serve; default: the model's NVFP4_AMAX.json)")
     ap.add_argument("--no-compile", dest="compile", action="store_false")
     ap.add_argument("--n-single", dest="n_single", type=int, default=200)
     ap.add_argument("--n-multi", dest="n_multi", type=int, default=60)
@@ -123,6 +125,7 @@ def main(argv=None):
         a.reference_attn = a.attn
     md = resolve(a.model)
     fmt = model_format(md)
+    quant_args = nvfp4_args(a, md, a.quant)  # basal-omni in NVFP4: the input amax, as basal-serve reads it
     early = None
     if a.reference_attn:  # the reference engine first: the attention kernel is process-wide and fixed at capture
         if a.against:
@@ -130,12 +133,12 @@ def main(argv=None):
         t0 = time.time()
         early = [GraphBackend(md, a.dtype, a.quant, compile=a.compile, shared=True, warm=a.reference == "plain",
                               attn=a.reference_attn, merge=merge_arg(a.reference_merge or a.merge),
-                              lean=lean_arg(a.reference_lean or a.lean))]
+                              lean=lean_arg(a.reference_lean or a.lean), **quant_args)]
         early.append(round(time.time() - t0, 1))
     t0 = time.time()
     be = None if early else GraphBackend(md, a.dtype, a.quant, compile=a.compile, shared=True, attn=a.attn,
                                          merge=merge_arg(a.merge), lean=lean_arg(a.lean), tree=a.tree,
-                                         gemma_attn=a.gemma_attn)
+                                         gemma_attn=a.gemma_attn, **quant_args)
     if be is not None:
         print(json.dumps(dict(model=a.model, dtype=a.dtype, quant=a.quant, prompt_format=fmt, graphs=len(be.graphs),
                               attention=be.attn, fp8_checkpoint=be.fp8_checkpoint,
@@ -178,7 +181,7 @@ def main(argv=None):
         torch.cuda.empty_cache()
         t0 = time.time()
         be = GraphBackend(md, a.dtype, a.quant, compile=a.compile, shared=True, attn=a.attn, merge=merge_arg(a.merge),
-                          lean=lean_arg(a.lean), tree=a.tree, gemma_attn=a.gemma_attn)
+                          lean=lean_arg(a.lean), tree=a.tree, gemma_attn=a.gemma_attn, **quant_args)
         print(json.dumps(dict(model=a.model, dtype=a.dtype, quant=a.quant, prompt_format=fmt, graphs=len(be.graphs),
                               attention=be.attn, fp8_checkpoint=be.fp8_checkpoint,
                               startup_s=round(time.time() - t0, 1))), flush=True)
