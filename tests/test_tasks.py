@@ -257,3 +257,52 @@ def test_extract_number_after_a_typeset_minus_keeps_its_sign():
     x = run(FakeServer(by_text(pref)), {"state": state, "questions": {"x": {"type": "extract", "schema": schema}}})
     x = x["answers"]["x"]
     assert x["fields"]["temp"]["text"] == "\u22125" and x["data"] == {"temp": -5, "change": -2}
+
+
+def test_extract_field_paths_and_enum_values_keep_their_meaning():
+    from basal.calibrate import field_correct, field_gold, task_units
+    from basal.tasks import _set_path, enum_keys, expand, field_keys
+    dotted = {"type": "object", "properties": {"customer.name": {"type": "string"}, "a": {"type": "string"},
+                                                "a.b": {"type": "string"}}}
+    keys = field_keys(dotted)
+    assert keys == {"customer.name": ("customer.name",), "a": ("a",), "a.b": ("a.b",)}
+    data = {}
+    for path, value in (("customer.name", "Alice"), ("a", "x"), ("a.b", "y")):
+        _set_path(data, keys[path], value)
+    assert data == {"customer.name": "Alice", "a": "x", "a.b": "y"}           # not customer -> name, no TypeError
+    clash = {"type": "object", "properties": {"customer.name": {"type": "string"},
+                                               "customer": {"type": "object", "properties": {"name": {"type": "string"}}}}}
+    with pytest.raises(ValueError, match="two fields have the path 'customer.name'"):
+        expand({"state": "s", "questions": {"e": {"type": "extract", "schema": clash}}})
+    # enum values: 1 and "1" are two options, "__missing__" is a value, not "not stated"
+    assert enum_keys([1, "1", "__missing__", "x", True]) == ["1", '"1"', '"__missing__"', "x", "True"]
+    assert enum_keys(["low", "high"]) == ["low", "high"]                         # the keys as before
+    schema = {"type": "object", "properties": {"v": {"enum": [1, "1", "__missing__"]}}}
+    body, _ = expand({"state": "s", "questions": {"e": {"type": "extract", "schema": schema}}})
+    assert list(body["questions"]["e::f::v"]["criteria"]) == ["1", '"1"', '"__missing__"', "__missing__"]
+    with pytest.raises(ValueError, match="enum values repeat"):
+        enum_keys([1, 1])
+    assert field_gold("v", "enum", schema["properties"]["v"], "1") == "1"
+    assert field_gold("v", "enum", schema["properties"]["v"], 1) == 1
+    assert not field_correct("enum", True, 1) and field_correct("enum", 1, 1)
+    q = {"type": "extract", "schema": {"type": "object", "properties": {"customer.name": {"type": "string"}}}}
+    assert task_units("e", q, {"customer.name": "Alice"}, "Customer: Alice") == [("customer.name", ("string", "Alice"))]
+
+
+def test_extract_answers_map_back_to_typed_enum_values():
+    from basal.tasks import expand, finish
+    schema = {"type": "object", "properties": {"v": {"enum": [1, "1", "__missing__"]},
+                                                "tags": {"type": "array", "items": {"enum": [1, "1"]}}}}
+    body = {"state": "s", "questions": {"e": {"type": "extract", "schema": schema}}}
+    expanded, plans = expand(body)
+    def out(choice, selected):
+        return {"answers": {"e::f::v": {"choice": choice, "confidence": 0.8, "probabilities": {
+                    "1": 0.1, '"1"': 0.8, '"__missing__"': 0.05, "__missing__": 0.05}},
+                "e::f::tags": {"selected": selected, "probabilities": {"1": 0.9, '"1"': 0.9}, "set_confidence": 0.81}},
+                "usage": {}}
+    res = finish(out('"1"', ["1", '"1"']), body, plans, {})["answers"]["e"]
+    assert res["data"]["v"] == "1" and isinstance(res["data"]["v"], str)
+    assert res["data"]["tags"] == [1, "1"]
+    res = finish(out('"__missing__"', []), body, plans, {})["answers"]["e"]
+    assert res["data"]["v"] == "__missing__"                            # a value, not "not stated"
+    assert finish(out("__missing__", []), body, plans, {})["answers"]["e"]["data"]["v"] is None

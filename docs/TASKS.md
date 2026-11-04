@@ -116,7 +116,11 @@ same answer there reads `"automated": {"0.01": null, "0.05": true}`.)
 ```
 
 - `enum` / `oneOf` (with `const`), `boolean` and arrays of enum values are decisions (`choice`, `multi`), with a "not
-  stated" option and calibrated probabilities.
+  stated" option and calibrated probabilities. The option keys in `probabilities` are the values as text; where two
+  values would read the same (`1` and `"1"`) or a value is `"__missing__"` (the key of "not stated"), those values are
+  keyed by their JSON form (`"\"1\""`), and `data` holds the typed value.
+- `fields` and `data` follow the schema's property names: a property named `customer.name` is one key in `data`, not
+  `customer` → `name`; a schema where such a name and a nested object give the same path is refused (422).
 - `string`, `number` and `integer` fields are two decisions, with no text generation: **which line** of the state
   gives the value (a `choice` over the lines, plus "not stated"), then **which span of that line** is exactly the value
   (a `choice` over the line's candidate spans: the parts between separators, the part after a colon, and runs of

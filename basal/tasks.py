@@ -149,8 +149,30 @@ def _consts(s):
     return None
 
 
-def leaves(schema, path=""):
-    """A JSON schema -> (path, kind, spec): kind is enum, enum_list, boolean, string, number or integer."""
+MISSING = "__missing__"  # the option key of "not stated" (enum values never take it: enum_keys)
+
+
+def leaves(schema):
+    """A JSON schema -> [(path, kind, spec)]: kind is enum, enum_list, boolean, string, number or integer; path is the
+    property names joined by "." (the key of the answer's fields). Two fields with the same path (a property named
+    "a.b" next to an object "a" with a property "b") are refused: field_keys() gives each path its property names."""
+    out = []
+    for path, keys, kind, spec in _leaves(schema):
+        if path in {p for p, _, _ in out}:
+            raise ValueError(f"extract: two fields have the path {path!r} (a property name with a dot and a nested "
+                             "object): rename one")
+        out.append((path, kind, spec))
+    return out
+
+
+def field_keys(schema):
+    """{path: the property names from the root} of every field of leaves(schema)."""
+    leaves(schema)  # the same checks
+    return {path: keys for path, keys, _, _ in _leaves(schema)}
+
+
+def _leaves(schema, keys=()):
+    path = ".".join(keys)
     if not isinstance(schema, dict):
         raise ValueError(f"extract: schema at {path or 'root'!r} must be an object")
     t = _type(schema)
@@ -159,20 +181,22 @@ def leaves(schema, path=""):
         if not props:
             raise ValueError(f"extract: object {path or 'root'!r} has no properties")
         for k, sub in props.items():
-            yield from leaves(sub, f"{path}.{k}" if path else str(k))
+            yield from _leaves(sub, keys + (str(k),))
         return
     if _consts(schema):
-        yield path, "enum", schema
+        enum_keys([v for v, _ in _consts(schema)], path)
+        yield path, keys, "enum", schema
     elif t == "boolean":
-        yield path, "boolean", schema
+        yield path, keys, "boolean", schema
     elif t == "array":
         items = schema.get("items") or {}
         if _consts(items):
-            yield path, "enum_list", schema
+            enum_keys([v for v, _ in _consts(items)], path)
+            yield path, keys, "enum_list", schema
         else:
             raise ValueError(f"extract: field {path!r}: arrays are supported only with enum items (experimental)")
     elif t in ("string", "number", "integer", None):
-        yield path, t or "string", schema
+        yield path, keys, t or "string", schema
     else:
         raise ValueError(f"extract: field {path!r}: type {t!r} is not supported")
 
@@ -251,7 +275,7 @@ def second_round(out, body, plans, max_options=255):
             if len(cands) <= 1:  # nothing to choose: the one candidate is the value, none means "not stated"
                 continue
             crit = {f"S{j}": state[s:e] for j, (s, e) in enumerate(cands)}
-            crit["__missing__"] = w["missing"]
+            crit[MISSING] = w["missing"]
             qs[f"{name}{SEP}s{SEP}{path}"] = {"type": "choice", "criteria": crit, "option_keys": "hide",
                                               "instructions": p["pre"] + w["span"].format(
                                                   line=_shown(state[a:b]), field=_field_text(path, spec))}
@@ -266,8 +290,25 @@ def _field_text(path, spec):
     return f"{name} ({d})" if d else name
 
 
+def enum_keys(values, path=""):
+    """The option keys of an enum's values: the value as text (as before), or its JSON form where two values would get
+    the same text (1 and "1") or a value would take the key of "not stated" -> [key per value]."""
+    text = [str(v) for v in values]
+    keys = [t if text.count(t) == 1 and t != MISSING else json.dumps(v, ensure_ascii=False)
+            for t, v in zip(text, values)]
+    if len(set(keys)) < len(keys):
+        raise ValueError(f"extract: field {path!r}: enum values repeat ({values[:10]})")
+    return keys
+
+
+def enum_values(values):
+    """{option key: value} of an enum's values (enum_keys)."""
+    return dict(zip(enum_keys(values), values))
+
+
 def _set_path(obj, path, value):
-    *head, last = path.split(".")
+    """Puts value at path: a tuple of property names (field_keys), or a dotted path."""
+    *head, last = path.split(".") if isinstance(path, str) else path
     for k in head:
         obj = obj.setdefault(k, {})
     obj[last] = value
@@ -379,9 +420,10 @@ def expand(body, max_options=255):
                 f = _field_text(path, spec)
                 if kind in ("enum", "enum_list"):
                     vals = _consts(spec if kind == "enum" else spec["items"])
-                    crit = {str(v): f"{v} ({d})" if d else str(v) for v, d in vals}  # shown: the value (+ its description)
+                    crit = {k: f"{v} ({d})" if d else str(v)  # shown: the value (+ its description)
+                            for k, (v, d) in zip(enum_keys([v for v, _ in vals], path), vals)}
                     if kind == "enum":
-                        crit["__missing__"] = w["missing"]
+                        crit[MISSING] = w["missing"]
                         sub[f"f{SEP}{path}"] = {"type": "choice", "criteria": crit, "option_keys": "hide",
                                                 "instructions": pre + w["enum"].format(field=f)}
                     else:
@@ -397,10 +439,11 @@ def expand(body, max_options=255):
                                          "empty (fields from media: enum and boolean only)")
                     regions = regions or line_regions(text, max_options - 1)
                     crit = {f"L{i}": _shown(text[a:b]) for i, (a, b) in enumerate(regions)}
-                    crit["__missing__"] = w["missing"]
+                    crit[MISSING] = w["missing"]
                     sub[f"f{SEP}{path}"] = {"type": "choice", "criteria": crit, "option_keys": "hide",
                                             "instructions": pre + w["line"].format(field=f)}
-            plans[name] = dict(type=t, fields=fields, lang=lang, pre=pre, regions=regions, risks=_risks(q))
+            plans[name] = dict(type=t, fields=fields, lang=lang, pre=pre, regions=regions, risks=_risks(q),
+                               keys=field_keys(q.get("schema") or {}))
         for k, v in sub.items():
             questions[f"{name}{SEP}{k}"] = v
     return dict(body, questions=questions), plans
@@ -478,12 +521,12 @@ def finish(out, body, plans, cal, second=None):
             for path, kind, spec in p["fields"]:
                 a = part[f"f{SEP}{path}"]
                 if kind == "enum":
-                    vals = {str(v): v for v, _ in _consts(spec)}
+                    vals = enum_values([v for v, _ in _consts(spec)])
                     c = a["choice"]
                     f = {"value": None if c == "__missing__" else vals[c], "probabilities": a["probabilities"],
                          "confidence": a["confidence"], "source": "choice"}
                 elif kind == "enum_list":
-                    vals = {str(v): v for v, _ in _consts(spec["items"])}
+                    vals = enum_values([v for v, _ in _consts(spec["items"])])
                     f = {"value": [vals[k] for k in a["selected"]], "probabilities": a["probabilities"],
                          "confidence": a["set_confidence"], "source": "choice"}
                 elif kind == "boolean":
@@ -526,7 +569,7 @@ def finish(out, body, plans, cal, second=None):
                     f["automated"] = _automated(cal, "extract", f["confidence"], p["risks"])
                 f["calibration"] = "validated" if f["source"] == "choice" else "per decision"
                 fields[path] = f
-                _set_path(data, path, f["value"])
+                _set_path(data, p["keys"][path], f["value"])
             res = {"type": "extract", "data": data, "fields": fields}
         res["experimental"] = True
         ans[name] = res

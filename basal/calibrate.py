@@ -196,9 +196,9 @@ def simple(rec):
     return dict(body, **{k: rec[k] for k in ("id", "group", "family") if k in rec})
 
 
-def _at(obj, path):
-    """(found, value) at a dotted field path of a nested gold object."""
-    for k in path.split("."):
+def _at(obj, keys):
+    """(found, value) at a field of a nested gold object: its property names from the root (tasks.field_keys)."""
+    for k in keys:
         if not isinstance(obj, dict) or k not in obj:
             return False, None
         obj = obj[k]
@@ -211,9 +211,11 @@ def field_gold(path, kind, spec, v):
         return None
     if kind == "enum":
         vals = [c for c, _ in task_types._consts(spec)]
-        hit = [c for c in vals if c == v or str(c) == str(v)]
+        hit = [c for c in vals if type(c) is type(v) and c == v] or [c for c in vals if str(c) == str(v)]
         if not hit:
             raise ValueError(f"field {path!r}: gold {v!r} is not one of its values {vals[:10]}")
+        if len(hit) > 1:
+            raise ValueError(f"field {path!r}: gold {v!r} matches several values {hit[:10]}; give it with its JSON type")
         return hit[0]
     if kind == "boolean":
         s = str(v).strip().lower()
@@ -244,7 +246,7 @@ def field_correct(kind, value, gold):
     if kind == "string":
         norm = lambda s: " ".join(str(s).split()).casefold()
         return norm(value) == norm(gold)
-    return value == gold
+    return type(value) is type(gold) and value == gold  # enum 1 is not true, nor "1"
 
 
 def task_units(name, q, gold, state):
@@ -292,8 +294,9 @@ def task_units(name, q, gold, state):
         raise ValueError("gold of extract: the field values nested as in the schema (null = not stated; a field left "
                          "out is not labelled)")
     out = []
+    keys = task_types.field_keys(q.get("schema") or {})
     for path, kind, spec in task_types.leaves(q.get("schema") or {}):
-        found, v = _at(gold, path)
+        found, v = _at(gold, keys[path])
         if found and kind != "enum_list":  # a label set has no certified threshold
             out.append((path, (kind, field_gold(path, kind, spec, v))))
     if not out:
