@@ -232,6 +232,14 @@ def yes_no(lang, crit=None):
                                 _text(crit.get("false") or ("Nie" if lang == "pl" else "No"))])
 
 
+def listed_options(name, crit):
+    """A list of option keys -> {key: None}. A key that is a non-finite number (NaN, or 1e999 read as inf) is refused:
+    it became a key of the answer's probabilities, which are then no JSON (HTTP 500 after the engine's run)."""
+    if any(isinstance(k, float) and not math.isfinite(k) for k in crit):
+        raise RequestError(f"question {name!r}: an option key must be a string or a finite number")
+    return {k: None for k in crit}
+
+
 def check_body(body):
     """The shape of a decision request (its questions are read by to_items) -> RequestError (HTTP 422)."""
     if not isinstance(body, dict):
@@ -265,7 +273,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
         if t == "multi":  # one yes/no branch per label
             crit = q.get("criteria") or {}
             if isinstance(crit, list):
-                crit = {k: None for k in crit}
+                crit = listed_options(name, crit)
             if not crit:
                 raise RequestError(f"question {name!r}: multi needs criteria")
             keys = list(crit)
@@ -312,7 +320,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
                 if base not in ("choice", "noul"):
                     raise RequestError(f"question {name!r}: base must be \"choice\" or \"noul\", got {base!r}")
                 if isinstance(crit, list):
-                    crit = {k: None for k in crit}
+                    crit = listed_options(name, crit)
                 keys, opts = named_options(crit, q.get("option_keys", "show"))
             extra = dict(base=base, act=act_spec(name, q, keys))
         elif t == "noul":  # yes/no; optional criteria {"true": ..., "false": ...}; answer = P(true)
@@ -326,7 +334,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
         else:  # choice: {key: description} or [keys]
             crit = q.get("criteria") or {}
             if isinstance(crit, list):
-                crit = {k: None for k in crit}
+                crit = listed_options(name, crit)
             keys, opts = named_options(crit, q.get("option_keys", "show"))
         if not 2 <= len(opts) <= max_opts:
             what = " (tools and extra options)" if t == "tool" else ""
