@@ -561,6 +561,34 @@ def test_pass2_parts_keep_the_budgets(L2):
     assert [lens[q] for p in parts for q in p] == sorted(lens)
 
 
+def test_conv_fallback_is_said_and_reported(monkeypatch, tmp_path, capsys):
+    """Without fla's causal_conv1d the Gated DeltaNet convolution runs on torch's conv1d, which rounds differently
+    from the kernel --mode fast was checked with: on CUDA that is said at start-up, and the backend names its kernel
+    (the start-up line and /ui show it). The CPU runs torch's, the eager reference's, without a warning."""
+    sentinel = object()
+    monkeypatch.setattr(gdn_module, "fla_conv1d", lambda: None)
+    assert gdn_module.conv_kernel(True) == (None, "torch conv1d")
+    assert "torch's conv1d" in capsys.readouterr().err
+    assert gdn_module.conv_kernel(False) == (None, "torch conv1d") and capsys.readouterr().err == ""
+    monkeypatch.setattr(gdn_module, "fla_conv1d", lambda: sentinel)
+    assert gdn_module.conv_kernel(True) == (sentinel, "fla causal_conv1d") and capsys.readouterr().err == ""
+    tiny_qwen35(tmp_path / "tiny")
+    assert gdn_backend(monkeypatch, tmp_path / "tiny").conv_kernel == "torch conv1d"
+
+
+def test_compact_rows_need_fla_conv(monkeypatch, qwen35):
+    """Compact rows call fla's causal_conv1d with the chunk indices (there is no torch fallback for them): without it
+    they are refused before loading, not failed at the first request."""
+    no_load(monkeypatch)
+    monkeypatch.setattr(gdn_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(gdn_module, "fla_varlen", lambda: (None, None))
+    monkeypatch.setattr(gdn_module, "fla_conv1d", lambda: None)
+    monkeypatch.setattr(gdn_module, "set_attention", lambda *a, **k: "sdpa")
+    monkeypatch.setattr(gdn_module, "torch_varlen_available", lambda *a: None)
+    with pytest.raises(ValueError, match="causal_conv1d"):
+        GraphBackend(str(qwen35), "float32", batches="compact", device="cuda")
+
+
 def test_pinned_fla_cache_never_times():
     """A pinned autotuner cache has every key (so Triton never times candidates): the recorded config for a recorded
     key, the kernel's default for any other; without CUDA nothing is pinned."""

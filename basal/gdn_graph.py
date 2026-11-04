@@ -34,6 +34,7 @@ import functools
 import inspect
 import json
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -168,6 +169,18 @@ def fla_conv1d():
     except Exception:
         return None
     return causal_conv1d
+
+
+def conv_kernel(cuda):
+    """The Gated DeltaNet convolution's kernel -> (fla's causal_conv1d or None, its name): on CUDA fla's where this fla
+    has it, else torch's conv1d (_conv; cuDNN on CUDA). torch's rounds differently (SiLU on the bf16 output, not in fp32
+    before the rounding) from fla's, the one --mode fast was checked with: on CUDA that fallback is said on stderr."""
+    conv = fla_conv1d() if cuda else None
+    if cuda and conv is None:
+        print("basal: warning: this flash-linear-attention has no causal_conv1d (fla.modules.conv.causal_conv1d): the "
+              "Gated DeltaNet convolution runs on torch's conv1d (cuDNN), which rounds differently from fla's kernel "
+              "--mode fast was checked with (flash-linear-attention 0.5.2)", file=sys.stderr, flush=True)
+    return conv, "fla causal_conv1d" if conv is not None else "torch conv1d"
 
 
 def fla_varlen():
@@ -437,7 +450,7 @@ class Qwen35Graph:
                    gdn_out=lambda h, o, z, gw, out_w: _gdn_out(h, o, z, gw, out_w, geps),
                    att_in=lambda h, nw, w, qn, kn, cos, sin: _att_in(h, nw, w, qn, kn, cos, sin, eps, qs, d, rd),
                    att_out=_att_out, rms=lambda h, w: _rms(h, w, eps))
-        conv = fla_conv1d() if cuda else None  # on CUDA fla's kernel, uncompiled (Triton), in both modes
+        conv, self.conv_kernel = conv_kernel(cuda)  # on CUDA fla's kernel, uncompiled (Triton), in both modes
         self.conv, self.conv_sizes, self.cuda = conv, cs, cuda
         # compact rows (GDNGraphBackend sets them): the attention kernel, fla's varlen pieces, the template prefixes
         self.varlen = self.fla_v = self.template_kv = self.template_st = None
@@ -697,6 +710,9 @@ class GDNGraphBackend(GraphBackend):
             if fla_varlen() is None:
                 raise ValueError(f"{model_dir}: --batches compact needs flash-linear-attention's "
                                  "chunk_gated_delta_rule forward with chunk indices (flash-linear-attention 0.5)")
+            if fla_conv1d() is None:  # (compact rows call it with the chunk indices; there is no torch fallback)
+                raise ValueError(f"{model_dir}: --batches compact needs flash-linear-attention's causal_conv1d "
+                                 "(fla.modules.conv.causal_conv1d, flash-linear-attention 0.5.2)")
             # (fp32, which the FlashAttention kernels do not take: one SDPA call per prompt, no graph; the gates' fp32
             # rows)
             self.compact_kernel = ("sdpa per prompt" if dtype == "float32" else "fa3" if self.attn == "fa3"
@@ -709,6 +725,7 @@ class GDNGraphBackend(GraphBackend):
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL
         self.net = Qwen35Graph(self.model, compile=compile and cuda)
+        self.conv_kernel = self.net.conv_kernel  # (reported at start-up)
         self.fla_pinned = fla_pin() if cuda else 0  # (after Qwen35Graph imported fla's kernels)
         self.fwd, self.fwd_sfx = self.net.forward, self.net.forward_suffix
         if self.compact:
