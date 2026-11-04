@@ -283,6 +283,9 @@ benchmarking a GPU.
     the ring (`--load-factor`).
   - **Requests without a state** go to the less loaded of two random replicas.
   - **Readiness:** a replica gets requests only while its `/health` answers 200.
+  - **Deadlines:** `--replica-timeout S` ends a call to a replica that has not answered in S seconds: the client gets
+    504, and a cascade level or a blend model that times out leaves the previous answers. Off by default (a large rank
+    request may need minutes); connecting to a replica is bounded by 10 s either way.
   - **API keys:** a client's key header goes on to the replicas, which check it with `--api-keys`
     ([API access](#api-access)).
   - **Replicas it starts** (`--gpus`) end with the router: each runs in its own process group, which the router

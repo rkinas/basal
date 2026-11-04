@@ -48,6 +48,11 @@ Off by default (the replicas' answers then pass through untouched):
                                           switch); BASAL_FALLBACK_API_KEY, if set, is sent as a bearer token.
   --route SCRIPT=URL[,URL]                requests whose state is mostly in that script (latin, cyrillic, greek,
                                           arabic, hebrew, cjk) go to those replicas instead
+  --replica-timeout S                     a call to a replica that has not answered in S seconds ends: the client
+                                          gets 504 (a cascade level or a blend model that times out leaves the
+                                          previous answers, as one that is down). Off: no deadline, as a long rank
+                                          request may need; connecting to a replica is bounded by CONNECT_S (10 s)
+                                          either way
 
 With --escalate, --blend or --fallback, the questions asked again go without their ask_if / depends_on, and ask_if is
 applied to the final answers: a question whose gate a replaced answer fails is null (usage.skipped), and one whose
@@ -94,6 +99,7 @@ from .metrics import prometheus
 LOAD_FACTOR = 1.25
 VNODES = 64
 POLL_S = 2.0
+CONNECT_S = 10.0  # connecting to a replica (TCP): an unreachable host fails the call (502) instead of waiting forever
 SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (spawn)
 
 
@@ -376,10 +382,11 @@ class Ring:
 
 class Router:
     def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None,
-                 levels=None, blend=None, blend_weight=1.0, fallback=None):
+                 levels=None, blend=None, blend_weight=1.0, fallback=None, timeout=None):
         """escalate, below: one cascade level; levels: [(URLs, threshold), ...] for levels 2, 3, ... instead;
         blend: [(URLs, weight), ...] asked beside the replicas (weight blend_weight); fallback: {url, model, below,
-        timeout, extra} of the LLM after the last level."""
+        timeout, extra} of the LLM after the last level; timeout: seconds of a replica call (--replica-timeout,
+        None: no deadline)."""
         import httpx
         levels = [(list(u), b) for u, b in (levels if levels is not None else [(escalate, below)]) if u]
         self.levels = [(f"level:{k}", b) for k, (_, b) in enumerate(levels, start=2)]  # (level k's pool, k - 1's threshold)
@@ -405,8 +412,10 @@ class Router:
         self.factor = factor
         self.rng = random.Random(seed)
         self.dead = False
-        self.client = httpx.AsyncClient(timeout=None, transport=transport,
-                                        limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
+        self.timeout = timeout
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=CONNECT_S if timeout is None else min(CONNECT_S, timeout)),
+            transport=transport, limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
     def choose(self, key, pool="main"):
         """(replica, how) for a request with routing key key (None: by load), among the replicas of pool."""
@@ -669,11 +678,18 @@ class Router:
             return 503, b'{"error": "no basal replica is ready"}', "application/json"
         self.load[r] += 1
         self.routed[(r, how)] += 1
+        import httpx
         try:
-            resp = await self.client.post(r + path, content=body, headers=headers)
+            # (wait_for: the whole call, however slowly a replica sends its bytes; None: no deadline)
+            resp = await asyncio.wait_for(self.client.post(r + path, content=body, headers=headers), self.timeout)
             if resp.status_code >= 500:
                 self.failed[r] += 1
             return resp.status_code, resp.content, resp.headers.get("content-type", "application/json")
+        except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+            self.failed[r] += 1
+            self.ready.discard(r)  # (until its next /health poll)
+            what = "connecting" if isinstance(e, httpx.ConnectTimeout) else f"after {self.timeout:g} s"
+            return 504, json.dumps({"error": f"replica {r}: timed out {what}"}).encode(), "application/json"
         except Exception as e:  # noqa: BLE001
             self.failed[r] += 1
             self.ready.discard(r)
@@ -961,6 +977,9 @@ def main(argv=None):
                     help="--escalate: questions whose top probability is under this are asked again there (default "
                          "0.8); one per --escalate, in the same order")
     ap.add_argument("--route", action="append", default=[], help="SCRIPT=URL[,URL]: states in that script go there")
+    ap.add_argument("--replica-timeout", dest="replica_timeout", type=float, default=None,
+                    help="seconds a replica has to answer a call (then 504; a cascade level or a blend model keeps the "
+                         "previous answers); default: no deadline")
     ap.add_argument("--blend", nargs="+", action="append", default=[],
                     help="replicas of one more model whose probabilities are blended in; repeat for each model")
     ap.add_argument("--blend-weights", dest="blend_weights", nargs="+", type=float, default=None,
@@ -986,6 +1005,8 @@ def main(argv=None):
                          "each request adds one append to an in-memory ring. Open like /metrics; the replicas' parts "
                          "need a key when they run with --api-keys (the page asks for it)")
     a = ap.parse_args(argv)
+    if a.replica_timeout is not None and not (math.isfinite(a.replica_timeout) and a.replica_timeout > 0):
+        raise SystemExit("basal-router: --replica-timeout must be a number of seconds > 0")
     cascade = levels(a.escalate, a.escalate_below)
     first, blend = blends(a.blend, a.blend_weights, cascade)
     fallback = fallback_config(a, blend)
@@ -1006,7 +1027,7 @@ def main(argv=None):
             raise SystemExit(f"basal-router: --route {x!r}: SCRIPT=URL[,URL], SCRIPT one of {', '.join(SCRIPTS)}, other")
         routes[k] = v.split(",")
     router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes, blend=blend, blend_weight=first,
-                    fallback=fallback)
+                    fallback=fallback, timeout=a.replica_timeout)
     ui = None
     if a.ui == "on":  # basal/router_ui.py: the page at /ui, its state at /ui/state
         from .router_ui import RouterUI
