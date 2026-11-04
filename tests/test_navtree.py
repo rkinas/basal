@@ -88,6 +88,18 @@ def test_build_pages_sections_and_dirs(tmp_path):
     assert Tree.load(out).nodes["passport"]["kind"] == "page"
 
 
+def test_jsonl_document_fields_are_checked(tmp_path):
+    """A JSONL document whose title is not a string is refused with its file and line, as one without text is (not a
+    TypeError from deep inside the parser)."""
+    f = tmp_path / "docs.jsonl"
+    f.write_text(json.dumps({"id": "a", "title": "Raport", "text": "Jeden."}) + "\n"
+                 + json.dumps({"id": "b", "title": 2024, "text": "Dwa."}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"docs.jsonl:2: .*title"):
+        navtree.build([str(f)])
+    f.write_text(json.dumps({"id": "b", "title": None, "text": "Dwa."}) + "\n", encoding="utf-8")
+    assert Tree(navtree.build([str(f)])).nodes["b"]["title"] == "b"  # no title: the id, as before
+
+
 def test_cluster_topics():
     pytest.importorskip("sklearn")
     texts = [f"passport visa travel border {i}" for i in range(12)] + [f"tax income return refund {i}"
