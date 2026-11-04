@@ -56,13 +56,36 @@ class ServerError(BasalError):
     """500 or any other status."""
 
 
+class NotReady(ServerError):
+    """503 from a server that is still loading (HTTP 503 {"status": "starting"}) or a router with no ready replica:
+    not a GPU out of memory, and retried after the Retry-After the server sends."""
+    retry_after = 0.0
+
+
 def _error(r):
     try:
         message = r.json().get("error", r.text)
     except (ValueError, AttributeError):
         message = r.text
     cls = {422: InvalidRequest, 503: OutOfMemory}.get(r.status_code, ServerError)
-    return cls(r.status_code, message)
+    if r.status_code == 503:  # a start-up or an empty router is not an out-of-memory GPU
+        try:
+            body = r.json()
+        except (ValueError, AttributeError):
+            body = None
+        if isinstance(body, dict) and (body.get("status") == "starting" or "no basal replica is ready" in str(body.get("error"))):
+            cls = NotReady
+    e = cls(r.status_code, message)
+    if cls is NotReady:
+        try:
+            e.retry_after = min(30.0, float(r.headers.get("retry-after", 0)))
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return e
+
+
+def _retryable(e):
+    return isinstance(e, (OutOfMemory, NotReady))
 
 
 # Questions, for decide with several of them; the keyword options are the question's own fields (API.md, TASKS.md).
@@ -195,9 +218,9 @@ class Basal(_Client):
             if r.status_code == 200:
                 return r.json()
             e = _error(r)
-            if not isinstance(e, OutOfMemory) or attempt == self.retries:
+            if not _retryable(e) or attempt == self.retries:
                 raise e
-            time.sleep(self.backoff * 2 ** attempt)
+            time.sleep(max(self.backoff * 2 ** attempt, getattr(e, "retry_after", 0.0)))
 
     def request(self, body):
         """The whole response to a request body (answers, model, usage)."""
@@ -262,9 +285,9 @@ class AsyncBasal(_Client):
             if r.status_code == 200:
                 return r.json()
             e = _error(r)
-            if not isinstance(e, OutOfMemory) or attempt == self.retries:
+            if not _retryable(e) or attempt == self.retries:
                 raise e
-            await asyncio.sleep(self.backoff * 2 ** attempt)
+            await asyncio.sleep(max(self.backoff * 2 ** attempt, getattr(e, "retry_after", 0.0)))
 
     async def request(self, body):
         return await self._send("POST", self.url, json=body)
