@@ -4,6 +4,7 @@ import asyncio
 import httpx
 import pytest
 
+from basal import tasks
 from basal.client import AsyncBasal, Basal, ServerError
 
 
@@ -29,3 +30,12 @@ def test_cl3_the_async_client_does_the_same():
     c = AsyncBasal("http://basal/", http=http, backoff=0)
     with pytest.raises(ServerError):
         asyncio.run(c.request({"state": "s", "questions": {}}))
+
+
+def test_p1_the_typeset_minus_is_a_minus():
+    assert tasks.parse_number("Temperatura: \u22125 stopni") == -5
+    assert tasks.parse_number("\u22123,5") == -3.5
+
+
+def test_p1_the_ascii_minus_and_a_plain_number_are_unchanged():
+    assert tasks.parse_number("-5") == -5 and tasks.parse_number("5") == 5
