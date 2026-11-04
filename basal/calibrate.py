@@ -384,6 +384,8 @@ def read(path):
 # -- probabilities ---------------------------------------------------------------------------------------------------
 async def collect(decide, bodies, concurrency=32):
     """Every request through `decide` (Server.decide in process, or HTTP) -> responses (an Exception on failure)."""
+    if concurrency < 1:
+        raise ValueError(f"concurrency must be at least 1, not {concurrency}")
     sem, done, step = asyncio.Semaphore(concurrency), 0, max(1, len(bodies) // 10)
 
     async def one(b):
