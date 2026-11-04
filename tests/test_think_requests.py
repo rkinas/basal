@@ -2,6 +2,7 @@
 and task / rank questions do not break the think pass, whatever the request's think; only plain questions think. The
 sidecar's log file is closed with it."""
 import asyncio
+import threading
 
 import pytest
 from test_server import FakeServer
@@ -61,3 +62,21 @@ def test_the_sidecar_closes_its_log(tmp_path, monkeypatch):
     assert not f.closed
     car.close()
     assert f.closed
+
+
+def test_facts_are_read_off_the_event_loop(monkeypatch):
+    """facts=auto: the think pass computes the facts of the state readout 1 saw in a worker thread, as basal-serve
+    does, so a long state does not stall the event loop."""
+    s = Probe()
+    seen = []
+
+    def facts(text):
+        seen.append(threading.get_ident())
+        return text
+    monkeypatch.setattr(T, "inject_facts", facts)
+
+    async def go():
+        return threading.get_ident(), await s._run({"state": "Umowa z 1.02.2024 r.", "facts": "auto", "think": "force",
+                                                    "questions": {"q": Q}})
+    loop, out = asyncio.run(go())
+    assert seen and loop not in seen and out["answers"]["q"]["think"]["tokens"] == 1
