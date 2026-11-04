@@ -94,7 +94,10 @@ benchmarking a GPU.
   (one `inductor*.bin` per flag set, all loaded), and a start with flags it was not prepared with compiles what it
   lacks. A model may ship its own under `prepared/<key>/`. Then the server compiles nothing it has not seen
   and picks the same kernels in every start; CUDA graphs are still captured. `--prepared off` compiles as before;
-  `--prepared <dir>` loads that directory or refuses to start.
+  `--prepared <dir>` loads that directory or refuses to start. Compiled kernels are code the compiler cache runs, so
+  the ones a Hugging Face repository ships load only for trusted publishers: `BASAL_PREPARED_TRUST` (comma-separated
+  owners, `*` for every one; default `Remek`). A local model directory, `--prepared <dir>` and what `basal-prepare`
+  wrote on this machine are trusted as they are.
 - **Batching**: concurrent requests are batched into the same forward passes and every request is answered as soon as
   its passes are read out. Under load the server waits up to `--batch-window-ms` (default 3) for as many requests as
   the previous batch had; an idle server answers at once. `--max-batch` and `--wait-ms` control batching further.

@@ -128,12 +128,33 @@ def fetch(repo, revision, fields):
     return m.parent
 
 
+TRUSTED = ("Remek",)  # publishers whose repositories' prepared kernels --prepared auto loads (BASAL_PREPARED_TRUST)
+
+
+def trusted(repo):
+    """Whether --prepared auto loads the prepared kernels a Hugging Face repository ships: compiled kernels are code the
+    compiler cache runs, a trust beyond reading tensor weights, so only for the publishers in BASAL_PREPARED_TRUST
+    (comma-separated owners, "*" = every one; default TRUSTED). A local model directory or --prepared <dir> is
+    trusted by whoever points to it; kernels basal-prepare wrote into the user cache are local too."""
+    env = os.environ.get("BASAL_PREPARED_TRUST")
+    owners = TRUSTED if env is None else tuple(o.strip() for o in env.split(",") if o.strip())
+    return "*" in owners or str(repo).split("/")[0] in owners
+
+
 def startup(model_dir, fields, spec="auto", model=None, revision=None):
     """basal-serve's prepared start-up -> what was loaded (load), or None: the directory locate finds, else with spec
-    "auto" and a Hugging Face model (`model` not a local path) the one fetched from its repository. A given path that
-    holds none for these fields stops the start."""
+    "auto" and a Hugging Face model (`model` not a local path) the one fetched from its repository. A Hugging Face
+    model of an untrusted publisher (trusted) loads neither: only the user cache. A given path that holds none for these
+    fields stops the start."""
+    hub = spec == "auto" and model is not None and not Path(model).exists()
+    if hub and not trusted(model):
+        d = locate(None, fields, str(cache_root() / key(fields)))  # (basal-prepare's own, on this machine)
+        if d is None:
+            print(f"basal: prepared kernels of {model} not loaded: its publisher is not trusted "
+                  f"(BASAL_PREPARED_TRUST={str(model).split('/')[0]} trusts it)", flush=True)
+        return load(d) if d is not None else None
     d = locate(model_dir, fields, spec)
-    if d is None and spec == "auto" and model is not None and not Path(model).exists():
+    if d is None and hub:
         d = fetch(model, revision, fields)  # shipped in the model's repository
     if d is None and spec not in ("auto", "off", None):
         raise SystemExit(f"--prepared {spec}: no prepared start-up for this model, mode and GPU there "

@@ -355,3 +355,38 @@ def test_prepare_into_model_needs_a_local_directory(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     with pytest.raises(SystemExit, match="local model directory"):
         prepared.main(["--model", "Remek/not-a-dir", "--into-model"])
+
+
+def test_only_trusted_publishers_kernels_load_from_the_hub(tmp_path, monkeypatch, capsys):
+    """Compiled kernels are code the compiler cache runs: --prepared auto loads those a Hugging Face repository ships
+    (fetched, or in its snapshot) only for a trusted publisher (BASAL_PREPARED_TRUST, default Remek); for others only
+    what basal-prepare wrote into the user cache on this machine. A local model directory is trusted."""
+    import huggingface_hub
+
+    import basal.engine
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    monkeypatch.delenv("BASAL_PREPARED_TRUST", raising=False)
+    snap = model(tmp_path / "snap")
+    f = prepared.key_fields(snap, "fast", env=ENV)
+    k = prepared.key(f)
+    d = snap / "prepared" / k
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(json.dumps(dict(fields=f, key=k, files=["inductor.bin", "manifest.json"])))
+    (d / "inductor.bin").write_text("kernels")
+    asked, loaded = [], []
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **kw: asked.append(a) or (_ for _ in ()).throw(
+        FileNotFoundError("none")))
+    monkeypatch.setattr(basal.engine, "persist_compile_cache", lambda: None)
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda b: loaded.append(b))
+    assert prepared.startup(snap, f, "auto", "someone/x", "main") is None  # its snapshot's kernels: not loaded
+    assert loaded == [] and asked == [] and "not trusted" in capsys.readouterr().out
+    assert prepared.startup(snap, f, "auto", "Remek/x", "main")["dir"] == str(d) and loaded == [b"kernels"]
+    monkeypatch.setenv("BASAL_PREPARED_TRUST", "someone, other")
+    assert prepared.startup(snap, f, "auto", "someone/x", "main")["dir"] == str(d)
+    monkeypatch.setenv("BASAL_PREPARED_TRUST", "")
+    assert prepared.startup(snap, f, "auto", "Remek/x", "main") is None  # nobody trusted
+    assert prepared.startup(snap, f, "auto", str(snap), None)["dir"] == str(d)  # a local model directory
+    own = tmp_path / "cache" / k  # what basal-prepare wrote on this machine loads for any publisher
+    own.mkdir(parents=True)
+    (own / "manifest.json").write_text(json.dumps(dict(fields=f, key=k, files=["manifest.json"])))
+    assert prepared.startup(snap, f, "auto", "someone/x", "main")["dir"] == str(own)
