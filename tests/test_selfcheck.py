@@ -36,7 +36,7 @@ def serve(ref, reverse=False, truncated=(), fail=()):
     """A stand-in for selfcheck.call: the reference answers, with the probabilities dealt out in the opposite order."""
     by_state = {i["state"]: i for i in ref["items"]}
 
-    def call(url, path, body=None, timeout=300):
+    def call(url, path, body=None, timeout=300, key=None):
         if path == "/v1/models":
             return {"models": [{"name": ref["model"], "mode": "llamacpp", "temperature_per_prim": {}}]}
         it = by_state[body["state"]]
@@ -79,6 +79,34 @@ def test_check_leaves_out_truncated_requests_and_fails_on_errors(monkeypatch, ca
     monkeypatch.setattr(selfcheck, "call", serve(r, fail=ids[:1]))
     assert selfcheck.check("http://x", path, 0.98, "") == 1
     assert "1 failed" in capsys.readouterr().out
+
+
+def test_api_key_is_sent_to_a_server_with_api_keys(monkeypatch, capsys, ref):
+    """--api-key (default $BASAL_API_KEY) goes as Authorization: Bearer on every call, so a server started with
+    --api-keys can be checked; without it the server's 401 stops the check with its message."""
+    import io
+    import urllib.error
+    r, path = ref
+    answers = serve(r)
+
+    def urlopen(req, timeout=None):
+        if req.get_header("Authorization") != "Bearer k-1":
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b'{"error": "API key"}'))
+        url = req.full_url.removeprefix("http://x")
+        body = answers("http://x", url, None if req.data is None else json.loads(req.data))
+        return io.BytesIO(json.dumps(body).encode())
+    monkeypatch.setattr(selfcheck.urllib.request, "urlopen", urlopen)
+    monkeypatch.delenv("BASAL_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as e:
+        selfcheck.main(["--url", "http://x", "--reference", path, "--api-key", "k-1"])
+    assert e.value.code == 0 and "PASS" in capsys.readouterr().out
+    monkeypatch.setenv("BASAL_API_KEY", "k-1")
+    with pytest.raises(SystemExit) as e:
+        selfcheck.main(["--url", "http://x", "--reference", path])
+    assert e.value.code == 0
+    monkeypatch.delenv("BASAL_API_KEY")
+    with pytest.raises(SystemExit, match="HTTP 401: the server needs an API key"):
+        selfcheck.main(["--url", "http://x", "--reference", path])
 
 
 def test_reference_lookup_by_name():

@@ -41,7 +41,7 @@ def test_a_selfcheck_reference_file_in_a_windows_encoding(tmp_path, enc, monkeyp
     path = tmp_path / "ref.json"
     path.write_bytes(ENC[enc](json.dumps({"checks": []})))
 
-    def past_the_read(url):
+    def past_the_read(url, key=None):
         raise RuntimeError("read ok")
     monkeypatch.setattr(selfcheck, "server_info", past_the_read)
     with pytest.raises(RuntimeError, match="read ok"):  # a JSON or decode error would stop before the server

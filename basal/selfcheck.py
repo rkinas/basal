@@ -32,6 +32,7 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__, synth
+from .cli import add_api_key, headers, refused
 from .textio import read_text
 
 TIE = 0.02
@@ -61,14 +62,17 @@ def build_requests():
     return reqs
 
 
-def call(url, path, body=None, timeout=300):
+def call(url, path, body=None, timeout=300, key=None):
+    """GET (body None) or POST url + path -> the JSON answer; key: the server's API key (basal.cli.headers)."""
     req = urllib.request.Request(url.rstrip("/") + path, data=None if body is None else json.dumps(body).encode(),
-                                 headers={"content-type": "application/json"}, method="GET" if body is None else "POST")
+                                 headers={"content-type": "application/json", **headers(key)},
+                                 method="GET" if body is None else "POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        raise SystemExit(f"{url}{path}: HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
+        raise SystemExit(refused(f"{url}{path}", e.code, key)
+                         or f"{url}{path}: HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
     except OSError as e:
         raise SystemExit(f"{url}{path}: {e} (is the server running?)") from None
     except ValueError as e:  # a 200 that is not JSON (a proxy's error page)
@@ -84,8 +88,8 @@ def uncalibrated(entry):
     return all(float(t) == 1.0 for t in temps)
 
 
-def server_info(url):
-    m = call(url, "/v1/models")["models"][0]
+def server_info(url, key=None):
+    m = call(url, "/v1/models", key=key)["models"][0]
     return {"name": m.get("name"), "mode": m.get("mode"), "uncalibrated": uncalibrated(m)}
 
 
@@ -98,13 +102,13 @@ def find(reference):
     raise SystemExit(f"reference {reference!r}: not a file; shipped references: {', '.join(shipped) or 'none'}")
 
 
-def make_reference(url, out, note=""):
-    info = server_info(url)
+def make_reference(url, out, note="", key=None):
+    info = server_info(url, key)
     if not info["uncalibrated"]:
         raise SystemExit("the reference needs raw probabilities: start the server with --no-calibration")
     items = []
     for req in build_requests():
-        res = call(url, "/v1/systemone", {"state": req["state"], "questions": req["questions"]})
+        res = call(url, "/v1/systemone", {"state": req["state"], "questions": req["questions"]}, key=key)
         items.append({**req, "answers": {k: {"type": a["type"], "probabilities": a["probabilities"]}
                                          for k, a in res["answers"].items()}})
     ref = {"format": 1, "model": (info["name"] or "").removesuffix("-GGUF"), "engine": info["mode"], "basal": __version__,
@@ -126,9 +130,9 @@ def compare(ref, got):
     return a == b, a == b or r[a] - r[b] < TIE, max(dps), sum(dps), len(keys)
 
 
-def check(url, reference, gate, note):
+def check(url, reference, gate, note, key=None):
     ref = json.loads(read_text(find(reference)))
-    info = server_info(url)
+    info = server_info(url, key)
     if info["name"] and ref["model"] and info["name"].removesuffix("-GGUF") != ref["model"].removesuffix("-GGUF"):
         print(f"warning: the server reports model {info['name']!r}, the reference is for {ref['model']!r}", file=sys.stderr)
     if not info["uncalibrated"]:
@@ -138,7 +142,7 @@ def check(url, reference, gate, note):
     for it in ref["items"]:
         t = time.perf_counter()
         try:
-            res = call(url, "/v1/systemone", {"state": it["state"], "questions": it["questions"]})
+            res = call(url, "/v1/systemone", {"state": it["state"], "questions": it["questions"]}, key=key)
         except SystemExit as e:
             errors += 1
             print(f"{it['id']}: {e}", file=sys.stderr)
@@ -194,12 +198,13 @@ def main(argv=None):
     ap.add_argument("--note", default="", help="what you test, printed with the result (GPU, driver, quantisation); "
                     "with --make-reference: how the reference was made")
     ap.add_argument("--make-reference", dest="make", metavar="FILE", help="write a reference file from this server")
+    add_api_key(ap)
     a = ap.parse_args(argv)
     if a.make:
-        return make_reference(a.url, a.make, a.note)
+        return make_reference(a.url, a.make, a.note, a.api_key)
     if not a.reference:
         ap.error("--reference is required (or --make-reference FILE)")
-    sys.exit(check(a.url, a.reference, a.gate, a.note))
+    sys.exit(check(a.url, a.reference, a.gate, a.note, a.api_key))
 
 
 if __name__ == "__main__":

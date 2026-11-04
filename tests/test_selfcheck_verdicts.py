@@ -42,7 +42,7 @@ def run_check(monkeypatch, tmp_path, answers_for, n_items=40, gate=0.98):
     path = tmp_path / "ref.json"
     path.write_text(json.dumps({"model": "m", "engine": "e", "basal": "x", "note": "", "items": items}), encoding="utf-8")
 
-    def fake_call(url, path, body=None, timeout=300):
+    def fake_call(url, path, body=None, timeout=300, key=None):
         return {"models": [{"name": "m", "mode": "x"}]} if path == "/v1/models" else answers_for(body)
     monkeypatch.setattr(sc, "call", fake_call)
     out = io.StringIO()
