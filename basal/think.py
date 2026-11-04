@@ -16,7 +16,9 @@ Request: "think": "auto" (the default when the server runs --think auto), "off",
 type, for calibration readouts); "think_text": true returns the reasoning. A question that thought answers with readout
 2's probabilities and confidence plus "think": {"tokens", "ms", "calibration", "no_think": {"probabilities",
 "confidence"}}; every answer of a think server carries "meta": {"think": {"used", "tokens"}} (what benchmark harnesses
-read). Multi questions, tool sets and requests whose state was truncated never think.
+read). A thought answer keeps the question's max_error / coverage (abstain, answer_set) under readout 2's
+calibration, and ask_if reads the answers after thinking. Multi questions, tool sets, tasks, rank questions, requests
+with media (readout 2 reads text only) and requests whose state was truncated never think.
 """
 import argparse
 import asyncio
@@ -38,8 +40,8 @@ from .engine import resolve
 from .facts import inject as inject_facts
 from .jsonl import read_lines
 from .prompt import PREFILL, RequestError, render
-from .server import (Server, act_answer, certified, check_calibration, refuse_lean_flex, temper, temperature,
-                     to_items)
+from .server import (Server, act_answer, certified, check_calibration, plain_limits, refuse_lean_flex, temper,
+                     temperature, to_items)
 from .textio import read_text
 from .tools import answer as tool_answer
 
@@ -149,7 +151,8 @@ def think_calibration(md, path):
 
 
 def answer(q, pl, cal):
-    """Readout 2's probabilities (canonical order) -> the answer of the question's type, as Server.decide builds it."""
+    """Readout 2's probabilities (canonical order) -> the answer of the question's type, as Server.decide builds it,
+    with the question's coverage / max_error under readout 2's calibration (cal)."""
     probs = {k: float(v) for k, v in zip(q["keys"], pl)}
     conf = float(max(pl))
     if q["type"] == "act":
@@ -157,11 +160,13 @@ def answer(q, pl, cal):
     if q["type"] == "tool":
         return tool_answer(q, probs, conf, cal)
     if q["type"] == "noul":
-        return {"type": "noul", "noul": probs["true"], "probabilities": probs, "confidence": conf}
-    if q["type"] == "score":
-        return {"type": "score", "score": float(sum(i * v for i, v in enumerate(pl))),
-                "legend": dict(zip(q["keys"], q["options"])), "probabilities": probs, "confidence": conf}
-    return {"type": "choice", "choice": max(probs, key=probs.get), "probabilities": probs, "confidence": conf}
+        ans = {"type": "noul", "noul": probs["true"], "probabilities": probs, "confidence": conf}
+    elif q["type"] == "score":
+        ans = {"type": "score", "score": float(sum(i * v for i, v in enumerate(pl))),
+               "legend": dict(zip(q["keys"], q["options"])), "probabilities": probs, "confidence": conf}
+    else:
+        ans = {"type": "choice", "choice": max(probs, key=probs.get), "probabilities": probs, "confidence": conf}
+    return plain_limits(ans, q, probs, conf, cal) if "coverage" in q or "max_error" in q else ans
 
 
 class ThinkServer(Server):
@@ -215,12 +220,17 @@ class ThinkServer(Server):
         mode = body.get("think", self.think)
         if mode not in ("off", "auto", "force"):
             raise RequestError('think must be "off", "auto" or "force"')
-        out = await super().decide(body)
+        return await super().decide(body)  # (second_readout: the think pass, before ask_if reads the answers)
+
+    async def second_readout(self, body, out):
         if self.think == "off":
             return out
+        mode = body.get("think", self.think)
         t0 = time.perf_counter()
         todo = []
-        if mode != "off" and not out["usage"].get("truncated"):
+        # (a request with images or audio: readout 2 would read its text only)
+        media = body.get("media") is not None or body.get("images") is not None
+        if mode != "off" and not out["usage"].get("truncated") and not media:
             state = body["state"]
             if body.get("facts") == "auto":  # the state readout 1 saw (off the event loop, as basal-serve reads it)
                 text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)

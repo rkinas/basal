@@ -22,9 +22,12 @@ Per request, on a `--think auto` server:
 - `"think": "auto"` (the default), `"off"` (a one-pass answer for this request) or `"force"` (every question of a think
   type thinks); `"think_text": true` returns the note;
 - a question that thought answers with the second readout's probabilities and confidence plus `"think": {"tokens",
-  "ms", "calibration", "no_think": {...}}` (the one-pass answer); every answer carries `"meta": {"think": {"used",
-  "tokens"}}`;
-- `multi` questions, tool sets and requests whose state was truncated never think.
+  "ms", "calibration", "no_think": {...}}` (the one-pass answer), and with `max_error` / `coverage` its `abstain` /
+  `answer_set` under the second readout's calibration (without one it abstains, and the set is every option); every
+  answer carries `"meta": {"think": {"used", "tokens"}}`;
+- `ask_if` reads the answers after thinking, so a question is skipped (or not) by the answer the request gets;
+- `multi` questions, tool sets, tasks, `rank` questions, requests with images or audio (the second readout reads text
+  only) and requests whose state was truncated never think.
 
 Measured once on Werdykt, both rows on the same pod (one H100 80GB, default mode, 16 clients for the speed column):
 
