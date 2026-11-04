@@ -219,6 +219,23 @@ def test_main_with_ui_serves_the_page_and_redacts_its_options(monkeypatch):
     assert dict(d["config"]["facts"])["replicas"] == 1
 
 
+def test_route_urls_are_redacted_like_the_others(monkeypatch):
+    """--route SCRIPT=URL[,URL]: each URL of the value is shown without user, password and query, as --replicas and
+    --fallback are; the script name stays."""
+    import uvicorn
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **k: seen.update(app=app))
+    monkeypatch.setattr(R.signal, "signal", lambda *a: None)
+    R.main(["--replicas", "http://127.0.0.1:9", "--ui", "on",
+            "--route", "cyrillic=http://user:s3cret@127.0.0.1:10/?token=t,http://u2:p2@127.0.0.1:11"])
+    with TestClient(seen["app"]) as c:
+        d = c.get("/ui/state").json()
+    opts = {k: v for k, v, _ in d["config"]["options"]}
+    assert opts["route"] == ["cyrillic=http://127.0.0.1:10/,http://127.0.0.1:11"]
+    text = json.dumps(d)
+    assert "s3cret" not in text and "p2" not in text and "token=t" not in text
+
+
 def test_page_loads_nothing_from_outside_and_stays_small():
     page = (RU.HERE / "router_ui.html").read_text()
     assert not re.search(r"(src|href)=[\"']?(https?:)?//", page) and "@import" not in page
