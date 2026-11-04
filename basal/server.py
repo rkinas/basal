@@ -453,13 +453,23 @@ def act_spec(name, q, outcomes):
         if q.get("defer_action") is not None and q["defer_action"] != defer:  # the short form has one defer action: "defer"
             raise RequestError(f"question {name!r}: defer_action {q['defer_action']!r} must be 'defer' and costs must give "
                                f"'defer' (the short form {{\"wrong\": W, \"defer\": D}} has no other action)")
-        return dict(costs=C, defer=defer, max_error=max_error)
+        return _needs_defer(name, dict(costs=C, defer=defer, max_error=max_error))
     for a, row in costs.items():
         if not isinstance(row, dict) or set(row) != set(outcomes):
             raise RequestError(f"question {name!r}: costs[{a!r}] must give a cost for every outcome {outcomes}")
     C = {a: {z: _cost(name, v) for z, v in row.items()} for a, row in costs.items()}
     defer = q.get("defer_action") or next((a for a in ("defer", "human") if a in C), None)
-    return dict(costs=C, defer=defer, max_error=max_error)
+    if defer not in C and q.get("defer_action") is not None:
+        raise RequestError(f"question {name!r}: defer_action {defer!r} is not among the actions {list(C)}")
+    return _needs_defer(name, dict(costs=C, defer=defer, max_error=max_error))
+
+
+def _needs_defer(name, spec):
+    """max_error refuses automatic actions, so it needs a defer action: checked before the run, not only when a
+    decision is refused (the same request answered 200 or 422 by the model's confidence)."""
+    if spec["max_error"] is not None and spec["defer"] is None:
+        raise RequestError(f"question {name!r}: max_error needs a defer action (\"defer\"/\"human\" or defer_action)")
+    return spec
 
 
 NO_CERTIFICATE = "no certified threshold for this type at this max_error"
