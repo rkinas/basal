@@ -1240,7 +1240,7 @@ class Server:
         if why:
             raise SystemExit(why)
         shared = self.orders != 1 or self.soam  # prefix sharing: option orders, or the questions of a request
-        base = Path(a.model).name
+        base = Path(a.model).name or Path(a.model).resolve().name  # --model . : the directory's name
         self.name = a.name or (f"{base}+{self.adapter.name}" if self.adapter else base)
         quant = a.quant or quant
         why = nvfp4_calibration_refused(md, kind, quant, a)
