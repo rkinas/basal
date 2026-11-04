@@ -8,7 +8,9 @@ The items go where the state text goes, before it, in the order given: the promp
 with. Images: any format Pillow opens, converted to RGB; "detail" sets the image's soft tokens
 (default 280, high 1,120). Audio: WAV, FLAC, OGG or MP3 (libsndfile), mixed to mono and resampled to 16 kHz; at most the
 model's audio window (Gemma 4: 750 tokens x 40 ms = 30 s). One request holds at most MAX_ITEMS items of at most
-MAX_BYTES each; an image may have at most MAX_PIXELS pixels (decompression bombs are refused before decoding).
+MAX_BYTES each; an image may have at most MAX_PIXELS pixels (decompression bombs are refused before decoding); a clip
+is read up to the window (one frame more shows it is longer), and a clip of a model without a known window up to
+MAX_AUDIO_SAMPLES samples, so a long clip that compresses well is refused without decoding it whole.
 Errors are ValueError (HTTP 422).
 """
 import base64
@@ -19,6 +21,7 @@ from math import gcd
 MAX_ITEMS = 8
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 50_000_000
+MAX_AUDIO_SAMPLES = 1 << 26  # decoded samples of one clip, every channel (256 MB of float32; 30 s at 192 kHz x 8 is 46 M)
 SAMPLE_RATE = 16000
 DETAIL = {"default": 280, "high": 1120}
 
@@ -71,13 +74,22 @@ def _audio(raw, n, max_seconds):
     import numpy as np
     import soundfile as sf
     try:
-        x, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=True)
-    except (RuntimeError, TypeError) as e:  # soundfile's LibsndfileError is a RuntimeError
+        with sf.SoundFile(io.BytesIO(raw)) as f:
+            sr, channels, frames = f.samplerate, f.channels, f.frames
+            limit = MAX_AUDIO_SAMPLES // max(channels, 1)  # the most frames of MAX_AUDIO_SAMPLES samples
+            window = int((max_seconds + 1e-6) * sr) if max_seconds else None  # the most frames in the window
+            keep = limit if window is None else min(limit, window)
+            x = f.read(keep + 1, dtype="float32", always_2d=True)  # one frame more shows the clip is longer
+    except (RuntimeError, TypeError, ValueError) as e:  # soundfile's LibsndfileError is a RuntimeError
         raise ValueError(f"media {n}: not readable audio (WAV, FLAC, OGG or MP3; {type(e).__name__})") from None
     if x.shape[0] == 0:
         raise ValueError(f"media {n}: empty audio")
-    if max_seconds and x.shape[0] / sr > max_seconds + 1e-6:
-        raise ValueError(f"media {n}: {x.shape[0] / sr:.1f} s of audio, more than the model's {max_seconds:g} s")
+    seconds = max(x.shape[0], frames if frames > 0 else 0) / sr  # (the header's length when the read stopped early)
+    if window is not None and x.shape[0] > window:
+        raise ValueError(f"media {n}: {seconds:.1f} s of audio, more than the model's {max_seconds:g} s")
+    if x.shape[0] > limit:
+        raise ValueError(f"media {n}: {seconds:.1f} s of audio in {channels} channels, more than "
+                         f"{MAX_AUDIO_SAMPLES:,} samples")
     x = x.mean(axis=1)
     if sr != SAMPLE_RATE:
         from scipy.signal import resample_poly
