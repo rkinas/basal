@@ -24,6 +24,7 @@ gets "probabilities" and "confidence" from it, as basal-serve computes them. The
 not calibrated by basal: basal's certified thresholds (max_error) do not apply to them.
 """
 import asyncio
+import numbers
 import time
 
 import httpx
@@ -176,7 +177,7 @@ class _Client:
         self.defaults = {k: v for k, v in (("early_exit", early_exit), ("facts", facts), ("lang", lang)) if v}
         if not isinstance(retries, int) or retries < 0:
             raise ValueError(f"retries must be an integer >= 0, not {retries!r}")
-        if isinstance(backoff, bool) or not isinstance(backoff, (int, float)) or not backoff >= 0:
+        if not isinstance(backoff, numbers.Real) or not backoff >= 0:  # any real number (numpy ones too), as time.sleep takes it; not a negative or NaN
             raise ValueError(f"backoff must be a number >= 0, not {backoff!r}")
         self.retries, self.backoff = retries, backoff
 

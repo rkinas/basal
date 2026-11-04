@@ -890,11 +890,25 @@ def conformal_p_min(p_gold, level):
 
 
 def conformal_needed(level):
-    """The fewest decisions of a type that give a coverage level a p_min (ceil((n + 1) level) <= n)."""
-    n = max(1, int(level / (1 - level)) - 3)  # below this n the condition holds for sure: no walk from 1
-    while math.ceil(round((n + 1) * level, 9)) > n:
-        n += 1
-    return n
+    """The fewest decisions of a type that give a coverage level a p_min (ceil((n + 1) level) <= n): the first n for
+    which the loop `n = 1; while ceil(round((n + 1) * level, 9)) > n: n += 1` stops, found by doubling and halving
+    instead of walking (a level next to 1 would walk for hours). A level of 1 or more has no such n: ValueError."""
+    if not level < 1:
+        raise ValueError(f"coverage level must be below 1, not {level!r}")
+
+    def waits(n):  # the loop's condition: not enough decisions yet
+        return math.ceil(round((n + 1) * level, 9)) > n
+    if not waits(1):
+        return 1
+    lo, hi = 1, 2  # waits(lo), not waits(hi)
+    while waits(hi):
+        lo, hi = hi, hi * 2
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if waits(mid) else (lo, mid)
+    while hi > 1 and not waits(hi - 1):  # the rounding of a float next to a boundary: the loop stops at the first n
+        hi -= 1
+    return hi
 
 
 def set_gate(rows, probs, p_min):

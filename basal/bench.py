@@ -302,12 +302,12 @@ def main():
         why = adapter_refused_kind(*MODES.get(m.split("@")[0], ("", None))[:2])
         if why:
             raise SystemExit(adapter_refused(adapter.name, f"--modes {m}", why))
-    md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
-    vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)
     check_gold(qs)
     if a.lat_n < 1 or len(qs) < 6:  # the first 5 timed calls are warm-up and dropped: nothing would be left to take a median of
         raise SystemExit(f"basal-bench needs --lat-n >= 1 and at least 6 questions (got {len(qs)} questions, --lat-n {a.lat_n})")
+    md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
+    vm = resolve(a.vllm_model) if a.vllm_model else None
     fmt = model_format(md)
     ref, rows = None, []
     for mode in a.modes:

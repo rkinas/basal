@@ -112,7 +112,7 @@ def test_z7_two_options_still_work():
     assert len(synth.items(3, options=2)) == 3
 
 
-@pytest.mark.parametrize("backoff", [-1, float("nan"), True, "1"])
+@pytest.mark.parametrize("backoff", [-1, float("nan"), "1", None, [1]])
 def test_z8_a_bad_backoff_is_refused_in_the_constructor(backoff):
     with pytest.raises(ValueError, match="backoff"):
         Basal("http://basal/", backoff=backoff)
@@ -121,3 +121,59 @@ def test_z8_a_bad_backoff_is_refused_in_the_constructor(backoff):
 @pytest.mark.parametrize("backoff", [0, 0.5, 2])
 def test_z8_a_good_backoff_is_accepted(backoff):
     assert Basal("http://basal/", backoff=backoff).backoff == backoff
+
+
+def loop_needed(level):
+    n = 1
+    while math.ceil(round((n + 1) * level, 9)) > n:
+        n += 1
+    return n
+
+
+def test_z2_the_count_is_the_one_of_the_loop_on_a_grid_of_levels():
+    levels = [i / 1000 for i in range(0, 1000)] + [1 - 10.0 ** -k for k in range(2, 7)] + [0.5, 0.75, 0.8, 0.999, 0.9999, 1 - 1e-5 / 3, 0.123456789]
+    for level in levels:
+        assert cal.conformal_needed(level) == loop_needed(level), level
+
+
+@pytest.mark.parametrize("level", [1 - 1e-9, 1 - 1e-12, 0.999999999999, 1 - 1e-15])
+def test_z2_a_level_next_to_one_is_the_first_n_where_the_loop_would_stop(level):
+    with within(2):
+        n = cal.conformal_needed(level)
+    waits = lambda k: math.ceil(round((k + 1) * level, 9)) > k  # noqa: E731
+    assert not waits(n) and all(waits(k) for k in range(max(1, n - 50), n))
+
+
+@pytest.mark.parametrize("level", [1.0, 1.5, float("nan")])
+def test_z2_a_level_of_1_or_more_is_a_validation_error_not_a_hang_or_a_zero_division(level):
+    with within(2), pytest.raises(ValueError, match="coverage level"):
+        cal.conformal_needed(level)
+
+
+def test_z3_the_guard_stands_before_the_model_is_resolved(tmp_path, monkeypatch):
+    argv = ["basal-bench", "--questions", questions_file(tmp_path, 3), "--n", "3", "--modes", "eager-fp32"]
+    monkeypatch.setattr(sys, "argv", argv)
+    resolved = []
+    monkeypatch.setattr(bench, "resolve", lambda *a, **k: resolved.append(a) or object())
+    with pytest.raises(SystemExit, match="at least 6 questions"):
+        bench.main()
+    assert resolved == []  # nothing was downloaded or opened for a run that cannot be measured
+
+
+def numpy_and_fractions():
+    import fractions
+
+    import numpy as np
+    return [np.int64(1), np.float32(0.5), np.float64(0.25), fractions.Fraction(1, 2), True]
+
+
+def test_z8_every_real_number_that_main_took_is_still_taken():
+    for backoff in numpy_and_fractions():
+        assert Basal("http://basal/", backoff=backoff).backoff == backoff
+
+
+def test_z8_a_negative_numpy_number_or_a_numpy_nan_is_refused():
+    import numpy as np
+    for backoff in (np.int64(-1), np.float32("nan"), np.float64(-0.5)):
+        with pytest.raises(ValueError, match="backoff"):
+            Basal("http://basal/", backoff=backoff)
