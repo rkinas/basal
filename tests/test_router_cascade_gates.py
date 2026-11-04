@@ -146,3 +146,15 @@ def test_images_alias_is_kept_away_from_the_text_fallback():
     calls.clear()                                  # control: text only, a low-confidence answer does go to the fallback
     _forward({"state": "s", "questions": {"q": q}}, handler, fallback={"url": "http://fallback/v1", "model": "t", "below": .8})
     assert "fallback" in calls
+
+
+def test_zero_weight_base_leaves_the_answer_to_the_positive_weight_member():
+    q = {"type": "choice", "criteria": ["yes", "no"]}
+
+    async def handler(request):
+        other = request.url.host == "other"
+        return httpx.Response(200, json={"model": request.url.host, "answers": {"q": _ans("no" if other else "yes", .9)}})
+    _, out = _forward({"state": "s", "questions": {"q": q}}, handler, blend=[(["http://other"], 1.)], blend_weight=0.,
+                      replicas=["http://main"])
+    a = out["answers"]["q"]
+    assert a["choice"] == "no" and a["blend"]["models"] == ["other"]

@@ -554,8 +554,9 @@ class Router:
             members = [m for m in members if m[0] > 0]
             if len(members) > 1:
                 answers[q] = blend_answer(a, members)
-            elif members:  # only one model answered: its answer as it is
-                a["blend"] = {"models": [members[0][1]], "weights": [members[0][0]]}
+            elif members:  # only one model answered (the base may have weight 0): its answer, as it is
+                answers[q] = members[0][2]
+                answers[q]["blend"] = {"models": [members[0][1]], "weights": [members[0][0]]}
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
         note_skipped(resp, gate_answers(req, answers))  # a blended answer can change what a question's ask_if names
         return json.dumps(resp, ensure_ascii=False).encode()
