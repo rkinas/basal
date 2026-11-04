@@ -1717,6 +1717,13 @@ class Server:
         if not batch:
             slots.release()
             return
+        total = len(batch)
+        batch = [b for b in batch if not b[2].done()]  # abandoned while queued (client timeout, retry): no GPU work
+        if not batch:
+            slots.release()
+            if getattr(self, "gate", None) is not None:
+                self.gate.main_done(total, 0.0)
+            return
         self.started(batch)
         lanes = getattr(self, "lanes", None)
         backend = self.free_lanes.pop() if lanes else self.backend  # (slots: never more calls than lanes)
@@ -1740,7 +1747,7 @@ class Server:
                 self.free_lanes.append(backend)
             slots.release()
             if getattr(self, "gate", None) is not None:
-                self.gate.main_done(len(batch), time.perf_counter() - t_call)
+                self.gate.main_done(total, time.perf_counter() - t_call)
             if getattr(self, "backlog", None) is not None:  # seconds per prompt token, for the HRRN ratios
                 tokens = sum(max(map(len, b[0]), default=0) for b in batch)
                 self.sched_rate = 0.8 * self.sched_rate + 0.2 * (time.perf_counter() - t_call) / max(tokens, 1)
