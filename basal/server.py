@@ -59,6 +59,7 @@ from .textio import read_text
 from .facts import MAX_CHARS as FACTS_MAX_CHARS, inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
+from .request import check_json
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, defang, lang_of, letter_ids,
                      max_options, media_messages, model_format, model_layout, model_option_isolation, model_two_way,
                      once_ids, option_tokens, reads_request, render, tokens_once)
@@ -270,10 +271,17 @@ def check_body(body, max_branches=MAX_BRANCHES):
         raise RequestError('"questions" must be an object of {name: question object}')
     if not body["questions"]:  # (an empty object reached the engine and failed there with a 500)
         raise RequestError('"questions" must name at least one question')
-    n = sum(branch_count(q) for q in body["questions"].values())
+    check_branches(body["questions"], max_branches)
+
+
+def check_branches(questions, max_branches=MAX_BRANCHES, tasks_of=None):
+    """At most max_branches branches (branch_count) in a request's questions; tasks_of: the task questions they were
+    expanded from (each claim, unit or field a question of its own), named in the message."""
+    n = sum(branch_count(q) for q in questions.values())
     if n > max_branches:
-        raise RequestError(f"{n} branches (a question counts 1, a multi question or a tool set one per label): more "
-                           f"than this server's --max-branches {max_branches}")
+        how = " (its task questions expanded)" if tasks_of else ""
+        raise RequestError(f"{n} branches{how} (a question counts 1, a multi question or a tool set one per label): "
+                           f"more than this server's --max-branches {max_branches}")
 
 
 def limit_body(app, max_bytes):
@@ -779,32 +787,6 @@ def out_of_memory(e):
     """The GPU ran out of memory: torch.OutOfMemoryError (CUDA, MPS), or a CUDA / Metal error that says so."""
     return isinstance(e, torch.OutOfMemoryError) or isinstance(e, RuntimeError) and (
         "out of memory" in str(e).lower() or "OutOfMemory" in str(e))
-
-
-SURROGATE = re.compile(rb"\\u[dD][89a-fA-F]")  # a \u escape of a UTF-16 surrogate (raw UTF-8 cannot carry one)
-
-
-def unicode_body(raw, body):
-    """body (parsed from the bytes raw), refused when a string in it holds a lone surrogate: "\\ud800" is valid JSON
-    but no Unicode text, and the tokenizer, the answer's UTF-8 and the UI's view of the request failed on it with HTTP
-    500. Only a body with a surrogate escape is walked (an escaped pair, as an emoji, reads as one character)."""
-    if not SURROGATE.search(raw):
-        return body
-    todo = [body]
-    while todo:
-        x = todo.pop()
-        if isinstance(x, str):
-            try:
-                x.encode("utf-8")
-            except UnicodeEncodeError:
-                raise RequestError("the request holds a lone surrogate (an unpaired \\ud800-\\udfff escape in a "
-                                   "string): send valid Unicode text") from None
-        elif isinstance(x, dict):
-            todo += x  # (its keys)
-            todo += x.values()
-        elif isinstance(x, list):
-            todo += x
-    return body
 
 
 def http_status(e):
@@ -1701,14 +1683,82 @@ class Server:
                            f"more than the {limit[0]} tokens of {limit[1]}; {hint}")
 
     async def serve(self, body):
-        """One client request (POST /v1/systemone, /v1/basal or an MCP tool call): the body's shape, then decide.
-        Counted as in flight from here to its answer or error (GET /health)."""
+        """One client request (POST /v1/systemone, /v1/basal, /v1/decisions or an MCP tool call): decide, which admits
+        it first. Counted as in flight from here to its answer or error (GET /health)."""
         self.in_flight += 1
         try:
-            check_body(body, getattr(self, "max_branches", MAX_BRANCHES))
             return await self.decide(body)
         finally:
             self.in_flight -= 1
+
+    def admit(self, body):
+        """Every check of a request that needs no engine work, in one place before any of it (the facts, media
+        decoding, rendering, the queue), so an invalid request answers 422 before the engine runs, never after: the
+        body's shape and JSON (check_json), early_exit, facts, lang, media against this server, task questions
+        expanded within --max-branches, rank questions (rank.admit), every question read as to_items reads it (without
+        the state), ask_if / depends_on, the engine's option cap and evidence. Server.decide admits every request it
+        decides (rank's and tasks' own requests too). -> (the request with its task questions expanded, the task
+        plans or None)."""
+        max_branches = getattr(self, "max_branches", MAX_BRANCHES)
+        check_body(body, max_branches)
+        check_json(body)
+        pol = body.get("early_exit")
+        if pol is not None:
+            allowed = sorted(getattr(self.backend, "policies", {}))
+            if str(pol) not in allowed:
+                raise RequestError(f"early_exit={str(pol)!r} not available (server mode must be fast-exit); "
+                                   f"allowed: {allowed}")
+        if body.get("facts", "off") not in ("off", "auto"):
+            raise RequestError('facts must be "off" or "auto"')
+        lang = body.get("lang")  # the prompt language when the text alone does not show it (a state that is only media)
+        if lang is not None and lang not in ("pl", "en"):
+            raise RequestError('lang must be "pl" or "en"')
+        if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
+            if body.get("media") is not None:
+                raise RequestError("give media or images, not both")
+            images_as_media(body["images"])
+        if body.get("media") is not None or body.get("images") is not None:
+            self.media_refused(body, pol)
+        if any(rank.is_rank(q) for q in body["questions"].values()):
+            rank.admit(self, body)  # (its own requests are admitted as they are made)
+            return body, None
+        orig, plans = body, None
+        if any(tasks.is_task(q) for q in body["questions"].values()):  # classify / verify / compress / extract
+            body, plans = tasks.expand(body, self.max_options)  # (each claim, unit or field: a question of its own)
+            check_branches(body["questions"], max_branches, tasks_of=plans)
+        qs = to_items("", body["questions"], self.max_options, force_lang=lang or "en")  # (read, nothing rendered)
+        ask_gates(orig["questions"], qs)
+        cap = getattr(self.backend, "max_codes", None)  # an engine that reads fewer option codes (Ollama: 20)
+        for q in qs:
+            if cap is not None and len(q["options"]) > cap:
+                raise RequestError(f"question {q['name']!r}: {len(q['options'])} options, but "
+                                   f"{type(self.backend).__name__} reads at most {cap} "
+                                   f"({self.backend.max_codes_reason})")
+        ev_q = [q for q in qs if body["questions"][q["name"]].get("evidence")]
+        if ev_q:  # evidence spans: a head of this model, one per decision question
+            ev = getattr(self, "evidence", None)
+            if not (ev and ev.available):
+                raise RequestError("evidence is not available with --adapter (the evidence head was trained on the base "
+                                   "model's states)" if getattr(self, "adapter", None) else
+                                   "evidence is not available for this model (no evidence_head.pt)")
+            for q in ev_q:
+                if q["type"] == "multi" or q.get("multi"):
+                    raise RequestError(f"question {q['name']!r}: evidence is not supported for multi")
+        return body, plans
+
+    def media_refused(self, body, pol):
+        """A request with media that this server or the request's other fields rule out -> RequestError, before any
+        media is decoded."""
+        if not getattr(self.backend, "media_kinds", ()):
+            raise RequestError("this server does not take media (basal-serve --mode eager or vllm with --media on, and "
+                               "a model that has an image / audio encoder)")
+        if pol is not None:
+            raise RequestError("early_exit is not available with media")
+        if any(q.get("evidence") for q in body["questions"].values() if isinstance(q, dict)):
+            raise RequestError("evidence is not available with media")
+        if getattr(self, "layout", "canonical") != "canonical":
+            raise RequestError(f"images and audio are read in the canonical layout only (this server: --layout "
+                               f"{self.layout})")
 
     def load(self):
         """GET /health: "queued" = requests waiting for the engine (every queue entry of their current engine work
@@ -2099,22 +2149,14 @@ class Server:
         return {j: (b2[2], o) for j, b2, o in zip(redo, again, o2)}, n_tok
 
     async def decide(self, body):
+        t0 = time.perf_counter()
+        orig = body
+        body, plans = self.admit(body)  # (every check that needs no engine work, before any)
         if any(rank.is_rank(q) for q in body["questions"].values()):  # ranking beyond 255 options (basal/rank.py)
             return await rank.decide(self, body)
-        t0 = time.perf_counter()
-        orig, plans = body, None
-        if any(tasks.is_task(q) for q in body["questions"].values()):  # classify / verify / compress / extract
-            body, plans = tasks.expand(body, self.max_options)
         pol = body.get("early_exit")
-        if pol is not None:
-            pol = str(pol)
-            allowed = sorted(getattr(self.backend, "policies", {}))
-            if pol not in allowed:
-                raise RequestError(f"early_exit={pol!r} not available (server mode must be fast-exit); "
-                                   f"allowed: {allowed}")
+        pol = None if pol is None else str(pol)
         state = body["state"]
-        if body.get("facts", "off") not in ("off", "auto"):
-            raise RequestError('facts must be "off" or "auto"')
         if body.get("facts") == "auto":  # append computed calendar / arithmetic facts (PL dates, gaps, VAT)
             # (a regex pass over the whole state, linear in its length: off the event loop, which answers /health
             # meanwhile)
@@ -2124,25 +2166,14 @@ class Server:
                                    f'{len(text)}: send "facts": "off" or a shorter state')
             state = await asyncio.to_thread(inject_facts, text)
         if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
-            if body.get("media") is not None:
-                raise RequestError("give media or images, not both")
             body = dict(body, media=images_as_media(body["images"]))
         # (a request with media is decoded off the event loop; without, media_of is None at once)
         m = self.media_of(body, pol) if body.get("media") is None else \
             await asyncio.get_running_loop().run_in_executor(None, self.media_of, body, pol)
-        lang = body.get("lang")  # the prompt language when the text alone does not show it (a state that is only media)
-        if lang is not None and lang not in ("pl", "en"):
-            raise RequestError('lang must be "pl" or "en"')
-        qs = to_items(state, body["questions"], self.max_options, force_lang=lang)
+        qs = to_items(state, body["questions"], self.max_options, force_lang=body.get("lang"))
         gates = ask_gates(orig["questions"], qs)
         for q in qs:
             stored_fallback(self.cal, q)
-        cap = getattr(self.backend, "max_codes", None)  # an engine that reads fewer option codes (Ollama: 20)
-        for q in qs:
-            if cap is not None and len(q["options"]) > cap:
-                raise RequestError(f"question {q['name']!r}: {len(q['options'])} options, but "
-                                   f"{type(self.backend).__name__} reads at most {cap} "
-                                   f"({self.backend.max_codes_reason})")
         # (question index, branch index, perms, prompts, code ids): every branch in the first pass's option orders
         branches = [self.branch(i, bi, q) for i, q in enumerate(qs) for bi in range(len(q["branches"]))]
         truncation, cut, lane, n_media = None, None, "main", 0
@@ -2201,13 +2232,7 @@ class Server:
             return None
         from .media import decode, detail_tokens
         kinds = getattr(self.backend, "media_kinds", ())
-        if not kinds:
-            raise RequestError("this server does not take media (basal-serve --mode eager or vllm with --media on, and "
-                               "a model that has an image / audio encoder)")
-        if pol is not None:
-            raise RequestError("early_exit is not available with media")
-        if any(q.get("evidence") for q in body["questions"].values() if isinstance(q, dict)):
-            raise RequestError("evidence is not available with media")
+        self.media_refused(body, pol)  # (admitted already: a request decided without Server.admit)
         soft = detail_tokens(body.get("detail", "default"))
         images, audio, order = decode(body["media"], kinds, getattr(self.backend, "max_audio_s", None))
         return dict(images=images, audio=audio, kinds=order, max_soft_tokens=soft, detail=body.get("detail", "default"))
@@ -2222,9 +2247,6 @@ class Server:
     async def ask_media(self, qs, branches, m):
         """Position probabilities of every prompt of every branch, with the request's media -> (outs, prompt tokens,
         the longest prompt of each branch, media tokens)."""
-        if getattr(self, "layout", "canonical") != "canonical":
-            raise RequestError(f"images and audio are read in the canonical layout only (this server: --layout "
-                               f"{self.layout})")
         msgs, ids, where = [], [], []
         for j, b in enumerate(branches):
             q = qs[b[0]]
@@ -2264,6 +2286,8 @@ class Server:
                 stored_fallback(self.cal, q)
             branches = [self.branch(i, bi, q) for i, q in enumerate(qs) for bi in range(len(q["branches"]))]
             n_tok, longest = self.encode(branches)
+        if truncation and any(body["questions"][q["name"]].get("evidence") for q in qs):
+            raise RequestError("evidence is not available for a state truncated to the context (shorten the state)")
         self.check_context(qs, branches, longest)
         cut = self.cut_of(qs[0], branches)
         lane = self.lane_of(branches, longest, cut)
@@ -2310,17 +2334,10 @@ class Server:
                 plain_limits(ans, q, probs, conf, self.cal)
             answers[q["name"]] = ans
         ev_q = [q for q in qs if body["questions"][q["name"]].get("evidence")]
-        if ev_q and truncation:
-            raise RequestError("evidence is not available for a state truncated to the context (shorten the state)")
-        if ev_q:  # evidence spans: character offsets into the request's state (facts block excluded)
-            if not (self.evidence and self.evidence.available):
-                raise RequestError("evidence is not available with --adapter (the evidence head was trained on the base "
-                                   "model's states)" if getattr(self, "adapter", None) else
-                                   "evidence is not available for this model (no evidence_head.pt)")
+        if ev_q:  # evidence spans: character offsets into the request's state (facts block excluded; admitted: a
+            # head of this model, no multi question, a state not truncated)
             limit = len(_text(body["state"])) if body.get("facts") == "auto" else None
             for q in ev_q:
-                if q["type"] == "multi" or q.get("multi"):
-                    raise RequestError(f"question {q['name']!r}: evidence is not supported for multi")
                 answers[q["name"]]["evidence"] = await loop.run_in_executor(
                     None, self.evidence.spans, q["state"], q["question"], q["options"], q["lang"], limit)
         if getattr(self, "cal_unvalidated", None):  # the calibration was fitted on other option orders
@@ -2806,7 +2823,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             counts["seconds"] += time.perf_counter() - t
             return failed(RequestError(f"the request body is not valid JSON: {e}"))
         try:
-            out = await until_disconnect(request, srv.serve(unicode_body(await request.body(), body)))
+            out = await until_disconnect(request, srv.serve(body))
             if out is None:  # the client is gone: its queued work was dropped, no one reads an answer
                 return JSONResponse(*CLIENT_GONE)
             return JSONResponse(out)
@@ -2826,7 +2843,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                 body = await request.json()
             except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
                 raise RequestError(f"the request body is not valid JSON: {e}") from None
-            s1, specs = dec.to_systemone(unicode_body(await request.body(), body))
+            check_json(body, finite=())  # (to_systemone reads it recursively)
+            s1, specs = dec.to_systemone(body)
             out = await until_disconnect(request, srv.serve(s1))
             if out is None:  # the client is gone (as on /v1/systemone)
                 return JSONResponse(*CLIENT_GONE)

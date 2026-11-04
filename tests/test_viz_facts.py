@@ -1,5 +1,4 @@
 """basal-viz explains the prompt basal-serve serves: with "facts": "auto" the state carries the computed facts."""
-import asyncio
 import json
 import threading
 from types import SimpleNamespace
@@ -41,9 +40,9 @@ def test_without_facts_the_state_is_explained_as_given(explainer, facts):
 @pytest.mark.parametrize("facts", ["on", "AUTO", None, False, 1, {}, []])
 def test_invalid_facts_are_rejected_before_building_prompts(explainer, facts):
     ex, seen = explainer
-    body = {"state": STATE, "questions": {}, "facts": facts}
-    with pytest.raises(RequestError) as served:
-        asyncio.run(viz.Server.decide(ex.srv, body))
+    body = {"state": STATE, "questions": {"q": {"type": "noul"}}, "facts": facts}
+    with pytest.raises(RequestError) as served:  # (Server.decide admits a request before any work: Server.admit)
+        viz.Server.admit(ex.srv, body)
     with pytest.raises(RequestError) as explained:
         ex.explain(body)
     assert str(explained.value) == str(served.value)

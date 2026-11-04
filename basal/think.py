@@ -216,11 +216,10 @@ class ThinkServer(Server):
         pl = temper(p, temperature(self.think_cal, q.get("base", q["type"]), len(p))).tolist()
         return (pl, notes, n, round((time.perf_counter() - t0) * 1000, 2)), None
 
-    async def decide(self, body):
-        mode = body.get("think", self.think)
-        if mode not in ("off", "auto", "force"):
+    def admit(self, body):  # (second_readout: the think pass, before ask_if reads the answers)
+        if isinstance(body, dict) and body.get("think", self.think) not in ("off", "auto", "force"):
             raise RequestError('think must be "off", "auto" or "force"')
-        return await super().decide(body)  # (second_readout: the think pass, before ask_if reads the answers)
+        return super().admit(body)
 
     async def second_readout(self, body, out):
         if self.think == "off":

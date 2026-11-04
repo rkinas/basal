@@ -18,6 +18,7 @@ class Leaning(Probe):
         super().__init__()
         FakeServer.__init__(self, [0.4, 0.6])
         self.orders = 1
+        self.backend.media_kinds = ("image",)  # (a server that takes images: a request with media is admitted)
 
     def media_of(self, body, pol):
         return {"kinds": ["image"], "images": [None], "audio": [], "detail": "default"} if body.get("media") else None

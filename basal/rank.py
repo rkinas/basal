@@ -256,10 +256,10 @@ async def rank_one(srv, state, spec, fields):
             "requests": len(outs), "experimental": True}, outs
 
 
-async def decide(srv, body):
-    """A request with rank questions (Server.decide sends it here): the rank questions through their own requests, the
-    others as one request over the state; the usage sums them all."""
-    t0 = time.perf_counter()
+def admit(srv, body):
+    """A request with rank questions, checked before any of its requests starts (Server.admit): no media, the
+    language, every rank question, the candidate cap, and the other questions as their own request reads them ->
+    (the state's text, the rank specs, the other questions)."""
     if body.get("media") is not None or body.get("images") is not None:
         raise RequestError("rank questions do not take media")
     state = _text(body["state"]) if body["state"] is not None else ""
@@ -273,6 +273,16 @@ async def decide(srv, body):
         raise RequestError(f"{total} rank candidates in this request, more than the {cap} this server takes per "
                            "request (basal-serve --rank-max-candidates)")
     others = {n: q for n, q in body["questions"].items() if not is_rank(q)}
+    if others:  # (decided alongside the rank requests: an invalid one would fail the request after they ran)
+        srv.admit(dict(body, questions=others))
+    return state, specs, others
+
+
+async def decide(srv, body):
+    """A request with rank questions (Server.decide sends it here): the rank questions through their own requests, the
+    others as one request over the state; the usage sums them all."""
+    t0 = time.perf_counter()
+    state, specs, others = admit(srv, body)
     fields = {k: v for k, v in body.items() if k not in ("state", "questions")}
     jobs = [rank_one(srv, state, s, fields) for s in specs]
     if others:
