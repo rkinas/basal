@@ -11,6 +11,7 @@ import pytest
 from basal import agree
 from basal import bench
 from basal import calibrate as cal
+from basal import tasks
 
 
 @contextlib.contextmanager
@@ -88,3 +89,12 @@ def test_z4_no_multi_readouts_gives_a_row_without_independence():
 def test_z5_per_call_below_1_is_refused(n):
     with pytest.raises(SystemExit, match="per-call"):
         agree.run_groups(object(), [1, 2], n)
+
+
+@pytest.mark.parametrize("integer", [False, True])
+def test_z6_a_number_of_400_digits_is_none(integer):
+    assert tasks.parse_number("9" * 400, integer=integer) is None
+
+
+def test_z6_an_ordinary_number_still_parses():
+    assert tasks.parse_number("12 345") == 12345
