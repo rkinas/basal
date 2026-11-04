@@ -25,6 +25,14 @@ def tiny():
     return m
 
 
+def eager_shared(be, pack, lids):
+    """Readout of one packed row in a single eager masked forward (the reference for the masked graphs)."""
+    t, pp, sg, last, par = pack
+    h = be._forward_masked(torch.tensor([t], device=be.dev), be._mask_from_seg(torch.tensor([sg], device=be.dev), [par]),
+                           torch.tensor([pp], device=be.dev))[0, last]
+    return be._readout(h, lids)
+
+
 def separate(m, toks, lids):
     """Reference: one forward per prompt, full log-softmax over the vocabulary, softmax over the letters."""
     out = []
@@ -86,7 +94,7 @@ def test_soam_many_branches_equal_separate():
         be.LENS = lens
         units = be._units([(toks, lids)])
         assert len(units) == 1
-        probs = [be._eager_shared(pk, ul) if lens == [64] else be._long(pk, ul) for pk, ul, k, a in units]
+        probs = [eager_shared(be, pk, ul) if lens == [64] else be._long(pk, ul) for pk, ul, k, a in units]
         res = GraphBackend._assemble([(toks, lids)], units, probs)[0]
         for r, e in zip(res, ref):
             assert torch.allclose(torch.tensor(r), e, atol=1e-5)
@@ -308,3 +316,15 @@ def test_code_rows_kept_within_their_budget(monkeypatch):
         assert got == full[k]
         assert sum(int(w.nbytes) for w in be._wrows.values()) <= max(eng.WROWS_BYTES, 4 * m.config.hidden_size * len(ids))
     assert list(be._wrows) == [tuple(sets[-1])]  # the latest set; the older ones made room
+
+
+def test_backends_split_flat_readouts_with_one_helper():
+    """Every backend that reads groups as one flat list splits it with engine._split (one implementation), and the
+    engine keeps no test-only reference path."""
+    import inspect
+
+    import basal.engine as eng
+    src = inspect.getsource(eng)
+    assert src.count("out.append(flat[j: j + len(g[0])])") == 1  # in _split only
+    assert not hasattr(eng.GraphBackend, "_eager_shared")
+    assert eng._split([1, 2, 3, 4, 5], [([0, 0], None), ([0], None), ([0, 0], None)]) == [[1, 2], [3], [4, 5]]

@@ -65,7 +65,6 @@ def resolve(name, revision=None, metadata_only=False):
 
 def default_device():
     """BASAL_DEVICE if set, else cuda, else Apple Silicon (mps), else cpu."""
-    import os
     if os.environ.get("BASAL_DEVICE"):
         return os.environ["BASAL_DEVICE"]
     if torch.cuda.is_available():
@@ -165,7 +164,6 @@ class EagerBackend:
             torch.backends.cuda.enable_cudnn_sdp(False)
             # basal 2.3: the engine's own Gemma 4 forward (basal/gemma4.py) unless --eager-forward hf (or
             # BASAL_EAGER_FORWARD=hf), the transformers forward of 2.2.0
-            import os
             forward = forward or os.environ.get("BASAL_EAGER_FORWARD") or "basal"
             if forward not in EAGER_FORWARDS:
                 raise ValueError(f"eager forward {forward!r} (one of {', '.join(EAGER_FORWARDS)})")
@@ -330,10 +328,7 @@ class EagerBackend:
                 flat = self._codes(torch.stack([h for g in hid for h in g]).float(), [x for g in groups for x in g[1]])
         else:
             flat = self.run([p for g in groups for p in g[0]], [x for g in groups for x in g[1]])
-        out, j = [], 0
-        for g in groups:
-            out.append(flat[j: j + len(g[0])]); j += len(g[0])
-        return out
+        return _split(flat, groups)
 
 
 EAGER_FORWARDS = ("basal", "hf")
@@ -2386,7 +2381,6 @@ class GraphBackend(EagerBackend):
         text for its option orders) are computed once; positions are each token's index in its own prompt. cut: the
         root block ends after this many tokens (the state prefix of a request, the unit of the state cache) when every
         prompt is longer."""
-        import os
         ids, pos, seg, parent, last = [], [], [], [], [None] * len(toks)
         cut = cut if cut and all(len(t) > cut for t in toks) and len({tuple(t[:cut]) for t in toks}) == 1 else None
 
@@ -2459,14 +2453,6 @@ class GraphBackend(EagerBackend):
         pos.copy_(self._to_dev(h_pos), non_blocking=True)
         mask.copy_(self._mask_from_seg(self._to_dev(h_seg), parents))
         return self._to_dev(torch.tensor(rows)), self._to_dev(torch.tensor(cols))
-
-    def _eager_shared(self, pack, lids):
-        """Readout of one packed row in a single eager masked forward (the reference for the masked graphs)."""
-        t, pp, sg, last, par = pack
-        h = self._forward_masked(torch.tensor([t], device=self.dev),
-                                 self._mask_from_seg(torch.tensor([sg], device=self.dev), [par]),
-                                 torch.tensor([pp], device=self.dev))[0, last]
-        return self._readout(h, lids)
 
     def _plain_hidden(self, packs, idx):
         """Single-prompt units -> hidden states at their readout positions (a plain graph, or an eager forward without
@@ -3453,10 +3439,7 @@ class VLLMBackend:
 
     def run_shared(self, groups, policy=None):
         flat = self.run([p for g in groups for p in g[0]], [x for g in groups for x in g[1]])
-        out, j = [], 0
-        for g in groups:
-            out.append(flat[j: j + len(g[0])]); j += len(g[0])
-        return out
+        return _split(flat, groups)
 
 
 class SGLangBackend:
@@ -3493,10 +3476,7 @@ class SGLangBackend:
 
     def run_shared(self, groups, policy=None):
         flat = self.run([p for g in groups for p in g[0]], [x for g in groups for x in g[1]])
-        out, j = [], 0
-        for g in groups:
-            out.append(flat[j: j + len(g[0])]); j += len(g[0])
-        return out
+        return _split(flat, groups)
 
 
 def _split(flat, groups):
