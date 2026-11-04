@@ -75,7 +75,9 @@ def attention(q, k, v, end, scale, q_block=None, kv_block=None):
     blocks of kv_block keys with a running max and sum (online softmax, as in flash attention). The same softmax up to
     rounding, but no tensor spans L x L (16 heads x 8192^2 x 4 bytes = 4.3 GB at once) and no reduction spans all L
     keys: on a v5e, XLA's full-row softmax hits a cliff at some lengths (6144 / 8192 keys: 128 / 291 ms per layer for
-    1.5B shapes, against 2.1 / 3.6 ms blocked)."""
+    1.5B shapes, against 2.1 / 3.6 ms blocked). A query block reads only the key blocks up to its last query: the
+    later ones are hidden from all its queries by causality (about half of the blocks of a long prompt), and skipping
+    them changes no bit (each added nothing: probabilities 0, rescale 1)."""
     b, nh, L, d = q.shape
     nkv, g = k.shape[1], nh // k.shape[1]
     qg = q.reshape(b, nkv, g, L, d)
@@ -111,7 +113,15 @@ def attention(q, k, v, end, scale, q_block=None, kv_block=None):
 
         init = (jnp.full((b, nkv, g, q_block), -jnp.inf, jnp.float32), jnp.zeros((b, nkv, g, q_block), jnp.float32),
                 jnp.zeros((b, nkv, g, q_block, d), jnp.float32))
-        (_, l, acc), _ = jax.lax.scan(kv_step, init, (kb, vb, eb, jnp.arange(nk, dtype=end.dtype) * kv_block))
+        # the key blocks in order up to the one holding the block's last query (the scan over every block read the
+        # later ones too: all masked)
+        seen = (q0 + q_block - 1) // kv_block + 1
+
+        def step(t, carry):
+            blk = [jax.lax.dynamic_index_in_dim(x, t, keepdims=False) for x in (kb, vb, eb)]
+            return kv_step(carry, (*blk, (t * kv_block).astype(end.dtype)))[0]
+
+        _, l, acc = jax.lax.fori_loop(0, seen, step, init)
         return acc / l[..., None]  # every real row sees itself, so l > 0
 
     blocks = qg.reshape(b, nkv, g, nq, q_block, d).transpose(3, 0, 1, 2, 4, 5)
