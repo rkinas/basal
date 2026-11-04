@@ -39,15 +39,19 @@ class EvidenceHead(nn.Module):
 
 
 def best_spans(ls, le, rel, state, top=3):
+    """The top non-overlapping spans (start token i <= end token j < i + MAX_SPAN) by log p_start + log p_end, from
+    the top * 4 best candidates. Only the band of MAX_SPAN ends per start is scored ([n, MAX_SPAN], not [n, n]: a
+    32k-token state took 4 GB per score matrix), and only valid spans are candidates (a state of a few tokens has fewer
+    than top * 4: no inverted or empty span is returned)."""
     n = ls.shape[0]
-    sc = ls[:, None] + le[None, :]
-    mask = torch.ones(n, n, dtype=torch.bool, device=ls.device).triu().logical_and(
-        ~torch.ones(n, n, dtype=torch.bool, device=ls.device).triu(MAX_SPAN))
-    sc = sc.masked_fill(~mask, -1e9)
-    out, flat = [], sc.flatten().topk(min(top * 4, n * n))
+    w = min(MAX_SPAN, n)
+    end = torch.arange(n, device=ls.device)[:, None] + torch.arange(w, device=ls.device)[None]  # [n, w]
+    ok = end < n
+    sc = (ls[:, None] + le[end.clamp(max=n - 1)]).masked_fill(~ok, float("-inf"))
+    out, flat = [], sc.flatten().topk(min(top * 4, int(ok.sum())))
     for v, k in zip(flat.values.tolist(), flat.indices.tolist()):
-        i, j = divmod(k, n)
-        a, b = rel[i][0], rel[j][1]
+        i, d = divmod(k, w)
+        a, b = rel[i][0], rel[i + d][1]
         if any(not (b <= x["start"] or a >= x["end"]) for x in out):
             continue  # no overlapping spans
         out.append(dict(text=state[a:b], start=a, end=b, probability=math.exp(v)))
