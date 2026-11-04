@@ -79,7 +79,7 @@ class OCRClient:
             if time.monotonic() - started >= self.timeout:
                 # The bounded synchronous JSON parse may overrun the deadline.
                 raise asyncio.TimeoutError()
-        except (httpx.HTTPError, ValueError, RecursionError, TimeoutError) as exc:
+        except (httpx.HTTPError, ValueError, RecursionError, asyncio.TimeoutError, TimeoutError) as exc:
             raise OCRServiceError(f"PaddleX OCR request failed ({type(exc).__name__})") from exc
         if not isinstance(payload, dict) or payload.get("errorCode") != 0:
             raise OCRServiceError("PaddleX OCR returned an unsuccessful response")
