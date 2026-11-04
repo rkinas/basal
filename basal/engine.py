@@ -1091,6 +1091,7 @@ class StateCache:
         t = np.asarray(tokens, dtype=np.int64)
         blocks = self._blocks(t)
         rejected = set() if usable is not None else ()
+        best = None
         with self.lock:
             for i in range(len(blocks) - 1, -1, -1):
                 keys = self.index.get(blocks[i])
@@ -1111,8 +1112,9 @@ class StateCache:
                     diff = np.nonzero(own[start:n] != t[start:n])[0]
                     m = start + int(diff[0]) if len(diff) else n
                     if m > matched:
-                        kv = self._unpack(kv)  # (2.5: an 8-bit entry in its dtype, for the check and the caller)
-                        if usable is not None and not usable(kv, m, len(own)):
+                        # the check reads the stored shapes only: an 8 / 4-bit entry is dequantised once, for the
+                        # winner, after the lock (2.5.3 dequantised every improving candidate under it)
+                        if usable is not None and not usable(self._shapes(kv), m, len(own)):
                             rejected.add(key)
                             continue
                         best, matched = (key, kv, m, len(own)), m
@@ -1121,8 +1123,18 @@ class StateCache:
                 if best is not None:
                     self.entries.move_to_end(best[0])
                     self.prefix_hits += use is None or bool(use(best[0]))
-                    return best
-            return None
+                    break
+            else:
+                return None
+        return (best[0], self._unpack(best[1]), best[2], best[3])
+
+    def _shapes(self, kv):
+        """A stored entry as usable() reads it: its tensors (16 bits), or stand-ins with their shapes only (8 / 4 bits:
+        kv_quant keeps the shape)."""
+        if self.bits == 16:
+            return kv
+        from types import SimpleNamespace
+        return [(SimpleNamespace(shape=k[3]), SimpleNamespace(shape=v[3])) for k, v in kv]
 
     def _drop(self, key):
         """Removes an entry and its blocks from the index (lock held)."""

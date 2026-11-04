@@ -93,3 +93,29 @@ def test_one_prompt_cut_at_its_state_is_cached_and_read_back():
     ref = separate(m, toks, [[7, 8, 9]])[0]
     assert torch.allclose(torch.tensor(first[0]), ref, atol=1e-6)
     assert torch.allclose(torch.tensor(second[0]), ref, atol=1e-2)
+
+
+def test_longest_dequantises_only_the_winner_outside_the_lock(monkeypatch):
+    """--state-cache-bits 8: longest() checks candidates on their stored shapes and dequantises only the entry it
+    returns, after releasing the cache's lock (other requests' lookups do not wait on dequantisation)."""
+    import torch
+
+    from basal import engine
+    cache = engine.StateCache(1 << 24, bits=8)
+    cache.BLOCK = 4
+    pre = [1, 2, 3, 4]
+    kv = lambda T: [(torch.randn(2, T, 8), torch.randn(2, T, 8))]  # noqa: E731
+    for tail in ([5, 9, 9, 9], [5, 6, 9, 9], [5, 6, 7, 9]):  # each matches the query further than the one before
+        toks = pre + tail
+        cache.put(cache.key(toks), kv(len(toks)), tokens=toks)
+    calls, real = [], engine.kv_dequant
+
+    def counting(e, bits, keys):
+        calls.append(cache.lock.locked())
+        return real(e, bits, keys)
+    monkeypatch.setattr(engine, "kv_dequant", counting)
+    seen = []
+    found = cache.longest(pre + [5, 6, 7, 8, 0, 0], usable=lambda kv, m, n: seen.append(kv[0][0].shape) or True)
+    assert found is not None and found[2] == 7 and found[1][0][0].shape == (2, 8, 8)
+    assert calls == [False, False]  # keys and values of the winner, outside the lock
+    assert seen == [(2, 8, 8)] * 3  # every improving candidate checked on its shape
