@@ -783,7 +783,7 @@ default run.
 | PyTorch 2.13.0+cu130 | 399 s | 1.00× | 800/800 |
 | PyTorch 2.13, `--batches compact` | 394 s | 0.99× | 798/800 |
 
-On the GB10 no flag speeds the batch up by more than 5% (`--concurrency 128`), and `fine`, `--prefix-cache on` and
+On the GB10 the fastest variant, `--concurrency 128`, saves about 5% of the time; `fine`, `--prefix-cache on` and
 `fast` (its compile time included) are slower: keep the defaults. Accuracy stayed within one decision of the default's
 (0.8137) in every row.
 
@@ -802,8 +802,8 @@ On the GB10 no flag speeds the batch up by more than 5% (`--concurrency 128`), a
 
 - **DGX Spark (GB10, aarch64, CUDA 13).** In the README install steps use the CUDA 13 build of PyTorch
   (`uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130`) instead of cu128. The GPU shares LPDDR5X memory (about 273 GB/s) with the CPU; every forward pass reads
-  all weights, which is why FP8 (half the bytes) halves latency. PyTorch 2.13 (cu130) adds `--batches compact`
-  and the format-1 cascade; batch flags measured: [DGX Spark (GB10): batch flags](#dgx-spark-gb10-batch-flags-with-basal-20).
+  all weights, which is why FP8 (half the bytes) halves latency. With PyTorch 2.13 (cu130), `--batches compact`
+  and the format-1 cascade also run; batch flags measured: [DGX Spark (GB10): batch flags](#dgx-spark-gb10-batch-flags-with-basal-20).
 - **B300 / B200 (sm_100/sm_103).** PyTorch cu130 wheels work. The `vllm` mode needs a CUDA toolkit (nvcc) of version
   12.9 or newer on the machine: vLLM's FlashInfer kernels are compiled on first use, and nvcc 12.8 (found in some
   container images) cannot target the B300 (`Unsupported gpu architecture 'compute_103a'`). Compilation of `nvfp4` takes long (about 50 minutes on
