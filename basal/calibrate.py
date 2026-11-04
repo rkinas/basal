@@ -91,6 +91,7 @@ import torch
 
 from . import __version__
 from . import tasks as task_types
+from .cli import positive
 from .engine import resolve
 from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
@@ -1398,7 +1399,7 @@ def parser():
                          "share) without writing a calibration file")
     ap.add_argument("--strict", action="store_true",
                     help="exit with status 1 when a type's leave-one-family-out ECE is above --reference")
-    ap.add_argument("--concurrency", type=int, default=32, help="requests in flight (the engine batches them)")
+    ap.add_argument("--concurrency", type=positive, default=32, help="requests in flight (the engine batches them)")
     add_engine_args(ap.add_argument_group("engine (in process, as basal-serve)"))
     ap.set_defaults(model=None)
     return ap

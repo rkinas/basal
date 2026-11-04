@@ -26,6 +26,7 @@ from pathlib import Path
 import torch
 
 from . import adapter as adapter_module
+from .cli import positive
 from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend, MLXBackend,
                      MPSBackend, OllamaBackend, SGLangBackend, VLLMBackend, resolve)
 from .jsonl import read_lines
@@ -34,14 +35,6 @@ from .server import MODES, adapter_refused, adapter_refused_kind, default_mode
 
 GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: --model gives tokenizer and calibration
 MIN_ITEMS = 6  # the latency runs warm up on the first 5 items and time the ones after them
-
-
-def positive(s):
-    """An argparse type: an integer >= 1."""
-    v = int(s)
-    if v < 1:
-        raise argparse.ArgumentTypeError(f"{s}: must be at least 1")
-    return v
 
 
 def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="http://127.0.0.1:11434",

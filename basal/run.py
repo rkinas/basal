@@ -25,6 +25,8 @@ from pathlib import Path
 
 import httpx
 
+from .cli import positive
+
 
 def to_request(item, early_exit=None, preset=None, lang=None):
     if preset and "questions" not in item and "question" not in item:  # --preset: its questions over the state
@@ -168,7 +170,7 @@ def main():
     ap.add_argument("--lang", choices=["pl", "en"], default=None, help="--preset wording (default: the state's)")
     ap.add_argument("--list-presets", dest="list_presets", action="store_true")
     ap.add_argument("--url", default="http://127.0.0.1:8000/v1/systemone")
-    ap.add_argument("--concurrency", type=int, default=16, help="requests in flight (the server batches them)")
+    ap.add_argument("--concurrency", type=positive, default=16, help="requests in flight (the server batches them)")
     ap.add_argument("--early-exit", dest="early_exit", default=None, help="e.g. 0.99 (server mode fast-exit)")
     a = ap.parse_args()
     if a.list_presets:
