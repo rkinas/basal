@@ -196,6 +196,11 @@ def groups_for(tok, qs, fmt=1):
     return out
 
 
+def finite(r):
+    """A row for JSON: NaN and inf (no memory tracking) as null, since bare NaN is not valid JSON."""
+    return {k: None if isinstance(v, float) and not math.isfinite(v) else v for k, v in r.items()}
+
+
 def decisions(groups, res):
     out = []
     for (q, perms, _, _), probs in zip(groups, res):
@@ -330,7 +335,7 @@ def main():
         else:
             r["agree"] = sum(x == y for x, y in zip(top, ref)) / len(ref)
         rows.append(r)
-        print(json.dumps({k: round(v, 3) if isinstance(v, float) else v for k, v in r.items()}), flush=True)
+        print(json.dumps(finite({k: round(v, 3) if isinstance(v, float) else v for k, v in r.items()})), flush=True)
         if hasattr(be, "llm"):
             del be.llm
         del be; gc.collect(); reset_memory()
@@ -339,7 +344,7 @@ def main():
         print(f"{r['mode']:<18}{r['lat2_ms']:>9.1f}{r['lat1_ms']:>9.1f}{r['dec_s']:>8.1f}"
               f"{r.get('agree', float('nan')):>8.3f}{r.get('acc', float('nan')):>7.3f}{r['mem_gb']:>6.1f}")
     if a.out:
-        Path(a.out).write_text(json.dumps(rows, indent=1), encoding="utf-8")
+        Path(a.out).write_text(json.dumps([finite(r) for r in rows], indent=1), encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,10 @@
 """Regression tests for fix/nan-comparators (Z-1089)."""
+import json
+
 import pytest
 
 from basal import agree
+from basal import bench
 from basal import selfcheck
 
 
@@ -24,3 +27,9 @@ def test_e3_one_nan_readout_of_four_disagrees():
 def test_e3_clean_readouts_agree():
     c = agree.compare([[0.6, 0.4]] * 4, [[0.6, 0.4]] * 4)
     assert c["agreement"] == 1.0 and c["max_dp"] == 0.0
+
+
+def test_v3_nan_and_inf_become_null():
+    row = bench.finite({"mode": "gguf", "mem_gb": float("nan"), "x": float("inf"), "lat_ms": 1.5, "n": 3})
+    assert row == {"mode": "gguf", "mem_gb": None, "x": None, "lat_ms": 1.5, "n": 3}
+    json.dumps(row, allow_nan=False)
