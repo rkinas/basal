@@ -122,21 +122,22 @@ def test_state_cut_from_the_first_prompt_equals_tokenizing_the_prefix():
     """--state-cache-gb: the state cut computed from the first prompt's ids (encode's) and the state's last line
     equals tokenizing the prefix and the whole prompt again, for each tokenizer kind, odd state endings, both option
     orders and a multi question (its first branch asks about a label, not the question itself)."""
+    from basal.prompt import FORMATS
     from basal.server import to_items
     srv = FakeServer([0.5, 0.5])
     for tok in (gemma_like(), bielik_like(), qwen_like()):
         srv.tok, srv.fmt, srv.once = tok, 2, once_ids(tok)
-        spliced = 0
         for state in (STATE, "x", "the\n\n", " \n\t", "Łódź\nŁ", "a\nb\nc " * 40, "one line", "tail \n x"):
             qs = to_items(state, {"c": {"instructions": "Which?", "criteria": {"a": "the test", "b": "tea"}},
                                   "m": {"type": "multi", "instructions": "Any?", "criteria": ["x", "y"]}}, 10)
             for q in qs:
                 question, options = q["branches"][0]
+                head = FORMATS[2]["templates"][q["lang"]]["user"].split("{state}")[0]  # "State:\n" / "Stan:\n"
                 for perm in ([0, 1], [1, 0]):
                     opts = [options[c] for c in perm]
-                    ids = whole(tok, [render(tok, q["state"], question, opts, q["lang"], 2)])[0]
-                    assert srv.state_cut(q, (ids, question, opts)) == srv.state_cut(q)
                     text = render(tok, q["state"], question, opts, q["lang"], 2)
-                    end = text.find("State:\n" + q["state"]) + len("State:\n" + q["state"])
-                    spliced += srv._spliced_cut(text, end, ids) is not None
-        assert spliced  # the splice, not the fallback, gave them
+                    ids = whole(tok, [text])[0]
+                    assert srv.state_cut(q, (ids, question, opts)) == srv.state_cut(q)
+                    i = text.find(head + q["state"])
+                    assert i >= 0 and srv._spliced_cut(text, i + len(head) + len(q["state"]), ids) is not None, \
+                        (q["lang"], state)  # the splice gave it, not the fallback (the template puts a newline first)
