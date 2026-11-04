@@ -277,6 +277,29 @@ def test_cascade_why(monkeypatch):
     assert be._cascade_why is None and not E.cascade_ok(be.model.config)
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_parts_of_a_split_group_compute_their_root_once(cached):
+    """A group with more than BRANCH_TOKENS below its root (a rank stage over many passages in one context) is split
+    into parts; they share the group's root, computed in one pass-1 row and read by the other parts from a store
+    (the state cache, or the call's own without one): 2.5.2 ran pass 1 once per part. Every readout still equals its
+    prompt run alone."""
+    from basal.engine import StateCache
+    rnd = random.Random(0)
+    state = [1] + [rnd.randrange(3, 50) for _ in range(23)]
+    toks = [state + [20 + q % 3, 21, 22 + q, 30, 31, 32] for q in range(8)]  # 8 x 6 tokens below the root
+    lids = [[30, 31]] * len(toks)
+    be = Stub(tiny())
+    be.BRANCH_TOKENS = 12
+    if cached:
+        be.state_cache = StateCache(1e9)
+    rows, orig = [], be._graph
+    be._graph = lambda B, L: (rows.append(B), orig(B, L))[1]
+    g = (toks, lids, len(state)) if cached else (toks, lids)
+    assert len(be._units([g], share=True)) > 1
+    check(be, [g])
+    assert rows == [1]  # one pass-1 forward of one row
+
+
 def test_pass2_graphs():
     """With the pass-2 graphs captured (warm), short branch rows replay a graph; longer ones run without one."""
     class Warm(Stub):
