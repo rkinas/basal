@@ -49,6 +49,23 @@ def test_score_independence_and_accuracy():
     assert agree.gate(dict(agreement=0.98, near_ties=0, readouts=100)) == "FAIL"
 
 
+def test_decisions_follow_the_orders_the_server_answers_with():
+    """Prompt-format-2 models are served with one option order (server.default_orders): their decisions are the given
+    order's readouts, not the average of both orders."""
+    readouts = [[0.7, 0.2, 0.1], [0.3, 0.2, 0.5]]                          # order 1, reversed order
+    assert agree.decisions(readouts, orders=1) == [[0.7, 0.2, 0.1]]
+    assert [round(x, 6) for x in agree.decisions(readouts, orders=2)[0]] == [0.6, 0.2, 0.2]
+    single = [[[0.55, 0.45], [0.8, 0.2]]]                                    # order 1 says A, the reversed order B
+    got = [[[0.45, 0.55], [0.8, 0.2]]]                                      # order 1 flips, the average does not
+    ref = {"single": single, "multi": [], "long": []}
+    two = agree.score(["single"], ref, {"single": got, "multi": [], "long": []}, None, gold=[(0, 0)], orders=2)
+    one = agree.score(["single"], ref, {"single": got, "multi": [], "long": []}, None, gold=[(0, 0)], orders=1)
+    assert two["decision_agreement"] == 1.0 and one["decision_agreement"] == 0.0
+    assert one["reference_accuracy"] == 1.0 and one["accuracy"] == 0.0
+    from basal.server import default_orders
+    assert default_orders(None, 2) == 1 and default_orders(None, 1) == 2
+
+
 class Tok:
     """Words and single characters; one-letter codes A-Z get ids 1-26, everything else a hash id in 30-255."""
     pad_token = eos_token = "<pad>"
