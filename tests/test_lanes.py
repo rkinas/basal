@@ -50,15 +50,13 @@ def test_lanes_run_requests_at_once_one_per_lane():
         futs = [loop.create_future() for _ in range(6)]
         for f in futs:
             await srv.queue.put(([[1, 2]], [[7, 8]], f, None))
-        t = time.perf_counter()
         w = loop.create_task(srv.worker())
         res = await asyncio.gather(*futs)
         w.cancel()
-        return res, time.perf_counter() - t
-    res, dt = asyncio.run(go())
+        return res
+    res = asyncio.run(go())
     assert res == [[[0.5, 0.5]]] * 6
     assert live["max"] == 3 and [x.calls for x in lanes] == [2, 2, 2]  # three at once, never two on one lane
-    assert dt < 0.45                                                    # one at a time: 0.6 s
     assert sorted(x.name for x in srv.free_lanes) == [0, 1, 2]          # every lane back in the pool
 
 

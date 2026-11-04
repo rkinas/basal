@@ -46,7 +46,7 @@ def to_request(item, early_exit=None, preset=None, lang=None):
 
 def summarise(item, resp):
     out = {"id": item.get("id"), "answers": resp.get("answers"), "latency_ms": resp.get("usage", {}).get("latency_ms")}
-    if "questions" not in item and resp.get("answers"):
+    if "question" in item and "questions" not in item and resp.get("answers"):  # a simple line (a --preset line has neither)
         a = resp["answers"]["q"]
         p = a["probabilities"]
         keys = ["true", "false"] if a["type"] == "noul" else [str(k) for k in range(len(item["options"]))]

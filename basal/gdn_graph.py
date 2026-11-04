@@ -50,19 +50,22 @@ GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
 GDN_LAYERS = {"linear_attention", "full_attention"}
 
 
-def _decoder_config(model_dir):
-    """config.json of a model directory, the decoder part (text_config of a multimodal wrapper); None if unreadable."""
+def _decoder_config(model_dir, strict=False):
+    """config.json of a model directory, the decoder part (text_config of a multimodal wrapper); None if unreadable
+    (strict: one that exists but cannot be read or parsed raises instead)."""
     try:
         cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError) as e:
+        if strict and not isinstance(e, FileNotFoundError):
+            raise
         return None
     return cfg.get("text_config") or cfg
 
 
-def is_gdn(model_dir):
+def is_gdn(model_dir, strict=False):
     """A Qwen3.5 decoder of Gated DeltaNet and full-attention layers (what GDNGraphBackend serves), from config.json.
     Other recurrent models (Qwen3-Next, Mamba and hybrids) stay refused by the graph engine."""
-    c = _decoder_config(model_dir)
+    c = _decoder_config(model_dir, strict)
     if not c or c.get("model_type") not in GDN_MODEL_TYPES:
         return False
     kinds = set(c.get("layer_types") or ())

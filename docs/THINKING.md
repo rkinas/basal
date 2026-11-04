@@ -7,7 +7,7 @@ certified 5% threshold; the decision is then read out again over the state and t
 think weights in the model's `think/` folder, so the server needs vLLM:
 
 ```bash
-uv pip install "basal[fp8,vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.1.tar.gz"
+uv pip install "basal[fp8,vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.3.tar.gz"
 # vLLM 0.31 replaces this environment's torch with one built for CUDA 13.0, which needs an NVIDIA driver >= 580;
 # or, since vLLM brings its own torch, keep it in a separate environment and pass --think-python <that env's python>
 

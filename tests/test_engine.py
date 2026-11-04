@@ -259,7 +259,8 @@ def test_graph_engine_keeps_the_compile_cache_across_reboots_unless_set(monkeypa
 
     import basal
     from basal.engine import GraphBackend
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(tmp_path / "home"))
     mine, tmp_default = tmp_path / "mine", default_cache_dir()
     default = tmp_path / "home" / ".cache" / "basal" / "torchinductor"
     for given, preset, compile, want in ((False, None, True, default), (False, tmp_default, True, default),
@@ -278,7 +279,7 @@ def test_graph_engine_keeps_the_compile_cache_across_reboots_unless_set(monkeypa
             pass
         assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(want) and cache_dir() == str(want)
         assert CacheBase.get_local_cache_path().is_relative_to(want)
-    if os.geteuid() != 0:  # root writes anywhere
+    if hasattr(os, "geteuid") and os.geteuid() != 0:  # root writes anywhere (POSIX directory modes)
         monkeypatch.setenv("HOME", str(tmp_path / "ro"))
         (tmp_path / "ro" / ".cache" / "basal" / "torchinductor").mkdir(parents=True, mode=0o500)
         monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", tmp_default)

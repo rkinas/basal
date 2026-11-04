@@ -438,6 +438,12 @@ async def over_http(endpoint, bodies, concurrency):
 def uncalibrated(entry, base):
     """The GET /v1/models entry of a running server -> the entry; refuses a server that applies temperatures."""
     temps = entry.get("temperature_per_prim")
+    buckets = entry.get("temperature_per_bucket") or {}  # {type: {bucket: T}}, a server with a file-2 calibration
+    if buckets:
+        temps = dict(temps or {})
+        for prim, per_bucket in buckets.items():
+            for bucket, t in per_bucket.items():
+                temps[f"{prim}/{bucket}"] = t
     if temps is None:
         print(f"warning: {base} does not report its temperatures (basal-serve before 2.0.0); make sure it runs with "
               "--no-calibration", file=sys.stderr)
@@ -1300,7 +1306,8 @@ def refit(a, targets, reference, reference_name):
     small = sample_size(rows, [], targets)
     for w in small:
         print(f"warning: {w}", file=sys.stderr)
-    base_file = Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None)
+    base_file = None if a.no_calibration else (
+        Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None))
     baseline = json.loads(base_file.read_text(encoding="utf-8")) if base_file is not None and base_file.exists() else {}
     fo = calibration_orders(baseline)
     if baseline and fo is not None and head.get("orders") is not None and fo != head["orders"]:  # as basal-serve
@@ -1317,6 +1324,7 @@ def refit(a, targets, reference, reference_name):
                             multi=sum(r["prim"] == "multi" for r in rows), date=datetime.date.today().isoformat(),
                             model=head["model"], engine=head["engine"], orders=head["orders"],
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__} (--from-rows)")
+    cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision") if head.get(k) is not None})
     cal["certified_on"] = "CERT split of fitted_on.data (30% by group)"
     cal["baseline"] = str(base_file) if baseline else "none"
     print(table(report))
@@ -1495,6 +1503,7 @@ def main(argv=None):
         head = dict(basal_calibrate_rows=1, fmt=fmt, kind=kind, quant=quant, vllm_preset=preset, model=str(model),
                     engine=engine, data=Path(a.input).name, requests=len(bodies) - len(failed),
                     baseline=str(base_file) if baseline else None, orders=orders)
+        head.update(layout=a.layout, adapter=adapter, revision=revision)
         with open(a.save_rows, "w", encoding="utf-8") as f:
             for x in [head] + rows:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")

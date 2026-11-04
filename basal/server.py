@@ -68,7 +68,7 @@ from .tools import answer as tool_answer
 from .tools import parse as parse_tools
 from .tools import set_answer as tool_set_answer
 
-RELEASE_DATE = "2026-11-02"  # the engine's release date (GET /v1/models), not the served model's
+RELEASE_DATE = "2026-11-04"  # the engine's release date (GET /v1/models), not the served model's
 
 MODES = {
     # mode: (backend, quantisation, compile)
@@ -155,12 +155,20 @@ def default_mode(model=None, revision=None):
     return "eager"
 
 
+def _config_unreadable(probe, model, e):
+    """The warning for a model whose config.json a probe could not read: the probe answers its default, the cause
+    (a permission error, a full disk) is no longer swallowed with it."""
+    print(f"basal: warning: {probe}: cannot read the config of {model}: {type(e).__name__}: {str(e)[:300]}",
+          file=sys.stderr, flush=True)
+
+
 def _gemma4(model, revision=None):
     """A Gemma 4 model (basal-omni), from its config.json; False when that cannot be read (the server says why)."""
     from .gemma4_graph import is_gemma4_dir
     try:
-        return is_gemma4_dir(resolve(model, revision, metadata_only=True))
-    except Exception:  # offline without the model cached, a wrong name: the model load reports it
+        return is_gemma4_dir(resolve(model, revision, metadata_only=True), strict=True)
+    except Exception as e:  # offline without the model cached, a wrong name: the model load reports it
+        _config_unreadable("_gemma4", model, e)
         return False
 
 
@@ -168,8 +176,9 @@ def _recurrent(model, revision=None):
     """The recurrent-state layers of a model (recurrent_layers), from its config.json; None when that cannot be read
     (the model load reports it)."""
     try:
-        return recurrent_layers(resolve(model, revision, metadata_only=True))
-    except Exception:
+        return recurrent_layers(resolve(model, revision, metadata_only=True), strict=True)
+    except Exception as e:
+        _config_unreadable("_recurrent", model, e)
         return None
 
 
@@ -177,8 +186,9 @@ def _gdn(model, revision=None):
     """A Qwen3.5 model of Gated DeltaNet and attention layers (gdn_graph.is_gdn: the recurrent models the CUDA graph
     engine serves), from its config.json; False when that cannot be read."""
     try:
-        return is_gdn(resolve(model, revision, metadata_only=True))
-    except Exception:
+        return is_gdn(resolve(model, revision, metadata_only=True), strict=True)
+    except Exception as e:
+        _config_unreadable("_gdn", model, e)
         return False
 
 
@@ -187,10 +197,10 @@ def validate_quant(mode, quant):
     if quant is None:
         return
     kind = MODES[mode][0]
-    if quant == "q8" and kind == "mlx" or quant in ("fp8", "nvfp4") and kind in ("graph", "exit"):
+    if quant == "q8" and kind == "mlx" or quant in ("fp8", "nvfp4", "int8") and kind in ("graph", "exit"):
         return
     raise SystemExit(f"--quant {quant} is not supported with --mode {mode} "
-                     "(q8 only for mlx; fp8 and nvfp4 only for the CUDA graph modes)")
+                     "(q8 only for mlx; fp8, nvfp4 and int8 only for the CUDA graph modes)")
 
 
 def _text(x):
@@ -249,6 +259,8 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
     state_pl = not force_lang and lang_of(state) == "pl"  # once per request, not once per question
     for name, q in questions.items():
         t = q.get("type", "choice")
+        if t not in ("choice", "noul", "score", "act", "multi", "tool"):
+            raise RequestError(f"question {name!r}: unknown type {t!r}")
         instr = _text(q.get("instructions", ""))
         lang = force_lang or ("pl" if state_pl else lang_of(instr))
         extra = {}
@@ -836,7 +848,7 @@ def order_average_arg(value):
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
                    calibration_warning=None, vllm_preset=None, layout=None, two_way=None, option_isolation=False,
-                   certified=None, context=None, adapter=None):
+                   certified=None, context=None, adapter=None, buckets=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
     model's prompt format, the option orders served, why the --calibration file may not belong to the model, the
@@ -846,6 +858,7 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
              "mode": mode, "early_exit": sorted(policies), "temperature_per_prim": dict(temperatures or {})}
+    entry["temperature_per_bucket"] = buckets or {}
     if prompt_format is not None:
         entry["prompt_format"] = prompt_format
     if media:  # --media on: the media the served model takes
@@ -1000,7 +1013,7 @@ def calibration_mismatch(cal, name, md, adapter=None):
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return None
     model, rev = model_identity(name, md)
-    key = lambda s: str(s).rstrip("/").split("/")[-1].lower()  # a repo id, a local copy or a served name
+    key = lambda s: Path(str(s)).name.lower()  # a repo id, a local copy or a served name
     if key(fitted["model"]) != key(model):
         return f"it was fitted on {fitted['model']}, the served model is {model}"
     if fitted.get("revision") and rev and fitted["revision"] != rev:
@@ -1037,8 +1050,7 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     fitted = calibration_orders(data)
     alt = cal.with_name(f"{cal.stem}.o{orders}{cal.suffix}")
     if fitted is not None and fitted != orders and not path and alt.exists():
-        cal, data = alt, json.loads(alt.read_text(encoding="utf-8"))
-        fitted = calibration_orders(data)
+        return load_calibration(md, kind, alt, quant, orders, off, preset, layout, adapter)
     if fitted is None or fitted == orders:
         return data, cal, None
     why = f"{cal.name} was fitted on {fitted} option order(s), served with {orders}"
@@ -1236,7 +1248,7 @@ class Server:
         if why:
             raise SystemExit(why)
         shared = self.orders != 1 or self.soam  # prefix sharing: option orders, or the questions of a request
-        base = a.model.rstrip("/").split("/")[-1]
+        base = Path(a.model).name or Path(a.model).resolve().name  # --model . : the directory's name
         self.name = a.name or (f"{base}+{self.adapter.name}" if self.adapter else base)
         quant = a.quant or quant
         why = nvfp4_calibration_refused(md, kind, quant, a)
@@ -2387,8 +2399,13 @@ class Starting:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Retry-After", "5")
                 self.end_headers()
-                self.wfile.write(body)
-            do_GET = do_POST = do_HEAD = _answer
+                if self.command != "HEAD":  # HEAD gets the status and the headers of GET, never a body
+                    self.wfile.write(body)
+
+            def __getattr__(self, name):  # any method (TRACE, CONNECT, a made-up one) gets the same answer, not a 501
+                if name.startswith("do_"):
+                    return self._answer
+                raise AttributeError(name)
 
             def log_message(self, *_):
                 pass
@@ -2404,7 +2421,8 @@ class Starting:
         # whole life, so the port stayed taken after stop() and the real server's bind failed (address already in
         # use): the child closes its copy at once
         sock = self.httpd.socket
-        os.register_at_fork(after_in_child=sock.close)
+        if hasattr(os, "register_at_fork"):
+            os.register_at_fork(after_in_child=sock.close)
 
     def stop(self):
         if self.httpd is not None:
@@ -2497,7 +2515,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                                            certified_table(srv.cal),
                                            context={"limit": srv.context[0] if srv.context else None,
                                                     "overflow": srv.overflow, "truncate_head": srv.trunc_head},
-                                           adapter=srv.adapter.identity if getattr(srv, "adapter", None) else None))
+                                           adapter=srv.adapter.identity if getattr(srv, "adapter", None) else None,
+                                           buckets=srv.cal.get("temperature_per_bucket")))
 
     async def health(_):
         return JSONResponse({"status": "ok", **srv.load()})

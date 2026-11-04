@@ -2,6 +2,7 @@
 list conform to the official System One OpenAPI schema (tests/data/systemone_openapi.json)."""
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -207,6 +208,13 @@ def test_unsupported_quant_fails_before_model_loading(monkeypatch, mode, quant):
     monkeypatch.setattr(server_module, "resolve", lambda *_, **__: pytest.fail("must reject before loading a model"))
     with pytest.raises(SystemExit, match="not supported"):
         server_module.main()
+
+
+def test_int8_quant_is_accepted_for_the_cuda_graph_modes_as_the_help_says():
+    for mode in ("fast", "int8"):
+        server_module.validate_quant(mode, parser().parse_args(["--mode", mode, "--quant", "int8"]).quant)
+    with pytest.raises(SystemExit, match="not supported"):
+        server_module.validate_quant("eager", "int8")
 
 
 def test_gguf_mode_needs_a_file_before_model_loading(monkeypatch):
@@ -631,3 +639,45 @@ def test_help_renders_every_option():
     prints the action's fields)."""
     text = parser().format_help()
     assert "option_strings" not in text and "+1.6% at best" in " ".join(text.split())
+
+
+@pytest.mark.parametrize("probe, default", [("_gemma4", False), ("_recurrent", None), ("_gdn", False)])
+def test_config_probes_warn_when_the_config_cannot_be_read(monkeypatch, capsys, probe, default):
+    """default_mode's config probes answer their default when config.json cannot be read, and say why on stderr
+    (an OSError used to give the default with no trace)."""
+    def unreadable(*a, **k):
+        raise OSError("Permission denied: config.json")
+    monkeypatch.setattr(server_module, "resolve", unreadable)
+    assert getattr(server_module, probe)("some/model") == default
+    err = capsys.readouterr().err
+    assert f"basal: warning: {probe}" in err and "OSError" in err and "Permission denied" in err
+    assert "some/model" in err  # the warning names the model
+
+
+@pytest.mark.parametrize("probe, default", [("_gemma4", False), ("_recurrent", None), ("_gdn", False)])
+@pytest.mark.parametrize("damage, error", [("directory", "IsADirectoryError"), ("json", "JSONDecodeError"),
+                                           ("noperm", "PermissionError")])
+def test_config_probes_warn_on_a_real_config_that_cannot_be_read(tmp_path, capsys, probe, default, damage, error):
+    """The helpers under the probes (is_gemma4_dir, recurrent_layers, is_gdn) used to swallow the read and parse errors
+    themselves, so the probes' warning never showed on a real model directory (no monkeypatch of the helpers here)."""
+    cfg = tmp_path / "config.json"
+    if damage == "directory":
+        cfg.mkdir()
+    else:
+        cfg.write_text("{not json" if damage == "json" else "{}")
+    if damage == "noperm":
+        cfg.chmod(0)
+        if os.access(cfg, os.R_OK):
+            pytest.skip("root reads a file without permissions")
+    assert getattr(server_module, probe)(str(tmp_path)) == default
+    err = capsys.readouterr().err
+    errors = (error, "PermissionError") if damage == "directory" and sys.platform == "win32" else (error,)
+    # Windows refuses to open a directory with PermissionError, POSIX with IsADirectoryError
+    assert f"basal: warning: {probe}" in err and str(tmp_path) in err and any(e in err for e in errors)
+
+
+@pytest.mark.parametrize("probe, default", [("_gemma4", False), ("_recurrent", None), ("_gdn", False)])
+def test_config_probes_stay_silent_without_a_config(tmp_path, capsys, probe, default):
+    """A model directory with no config.json (a GGUF folder) is not an error: the default, no warning."""
+    assert getattr(server_module, probe)(str(tmp_path)) == default
+    assert capsys.readouterr().err == ""

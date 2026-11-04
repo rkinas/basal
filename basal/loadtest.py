@@ -10,6 +10,7 @@ compares the returned probabilities exactly (a server started with --determinist
 import argparse
 import asyncio
 import json
+import math
 import statistics
 import time
 from pathlib import Path
@@ -65,8 +66,8 @@ async def run(a):
         t0 = time.perf_counter()
         res = await asyncio.gather(*[one(b) for b in bodies[10 + a.n_seq: n]])
         wall = time.perf_counter() - t0
-    ok = sorted(x for x, s in res if s == 200)
-    out = dict(url=a.url, p50_ms=statistics.median(lat) * 1000, p95_ms=lat[int(0.95 * len(lat))] * 1000,
+    ok = sorted(x for x, s in res if s == 200)  # p95: the nearest rank, ceil(0.95 n)-th smallest (as basal-bench)
+    out = dict(url=a.url, p50_ms=statistics.median(lat) * 1000, p95_ms=lat[math.ceil(0.95 * len(lat)) - 1] * 1000,
                concurrency=a.concurrency, decisions_per_s=len(ok) / wall, errors=len(res) - len(ok))
     if a.questions_per_request > 1:  # a request is several decisions; the rates above count requests
         out.update(questions_per_request=a.questions_per_request,

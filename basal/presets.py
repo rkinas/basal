@@ -126,7 +126,13 @@ POLICIES = {
 PRECEDENCE = ["support", "block", "review", "pass"]  # the strongest action of all the checks wins
 
 
-_PL = re.compile(r"[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]|\b(i|w|z|nie|się|jest|na|do|że|od)\b")
+# Signs of Polish: diacritics and common words, also as typed without diacritics (sie, ze, juz); the one-letter and
+# short words count only in lower case (not "CO", "PO", "W", nor "w/o"). Signs of English: its common words and "I".
+# Words both languages write the same way ("i", "do", "to", "on", "a", "no") count for neither.
+_PL = re.compile(r"[ąćęłńóśźż]|\b(?:nie|się|sie|jest|są|że|ze|jak|czy|mnie|mam|mogę|moge|dla|przez|już|juz|ale|bo|też"
+                 r"|tez|jestem|mój|moj|moje|moim|kiedy|dlaczego|proszę|prosze)\b|\b(?-i:w|z|na|co|od|po|mi)\b(?!/)", re.I)
+_EN = re.compile(r"\b(?:the|and|is|are|of|my|it|in|for|not|this|that|with|you|your|me|can|cannot|does|please|have|has"
+                 r"|was|be|how|why|where|what|when)\b|\b(?-i:I)\b", re.I)
 
 
 def names():
@@ -134,8 +140,10 @@ def names():
 
 
 def lang_of(text):
-    """pl when the text looks Polish (diacritics, common words), else en."""
-    return "pl" if len(_PL.findall(text or "")) >= 2 else "en"
+    """pl when the text has more signs of Polish (diacritics, common words) than common English words, else en. A
+    short ticket typed without diacritics ("nie dziala logowanie") is Polish; a text with no sign of either is en."""
+    text = text or ""
+    return "pl" if len(_PL.findall(text)) > len(_EN.findall(text)) else "en"
 
 
 def questions(name, lang=None, state="", max_error=None):

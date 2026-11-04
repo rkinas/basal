@@ -78,6 +78,17 @@ def test_models_endpoint_reports_context_and_hides_mismatched_certification():
     assert "certified" not in response.json()["models"][0]
 
 
+def test_models_endpoint_reports_the_bucket_temperatures():
+    srv = AppServer(Engine())
+    srv.cal = {"temperature_per_prim": {"choice": 1.0}, "temperature_per_bucket": {"choice": {"2-10": 2.0}}}
+
+    async def go(c):
+        return await c.get("/v1/models")
+
+    entry = asyncio.run(on_app(srv, go)).json()["models"][0]
+    assert entry["temperature_per_bucket"] == {"choice": {"2-10": 2.0}}
+
+
 @pytest.mark.parametrize("body,content,message", [
     (None, b"{not json", "not valid JSON"),
     (["a list"], None, "must be a JSON object"),
@@ -93,6 +104,7 @@ def test_models_endpoint_reports_context_and_hides_mismatched_certification():
     ({"state": "s", "questions": {"q": dict(Q, type="multi", max="one")}}, None, "max must convert to an integer"),
     ({"state": "s", "questions": {"q": dict(Q, type="multi", threshold="high")}}, None, "could not convert"),
     ({"state": "s", "questions": {"q": {"type": "tool", "tools": [{"type": "web"}]}}}, None, "function tools only"),
+    ({"state": "s", "questions": {"q": dict(Q, type="chioce")}}, None, "unknown type 'chioce'"),
     ({"state": "s", "questions": {"q": Q}, "lang": "de"}, None, "lang must be"),
 ])
 def test_invalid_requests_answer_422(body, content, message):

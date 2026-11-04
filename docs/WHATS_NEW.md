@@ -1,3 +1,78 @@
+# What is new in basal 2.5.3
+
+Released 4 November 2026. Bug fixes, contributed by Dariusz Koryto and Rafal Wiktorowicz (NovaraX), and the fix of
+an issue Dariusz reported. Answers to valid requests are byte-identical to 2.5.2 (checked on an H100 with
+basal-omni-1.0-mini in `--mode fast`), and the prepared start-up directories shipped for 2.5.0 still load (the
+compiled code is the same). Only the preset wording (#97) and `basal-bench`'s timing of llama.cpp and Ollama (#90)
+change what a run gives.
+
+- **Windows: `basal-attach` without symlink rights, portable tree ids and served names** (`basal-attach`,
+  `basal-navigate build`, `basal-serve`): where symlinks are not allowed (Windows without developer mode),
+  `basal-attach` copies directories and hard-links or copies files instead of failing; navigate-tree ids and groups
+  use `/` on every platform; the served name and the calibration's model name are read with `pathlib`, so a Windows
+  path gives the model's name, and `--model .` is served under the directory's name (it was `.`). The tests are
+  portable to Windows. Contributed by Rafal Wiktorowicz (NovaraX), [#85](https://github.com/rkinas/basal/pull/85).
+- **`basal-bench` times llama-server and Ollama on prompts they have to compute** (`basal-bench --modes llamacpp
+  ollama`): the warm-up and the single-order call ran on the same prompt just before the timed call, so the prompt
+  cache of an HTTP engine answered it almost for free, `lat1_ms` and `lat2_ms` were too low and `dec_s` too high.
+  Each question of a timed call now carries a random prefix (both option orders share it, so the second order still
+  reuses the first); vLLM and SGLang are unchanged, as `cold()` already clears them. Latencies of llama.cpp and Ollama
+  runs rise and their throughput falls, so they are no longer comparable with earlier ones. `lat2_p95_ms` is the
+  nearest-rank 95th percentile: with a multiple of 20 samples (100 with the default `--lat-n` and 105 or more
+  questions) it was one rank higher. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#90](https://github.com/rkinas/basal/pull/90).
+- **`basal-run --preset` works again** (`basal-run`): in 2.5.0-2.5.2 every line failed with `KeyError: 'q'`, because
+  the summary read a preset line (a state only) as a simple line. Contributed by Dariusz Koryto (@dkoryto),
+  [#91](https://github.com/rkinas/basal/pull/91).
+- **Batch flags measured on the DGX Spark (GB10)** ([HARDWARE.md](HARDWARE.md#dgx-spark-gb10-batch-flags-with-basal-20)):
+  bf16 basal-2.0 with PyTorch 2.11 and 2.13; the defaults are the best choice there, and `--batches compact` and the
+  format-1 cascade need PyTorch 2.13 on the GB10. Contributed by Dariusz Koryto (@dkoryto),
+  [#94](https://github.com/rkinas/basal/pull/94).
+- **Presets pick the Polish wording for short Polish text without diacritics** (`basal-run --preset`,
+  `Basal.preset`, `guard`, `route`, the framework adapters): the language of the state is now read from more signs of
+  Polish (diacritics, common words, also typed without diacritics) against common English words, so "nie dziala
+  logowanie" gets the Polish questions; `Basal(lang=...)` words a preset in the client's language when the call gives
+  none. Answers to requests without a preset are unchanged. Reported by Dariusz Koryto (@dkoryto),
+  [#92](https://github.com/rkinas/basal/issues/92); [#97](https://github.com/rkinas/basal/pull/97).
+- **Tests and CI**: the tests no longer depend on the order they run in (the SDPA backend switches are restored after
+  every test, [#87](https://github.com/rkinas/basal/pull/87)), on the GPU class and torch version
+  ([#86](https://github.com/rkinas/basal/pull/86)), on the runner's speed
+  ([#88](https://github.com/rkinas/basal/pull/88)) or on flash-linear-attention being installed
+  ([#98](https://github.com/rkinas/basal/pull/98)); the CI runs the suite on two workers, macOS in about 5 minutes
+  instead of 13 ([#89](https://github.com/rkinas/basal/pull/89)). Contributed by Dariusz Koryto (@dkoryto) (#86-#89).
+
+# What is new in basal 2.5.2
+
+Released 3 November 2026. Bug fixes, all contributed by Rafal Wiktorowicz (NovaraX). Answers to valid requests are
+byte-identical to 2.5.1 (checked on an H100 with basal-omni-1.0-mini in `--mode fast`), and the prepared start-up
+directories shipped for 2.5.0 still load (the compiled code is the same). **One change on the default path:** a
+question with an unknown `type` was answered as `choice` and is now refused with HTTP 422 (#84).
+
+- **The start-up 503 answers every HTTP method** (`basal-serve`): while the model loads, every method (PUT, DELETE,
+  OPTIONS, PATCH, TRACE, CONNECT, any other) gets the same `503 {"status": "starting"}` with `Retry-After: 5` as GET
+  and POST, not the 501 HTML page; HEAD gets the status and the headers without a body.
+  Contributed by Rafal Wiktorowicz (NovaraX), [#80](https://github.com/rkinas/basal/pull/80).
+- **The config probes of the default mode say why they fell back** (`basal-serve`): when a model's config.json exists
+  but cannot be read (permissions, a full disk) or parsed (damaged JSON), `_gemma4`, `_recurrent` and `_gdn` print a
+  `basal: warning:` line with the model and the exception instead of silently returning their default; a model
+  directory without a config.json stays silent. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#81](https://github.com/rkinas/basal/pull/81).
+- **`basal-serve` starts on native Windows, and `--quant int8` works** (`basal-serve`): the 503 start-up server called
+  `os.register_at_fork`, which Windows does not have, so the server died with `AttributeError` before loading the
+  model; the call is now guarded. `--quant int8` was offered by the parser and `--help` for the CUDA graph modes but
+  rejected by `validate_quant`; it is accepted now, as `--mode int8` already was. Contributed by Rafal Wiktorowicz
+  (NovaraX), [#82](https://github.com/rkinas/basal/pull/82).
+- **Calibration files keep their provenance and the flags are honoured** (`basal-serve`, `basal-calibrate`): the
+  `CALIBRATION.oN.json` file picked for the served option orders is checked for the layout like the base file;
+  `GET /v1/models` reports `temperature_per_bucket` and `basal-calibrate --url` refuses a server that applies bucket
+  temperatures; `--from-rows --no-calibration` ignores the baseline; `--save-rows` keeps layout, adapter and revision
+  and `--from-rows` writes them to `fitted_on`. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#83](https://github.com/rkinas/basal/pull/83).
+- **An unknown question `type` answers 422** (`basal-serve`): a question whose `type` is not choice, noul, score, act,
+  multi or tool (a typo, for example) was read as `choice` and answered with 200; it is now refused with
+  `INVALID_REQUEST`, as `basal-calibrate` already does for labelled data. Requests that relied on the fallback must
+  send a valid type. Contributed by Rafal Wiktorowicz (NovaraX), [#84](https://github.com/rkinas/basal/pull/84).
+
 # What is new in basal 2.5.1
 
 Released 2 November 2026. A bug fix; defaults and answers are unchanged.
