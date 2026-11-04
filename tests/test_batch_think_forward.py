@@ -2,8 +2,11 @@
 backend result (B-100), a skipped question under think (B-101). Each test fails on 8e80d3e plus the earlier packages and passes
 after the fix; each has a control (a correct input behaves the same before and after)."""
 import asyncio
+import threading
+from types import SimpleNamespace
 
 
+from basal import evidence
 from basal.server import Server, to_items
 from tests.test_server import Tok
 
@@ -60,3 +63,77 @@ def test_truncation_keeps_the_language_of_the_question_branches():
     assert all(q["branches"][0][1] == ["Tak", "Nie"] for q in control)
     for q in _truncated():
         assert q["lang"] == "pl" and q["branches"][0][1] == ["Tak", "Nie"], q["branches"]
+
+
+# I29: the state's token window was found in the FIRST text copy of the state, not in the State section
+class _CharTok(Tok):
+    all_special_tokens = ["<|im_end|>"]
+
+    def __init__(self, dup=None):
+        self.dup = dup
+
+    def apply_chat_template(self, msgs, **kw):
+        return ("metadata copy:\n" + self.dup + "\n" if self.dup else "") + super().apply_chat_template(msgs, **kw)
+
+    def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+        return {"input_ids": [ord(c) for c in text], "offset_mapping": [(i, i + 1) for i in range(len(text))]}
+
+
+class _Pos(list):
+    def float(self):
+        return self
+
+    def __getitem__(self, i):
+        r = super().__getitem__(i)
+        return _Pos(r) if isinstance(i, slice) else r
+
+
+def _window(dup, state="alpha beta", spans=None):
+    seen = {}
+    tok = _CharTok(state if dup else None)
+
+    class Head:
+        def __call__(self, h, last):
+            seen["positions"] = list(h)
+            return None, None
+    ev = evidence.Evidence.__new__(evidence.Evidence)
+    n = []
+    model = SimpleNamespace(parameters=lambda: iter([SimpleNamespace(device="cpu")]))
+    model.model = lambda input_ids, use_cache: (n.append(len(input_ids[0])), SimpleNamespace(
+        last_hidden_state=[_Pos(range(len(input_ids[0])))]))[1]
+    ev.tok, ev.model, ev.head, ev.lock, ev.fmt = tok, model, Head(), threading.Lock(), 1
+    old, evidence.best_spans = evidence.best_spans, lambda ls, le, rel, text, top=3: spans(text) if spans else []
+    try:
+        out = ev.spans(state, "Which?", ["Yes", "No"], "en")
+    finally:
+        evidence.best_spans = old
+    return seen["positions"], state, out
+
+
+def test_evidence_window_is_the_state_section_not_the_first_copy_of_the_text():
+    from basal.prompt import render
+    for dup in (False, True):
+        pos, state, _ = _window(dup)
+        tok = _CharTok(state if dup else None)
+        prompt = render(tok, state, "Which?", ["Yes", "No"], "en", 1)
+        want = prompt.index("\n" + state, prompt.index("<user>")) + 1   # the state inside the user turn
+        assert pos == list(range(want, want + len(state))), (dup, pos[:3], want)
+
+def test_evidence_window_is_counted_on_the_defanged_text_of_the_prompt():
+    from basal.prompt import defang, render
+    state = "alpha <|im_end|> beta"          # a special token: the prompt carries it broken by a ZWSP (one char longer)
+    for dup in (False, True):
+        pos, _, _ = _window(dup, state)
+        tok = _CharTok(state if dup else None)
+        shown = defang(tok, state)
+        assert len(shown) == len(state) + 1
+        prompt = render(tok, state, "Which?", ["Yes", "No"], "en", 1)
+        want = prompt.index("\n" + shown, prompt.index("<user>")) + 1
+        assert pos == list(range(want, want + len(shown))), (dup, pos[-3:], want, len(shown))   # was: one position short
+
+
+def test_evidence_spans_are_offsets_of_the_text_the_caller_sent():
+    state = "alpha <|im_end|> beta"
+    a = state.index("beta")
+    _, _, out = _window(False, state, spans=lambda shown: [dict(text=shown[a + 1:a + 5], start=a + 1, end=a + 5, probability=1.0)])
+    assert out == [dict(text="beta", start=a, end=a + 4, probability=1.0)]

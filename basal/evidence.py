@@ -16,7 +16,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from .prompt import render
+from .prompt import defang, lang_of, render
 
 MAX_SPAN = 80
 
@@ -56,6 +56,17 @@ def best_spans(ls, le, rel, state, top=3):
     return out
 
 
+def _unshown(state, shown):
+    """back[i]: the index in `state` of position i of `shown` (`state` with characters inserted by defang), i up to len(shown)."""
+    back, j = [], 0
+    for c in shown:
+        back.append(j)
+        if j < len(state) and state[j] == c:
+            j += 1
+    back.append(len(state))
+    return back
+
+
 class Evidence:
     """Loads `evidence_head.pt` from the model directory (absent: evidence requests are refused)."""
 
@@ -73,21 +84,29 @@ class Evidence:
     def spans(self, state, question, options, lang, limit=None, top=3):
         """Top non-overlapping spans of `state` (character offsets); spans starting at or after `limit` (e.g. in the
         appended facts block) are dropped."""
+        lang = lang or lang_of(state + question)
         prompt = render(self.tok, state, question, options, lang, self.fmt)
-        s0 = prompt.index("\n" + state) + 1
-        s1 = s0 + len(state)
+        mark = "\ue000STATE\ue001"  # where the template puts the state, not the first text equal to it
+        s0 = render(self.tok, mark, question, options, lang, self.fmt).index(mark)
+        shown = defang(self.tok, state)  # the text the prompt carries (special tokens broken by a ZWSP)
+        s1 = s0 + len(shown)
         enc = self.tok(prompt, add_special_tokens=False, return_offsets_mapping=True)
         idx = [i for i, (a, b) in enumerate(enc["offset_mapping"]) if a >= s0 and b <= s1 and b > a]
         if not idx:
             return []
         t0, t1 = idx[0], idx[-1] + 1
-        rel = [(max(a - s0, 0), max(b - s0, 0)) for a, b in enc["offset_mapping"][t0:t1]]
+        rel = [(max(a - s0, 0), max(b - s0, 0)) for a, b in enc["offset_mapping"][t0:t1]]  # offsets in `shown`
         dev = next(self.model.parameters()).device
         with self.lock:
             h = self.model.model(input_ids=torch.tensor([enc["input_ids"]], device=dev),
                                  use_cache=False).last_hidden_state[0].float()
             ls, le = self.head(h[t0:t1], h[-1])
-            out = best_spans(ls, le, rel, state, top=top + 2)
+            out = best_spans(ls, le, rel, shown, top=top + 2)
+        if shown != state:  # back to the offsets of the text the caller sent
+            back = _unshown(state, shown)
+            for x in out:
+                x["start"], x["end"] = back[x["start"]], back[x["end"]]
+                x["text"] = state[x["start"]:x["end"]]
         if limit is not None:
             out = [x for x in out if x["start"] < limit]
             for x in out:
