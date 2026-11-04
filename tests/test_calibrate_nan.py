@@ -1,4 +1,6 @@
 """Regression tests for fix/calibrate-nan (Z-1082)."""
+import time
+
 import numpy as np
 import pytest
 
@@ -29,3 +31,18 @@ def test_i10_rows_that_are_all_non_finite_are_refused():
 
 def test_i10_clean_calibrated_rows_still_fit_near_one():
     assert 0.8 <= cal.fit_temperature(rows(400)) <= 1.25
+
+
+@pytest.mark.parametrize("targets", ["1e-9", "1e-17", "0"])
+def test_h1_targets_below_one_in_a_million_are_refused_at_the_parser(targets):
+    with pytest.raises(SystemExit, match="targets"):
+        cal.main(["/nonexistent.jsonl", "--targets", targets])
+
+
+def test_h1_the_smallest_accepted_target_costs_little_and_normal_ones_pass_the_parser():
+    t = time.time()
+    assert cal.accepted_needed(1e-4, 1) > 0 and time.time() - t < 60
+    assert cal.accepted_needed(0.05) == 59
+    with pytest.raises(BaseException) as e:
+        cal.main(["/nonexistent.jsonl", "--targets", "0.05"])
+    assert "targets" not in str(e.value)

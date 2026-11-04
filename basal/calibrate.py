@@ -1412,8 +1412,8 @@ def main(argv=None):
         targets = sorted({float(x) for x in a.targets.split(",") if x.strip()})
     except ValueError:
         raise SystemExit(f"--targets {a.targets!r}: give numbers such as 0.01,0.05") from None
-    if not targets or not all(0 < r < 1 for r in targets):
-        raise SystemExit("--targets must lie between 0 and 1")
+    if not targets or not all(1e-6 <= r < 1 for r in targets):
+        raise SystemExit("--targets must lie between 1e-06 and 1 (a smaller max_error needs millions of decisions)")
     try:
         a.conformal = sorted({float(x) for x in (a.conformal or "").split(",") if x.strip()})
     except ValueError:
