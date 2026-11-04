@@ -101,3 +101,53 @@ def test_cluster_topics():
     assert any(t["parent"] for t in deep) and sum(len(t["members"]) for t in deep) == 24
     vec = navtree.cluster(texts, 2, embed=lambda xs: [[1.0, 0.0] if "tax" in x else [0.0, 1.0] for x in xs])
     assert sorted(len(t["members"]) for t in vec) == [12, 12]
+
+
+def test_polish_topics_by_k_means():
+    """--clusters with --lang pl: the Polish stop words went to scikit-learn as a tuple, which it refuses."""
+    pytest.importorskip("sklearn")
+    texts = [f"paszport wiza i podróż na granicy {i}" for i in range(6)] + [f"podatek dochodowy i zwrot podatku {i}"
+                                                                          for i in range(6)]
+    topics = navtree.cluster(texts, 2, lang="pl")
+    assert sorted(len(t["members"]) for t in topics) == [6, 6]
+    assert all(t["text"].startswith("Strony takie jak: ") for t in topics)
+    terms = [w for t in topics for w in t["text"].split("Kluczowe słowa: ")[1].rstrip(".").split(", ")]
+    assert terms and not set(terms) & set(navtree.STOP_PL)
+    assert {"gdy", "go"} <= set(navtree.STOP_PL)
+
+
+def test_build_polish_clusters_from_the_command_line(tmp_path):
+    pytest.importorskip("sklearn")
+    for i in range(4):
+        (tmp_path / f"wiza{i}.md").write_text(f"# Wiza {i}\n\nWiza i paszport na granicy, opłata {i}.", encoding="utf-8")
+        (tmp_path / f"podatek{i}.md").write_text(f"# Podatek {i}\n\nZwrot podatku dochodowego, termin {i}.",
+                                                encoding="utf-8")
+    out = tmp_path / "tree.jsonl"
+    navigate.main(["build", str(tmp_path), "-o", str(out), "--clusters", "2", "--lang", "pl"])
+    assert sum(x["kind"] == "topic" for x in Tree.load(out).nodes.values()) == 2
+
+
+def test_the_same_page_id_from_two_inputs(tmp_path):
+    """docs1/index.md and docs2/index.md were both the page "index" (the tree then refused the duplicate id): the
+    page ids get their input in front, only when two inputs collide."""
+    for d, text in (("docs1", "One."), ("docs2", "Two.")):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "index.md").write_text(f"# Index {d}\n\n{text}", encoding="utf-8")
+        (tmp_path / d / f"only_{d}.md").write_text(f"# Only {d}\n\nText.", encoding="utf-8")
+    one, two = (tmp_path / "docs1").as_posix(), (tmp_path / "docs2").as_posix()
+    t = Tree(navtree.build([one, two]))
+    assert {i for i, x in t.nodes.items() if x["kind"] == "page"} == {
+        f"{one}/index", f"{one}/only_docs1", f"{two}/index", f"{two}/only_docs2"}
+    assert t.leaves(f"{two}/index") == [f"{two}/index#1"]
+    alone = Tree(navtree.build([one]))  # one input (or no collision): the ids as before
+    assert {i for i, x in alone.nodes.items() if x["kind"] == "page"} == {"index", "only_docs1"}
+    with pytest.raises(ValueError, match="one input given twice"):
+        navtree.build([one, one])
+
+
+def test_the_tree_being_written_is_not_read_as_a_document(tmp_path):
+    (tmp_path / "a.md").write_text("# A\n\nText of a.", encoding="utf-8")
+    out = tmp_path / "tree.jsonl"
+    for _ in range(2):  # the second build sees the first one's tree.jsonl in its input folder
+        navigate.main(["build", str(tmp_path), "-o", str(out)])
+        assert {i for i, x in Tree.load(out).nodes.items() if x["kind"] == "page"} == {"a"}

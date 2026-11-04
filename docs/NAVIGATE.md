@@ -125,7 +125,9 @@ directly.
 
 - pages are files (or JSONL lines `{"id"?, "title"?, "text" | "markdown" | "html", "group"?}`); a page reads as its
   title and top headings; passages are paragraphs, list items and table rows (HTML: `p`, `li`, `tr`, `dt`, `dd`,
-  `pre`, `blockquote`) with their heading path; longer than `--max-chars` (2,000) they are split at sentence ends;
+  `pre`, `blockquote`) with their heading path; longer than `--max-chars` (2,000) they are split at sentence ends; a
+  page's id is its path in its input without the suffix (`guide/install`), with the input's folder in front when two
+  inputs give the same id (`docs1/index`, `docs2/index`); the `-o` file is never read as a document;
 - `--split-long N` adds a section per top heading under pages with more than N passages;
 - `--group-dirs` makes folders (or JSONL `group`) topics above their pages;
 - `--clusters K [--max-children M]` groups the pages into K topics by k-means over TF-IDF vectors of their title and

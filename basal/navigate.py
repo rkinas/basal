@@ -419,7 +419,8 @@ def main(argv=None):
     if a.cmd == "build":
         from .navtree import build
         nodes = build(a.inputs, split_long=a.split_long, group_dirs=a.group_dirs, clusters=a.clusters,
-                      max_children=a.max_children, max_chars=a.max_chars, min_chars=a.min_chars, lang=a.lang)
+                      max_children=a.max_children, max_chars=a.max_chars, min_chars=a.min_chars, lang=a.lang,
+                      skip=[a.out])
         tree = Tree(nodes)
         tree.save(a.out)
         kinds = {}
