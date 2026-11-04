@@ -97,14 +97,14 @@ Speed-up against the 4.5B model measured with the released engine on the same ma
 RTX 5090: 28.0 ms; the earlier runs above: 18.9 and 27.3 ms). Agreement with fp32 (RTX 4090: bf16 is the reference).
 
 HTTP on H100 (`basal-serve --mode fast`): 7.7 ms p50, 147 decisions/s with 32 clients. NVFP4 on the DGX Spark: 16.5 ms
-but agreement 0.87 — not recommended. RTX 4090: the FP8 start of that test did not stall but takes long (basal 2.5.2:
+but agreement 0.87 — not recommended. RTX 4090: the FP8 start of that test did not stall but takes long (basal 2.5.3:
 about 18 minutes for basal-2.0-mini, [below](#rtx-4090-basal-20-in-bf16-its-fp8-checkpoints-and-fp8-mode)); bf16 works.
 
 ## RTX 4090: basal-2.0 in bf16, its FP8 checkpoints and fp8 mode
 
-basal 2.5.2 (8e80d3e), torch 2.13.0+cu130, one RTX 4090 24 GB, `basal-bench --modes <mode>` (latency for two option
+basal 2.5.3 (8e80d3e), torch 2.13.0+cu130, one RTX 4090 24 GB, `basal-bench --modes <mode>` (latency for two option
 orders and for one, decisions/s over 500 decisions, accuracy on the 44 bundled decisions); same top answer as bf16:
-`gpu_mem_probe.py`'s synthetic identity readouts (200 single, 200 multi, 20 long; not the checkpoints' dev v2 gate,
+synthetic identity readouts (200 single, 200 multi, 20 long; not the checkpoints' dev v2 gate,
 which their model cards give). Measured for [#111](https://github.com/rkinas/basal/pull/111).
 
 | model | mode | 2 orders | 1 order | dec/s | accuracy (44) | GB | same top as bf16 (single / multi / long) |
