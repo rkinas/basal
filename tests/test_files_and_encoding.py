@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import pathlib
 from pathlib import Path
 
 import httpx
@@ -10,6 +11,7 @@ import pytest
 from basal import agree
 from basal import bench
 from basal import calibrate as cal
+from basal import interpolate
 from basal import loadtest
 from basal import navtree
 
@@ -89,3 +91,21 @@ def test_e4_an_absolute_one_is_used(monkeypatch, tmp_path):
 def test_e4_none_gives_the_home_cache(monkeypatch):
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     assert agree.cache_home() == Path.home() / ".cache"
+
+
+@pytest.fixture
+def ansi(monkeypatch):
+    """The Windows default (cp1252) for a read_text / write_text without an encoding."""
+    read, write = pathlib.Path.read_text, pathlib.Path.write_text
+    monkeypatch.setattr(pathlib.Path, "read_text", lambda self, encoding=None, errors=None: read(self, encoding or "cp1252", errors))
+    monkeypatch.setattr(pathlib.Path, "write_text",
+                        lambda self, data, encoding=None, errors=None, newline=None: write(self, data, encoding or "cp1252", errors, newline))
+
+
+def test_e6_the_tokenizer_and_config_of_a_utf8_model_are_read_under_ansi(tmp_path, ansi):
+    tok = {"model": {"type": "BPE", "vocab": {"\u0101": 0, "b": 1}, "merges": []}, "added_tokens": []}  # U+0101 is C4 81 in UTF-8
+    (tmp_path / "tokenizer.json").write_bytes(json.dumps(tok, ensure_ascii=False).encode("utf-8"))
+    (tmp_path / "config.json").write_bytes(json.dumps({"architectures": ["\u0101"], "hidden_size": 8}, ensure_ascii=False).encode("utf-8"))
+    assert interpolate.tokenizer_key(tmp_path / "tokenizer.json")[1] == {"\u0101": 0, "b": 1}
+    assert interpolate.tokenizer_settings(tmp_path / "tokenizer.json")["model"]["vocab"]["\u0101"] == 0
+    assert interpolate.config_key(tmp_path / "config.json")["architectures"] == ["\u0101"]
