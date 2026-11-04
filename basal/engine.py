@@ -3029,6 +3029,12 @@ class ExitGraphBackend(GraphBackend):
         th = json.loads((hd / "thresholds.json").read_text(encoding="utf-8"))
         self.policies = {k: {int(L): t for L, t in v["taus"].items() if t <= 1.0} for k, v in th["levels"].items()}
         self.policies["off"] = {}
+        if default_policy not in self.policies:  # (else every request without its own policy failed)
+            raise ValueError(f"--early-exit {default_policy}: not a level of {hd / 'thresholds.json'} (one of "
+                             f"{', '.join(sorted(self.policies))})")
+        missing = sorted({L for pol in self.policies.values() for L in pol} - {int(L) for L in ck["layers"]})
+        if missing:
+            raise ValueError(f"{hd}: thresholds for layers without an exit head in heads.pt: {missing}")
         self.default_policy = default_policy
         self.exits = sorted({L for pol in self.policies.values() for L in pol})
         H = self.model.config.hidden_size
@@ -3043,6 +3049,9 @@ class ExitGraphBackend(GraphBackend):
             dynamo.config.cache_size_limit = 64
             self.segs = [torch.compile(f, dynamic=True) for f in self.segs]
         self.stats = {}
+        self._kv = None  # its segments read whole masked rows: the key / value buffer of pass 1 is never used
+        if self.dev.type == "cuda":
+            torch.cuda.empty_cache()
         for L in self.LENS:
             for b in self.BATCHES:
                 if b * L <= self.TOKEN_BUDGET or b == 1:
