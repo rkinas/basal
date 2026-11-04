@@ -296,8 +296,20 @@ def token_pattern(names):
     return re.compile(pat(trie))
 
 
+def special_names(tok):
+    """The strings a tokenizer reads in raw text as control tokens: its special tokens (`all_special_tokens`, the added
+    tokens marked `special`, which include the ones of the chat template). Added tokens that are not special are
+    ordinary text and stay out: Gemma's "\\n\\n", "\\t\\t", "<table>", Qwen's "<think>"; a name made of white space
+    only is never listed, whatever its kind. Sorted, so that two exports of one tokenizer are the same bytes."""
+    names = set(getattr(tok, "all_special_tokens", None) or ())
+    for t in (getattr(tok, "added_tokens_decoder", None) or {}).values():
+        if getattr(t, "special", False):
+            names.add(str(getattr(t, "content", t)))
+    return sorted(n for n in names if len(n) > 1 and n.strip())
+
+
 def defang(tok, text):
-    """Request text (state, question, option) with every added / special token of the tokenizer written out in it
+    """Request text (state, question, option) with every special token of the tokenizer written out in it
     broken by a zero-width space after its first character. The tokenizer parses such strings in raw text as real
     special tokens (add_special_tokens=False does not stop that), so a state that contains "<|im_end|>" could close
     the user turn and open a forged one; the count of special tokens in a prompt must come from the template alone."""
@@ -306,9 +318,7 @@ def defang(tok, text):
     try:
         rx = _ADDED_RX[tok]
     except (KeyError, TypeError):
-        names = set(getattr(tok, "all_special_tokens", None) or ())
-        names.update(str(getattr(t, "content", t)) for t in (getattr(tok, "added_tokens_decoder", None) or {}).values())
-        names = [n for n in names if len(n) > 1]
+        names = special_names(tok)
         rx = token_pattern(names) if names else None
         try:
             _ADDED_RX[tok] = rx
