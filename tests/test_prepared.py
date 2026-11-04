@@ -103,6 +103,34 @@ def test_prepare_needs_a_gpu(monkeypatch):
         prepared.main(["--model", "x"])
 
 
+def test_prepare_builds_the_engine_basal_serve_runs(tmp_path, monkeypatch):
+    """basal-prepare starts the engine through basal-serve's Server with basal-serve's parse of the same flags (its
+    defaults too: 2.5.2 built GraphBackend with the constructor's, padded rows without the template prefix, which
+    basal-serve does not run on Hopper), loads no prepared directory itself, and writes where basal-serve's lookup for
+    those flags finds it."""
+    import basal.server as S
+    m = model(tmp_path / "m")
+    seen = []
+
+    class Built:
+        def __init__(self, a):
+            seen.append(a)
+            self.md = str(m)
+    monkeypatch.setattr(S, "Server", Built)
+    monkeypatch.setattr(S, "default_mode", lambda model, revision=None: "fast")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(prepared, "environment", lambda: dict(ENV))
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: None)
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    for flags in ([], ["--batches", "compact", "--compile-scope", "layer", "--attn", "fa2", "--mode", "fast"]):
+        prepared.main(["--model", str(m)] + flags)
+        want = S.parser().parse_args(["--model", str(m)] + flags + ["--prepared", "off"])
+        want.mode = "fast"
+        assert vars(seen[-1]) == vars(want)
+        attn = "fa2" if flags else "auto"
+        assert prepared.locate(m, prepared.key_fields(m, "fast", "bfloat16", attn)) is not None  # Server's lookup
+
+
 def gdn_model(d):
     return model(d, layer_types=["linear_attention", "full_attention"])
 

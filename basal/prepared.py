@@ -197,33 +197,39 @@ def save(d, fields, fla=False):
 
 
 def main(argv=None):
-    """basal-prepare: start the engine once (its warm-up compiles and captures every graph shape) and save what a later
-    start of the same model architecture, mode and environment can load (basal-serve --prepared auto)."""
-    ap = argparse.ArgumentParser(description="prepare the start-up of the CUDA graph engine for this GPU")
-    ap.add_argument("--model", required=True)
-    ap.add_argument("--revision", default=None)
-    ap.add_argument("--mode", default="fast", choices=["fast", "fp8", "nvfp4"])
-    ap.add_argument("--dtype", default="bfloat16")
-    ap.add_argument("--attn", default="auto")
+    """basal-prepare: start the engine once as basal-serve starts it with the same flags (its warm-up compiles and
+    captures every graph shape) and save what a later start of the same model architecture, mode and environment can
+    load (basal-serve --prepared auto). Every option but --out / --into-model is basal-serve's, and the engine is built
+    by basal-serve's Server: the compiled code depends on the engine flags (--batches, --template-prefix,
+    --compile-scope, --merge, ...), so the prepared kernels are those of the configuration the server runs, its
+    defaults included (on Hopper: compact rows with the template prefix)."""
+    ap = argparse.ArgumentParser(description="prepare the start-up of the CUDA graph engine for this GPU",
+                                 epilog="Every other option is basal-serve's (basal-serve --help): give the model and "
+                                        "the engine flags the server will run with.")
     ap.add_argument("--out", default=None, help="directory to write (default: the user cache, ~/.cache/basal/prepared/"
                                                  "<key>, where basal-serve --prepared auto looks)")
     ap.add_argument("--into-model", dest="into_model", action="store_true",
                     help="write into the local model directory, as prepared/<key> (to ship with the model: basal-serve "
                          "--prepared auto finds it there, also in the model's Hugging Face repository)")
-    a = ap.parse_args(argv)
-    if a.into_model and (a.out or not Path(a.model).is_dir()):
+    a, rest = ap.parse_known_args(argv)
+    from .server import MODES, Server, default_mode, parser, refuse_lean_flex
+    s = parser().parse_args(rest + ["--prepared", "off"])  # (this start compiles what a later one loads)
+    if a.into_model and (a.out or not Path(s.model).is_dir()):
         raise SystemExit("--into-model: give --model as a local model directory, without --out")
     if not torch.cuda.is_available():
         raise SystemExit("basal-prepare needs a CUDA GPU (the prepared kernels are for the GPU it runs on)")
-    from .engine import GraphBackend, resolve
+    refuse_lean_flex(s.lean, s.tree)  # as basal-serve's main, before default_mode
+    s.mode = s.mode or default_mode(s.model, s.revision)
+    kind, _, comp = MODES[s.mode]
+    if kind not in ("graph", "exit") or not comp:
+        raise SystemExit(f"basal-prepare: --mode {s.mode} compiles nothing to prepare (the CUDA graph engine's "
+                         "compiled modes: fast, fp8, nvfp4, ...)")
     from .gdn_graph import is_gdn
-    md = resolve(a.model, a.revision)
-    fields = key_fields(md, a.mode, a.dtype, a.attn)
     t0 = time.time()
-    quant = {"fast": None, "fp8": "fp8", "nvfp4": "nvfp4"}[a.mode]
-    GraphBackend(md, a.dtype, quant, compile=True, attn=a.attn)  # compiles, autotunes and captures every shape
-    out = Path(a.out) if a.out else (Path(md) / "prepared" if a.into_model else cache_root()) / key(fields)
-    man = save(out, fields, fla=is_gdn(md))
+    srv = Server(s)  # checks the flags as basal-serve does, then compiles, autotunes and captures every shape
+    fields = key_fields(srv.md, s.mode, s.dtype, s.attn)  # the key basal-serve computes for these flags
+    out = Path(a.out) if a.out else (Path(srv.md) / "prepared" if a.into_model else cache_root()) / key(fields)
+    man = save(out, fields, fla=is_gdn(srv.md))
     print(json.dumps(dict(out=str(out), start_s=round(time.time() - t0, 1), **man), indent=1))
 
 
