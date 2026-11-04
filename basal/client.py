@@ -15,8 +15,8 @@ request fields ("facts", "lang", "think", "media", ...) are client defaults or k
 
 Errors follow the server's status codes, all a BasalError (a RuntimeError) with .status: InvalidRequest (422, change the
 request), OutOfMemory (503, the GPU ran out of memory; retried `retries` times, waiting backoff, 2 x backoff, ...),
-NotReady (an OutOfMemory: a 503 of a server still starting, or of a router with no replica ready; retried the same
-way), AuthError (a ServerError: 401 / 403, a missing, wrong or not permitted API key) and ServerError (500 and any
+NotReady (an OutOfMemory: a 503 of a server still starting or with --max-requests in flight, or of a router with no
+replica ready; retried the same way), AuthError (a ServerError: 401 / 403, a missing, wrong or not permitted API key) and ServerError (500 and any
 other status). The message is the server's error text (an OpenAI-style error: "<type>: <message>").
 
 It also talks to other servers of the same /v1/systemone request shape, such as vLLM's structured-diffusion example
@@ -63,8 +63,9 @@ class AuthError(ServerError):
 
 
 class NotReady(OutOfMemory):
-    """503 from a server still loading its model ({"status": "starting"}) or a router with no replica ready: the same
-    request succeeds later. An OutOfMemory, as it was before, and retried the same way."""
+    """503 from a server still loading its model ({"status": "starting"}) or with --max-requests in flight (code
+    OVERLOADED), or a router with no replica ready: the same request succeeds later. An OutOfMemory, as it was before,
+    and retried the same way."""
 
 
 def _error(r):
@@ -78,7 +79,7 @@ def _error(r):
         message = f"{err['type']}: {message}" if err.get("type") else message
     else:
         message = r.text if err is None else err
-    starting = isinstance(data, dict) and data.get("status") == "starting" or (
+    starting = isinstance(data, dict) and (data.get("status") == "starting" or data.get("code") == "OVERLOADED") or (
         isinstance(err, str) and "no basal replica is ready" in err)
     if r.status_code in (401, 403):
         cls = AuthError

@@ -83,20 +83,24 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   - **422**: the request is invalid and must be changed (a body that is not a JSON object, a missing `state` or
     `questions`, a wrong field value, too many options, a prompt longer than the context, a field not available in
     the server's mode or model, more branches than `--max-branches`, 4,096 by default, task questions counted as
-    the questions they expand to; objects and arrays nested more than 256 levels, a string with a lone surrogate
+    the questions they expand to, prompts holding more than `--max-prompt-mb` of text, 512 MiB by default, counted
+    before they are rendered; objects and arrays nested more than 256 levels, a string with a lone surrogate
     such as `"\udead"`, a NaN or an infinity among the questions' numbers). Every check that needs no engine work
     runs before any of it (the facts, media decoding, rendering, the queue); the context is checked once the prompts
     are tokenized, before the engine runs;
   - **413**: the body is larger than `--max-body-mb` (256 MiB by default; the largest media request, 8 items of 20 MB,
     is about 214 MB in base64), refused before it is read whole (`code` `PAYLOAD_TOO_LARGE`);
   - **503**: the GPU ran out of memory (CUDA, MPS or Metal). The server frees the failed request's memory, so a retry,
-    later or on another server, may succeed;
+    later or on another server, may succeed. Also, with `code` `OVERLOADED` and `Retry-After: 1`, a request beyond
+    `--max-requests` in flight (1,024 by default), refused before any work;
+  - **504**: no answer within `--request-timeout` seconds (off by default; `code` `TIMEOUT`): the request's work
+    still queued is dropped, an engine call already running finishes;
   - **500**: any other server error;
   - **499** (2.6): the client disconnected (a timeout, a closed connection) before its answer. The request is
     cancelled, so its work still waiting for the engine is dropped. Nobody reads this answer (the same body with
     every error format and on `/v1/decisions`); it shows in `--ui` and in the logs of a proxy in front of the server.
-  Every error body also has a `code`: `INVALID_REQUEST` (422), `OUT_OF_MEMORY` (503), `INTERNAL_ERROR` (500) or
-  `CLIENT_DISCONNECTED` (499).
+  Every error body also has a `code`: `INVALID_REQUEST` (422), `OUT_OF_MEMORY` or `OVERLOADED` (503), `TIMEOUT` (504),
+  `INTERNAL_ERROR` (500) or `CLIENT_DISCONNECTED` (499).
   A 422 adds `detail`, a one-item body-location validation error; `error` retains the message.
 
   `basal-serve --error-format openai` answers `{"error": {"message": "...", "type": "validation_error" |

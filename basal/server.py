@@ -227,6 +227,19 @@ def listed_options(name, crit):
 
 MAX_BODY_BYTES = 256 * 2**20  # --max-body-mb: a request body (8 media items of 20 MB are ~214 MB in base64)
 MAX_BRANCHES = 4096  # --max-branches: questions of a request, a multi question or a tool set one per label
+MAX_REQUESTS = 1024  # --max-requests: requests in flight at once (a request beyond them: 503 with Retry-After)
+MAX_PROMPT_MB = 512  # --max-prompt-mb: the text of a request's prompts (each holds the state), counted before rendering
+PREP_INLINE = 2**20  # a request whose prompts hold more text is rendered and tokenized off the event loop (prep_pool)
+
+
+class Overloaded(RuntimeError):
+    """More requests in flight than --max-requests: HTTP 503 with Retry-After, before any work (a retry may succeed)."""
+    code = "OVERLOADED"
+
+
+class TimedOut(RuntimeError):
+    """No answer within --request-timeout: HTTP 504; the request's work still queued is dropped."""
+    code = "TIMEOUT"
 
 
 def branch_count(q):
@@ -771,11 +784,14 @@ def out_of_memory(e):
 
 def http_status(e):
     """The status code of a failed request: 422 for an invalid request (RequestError: the client must change it),
-    503 when the GPU ran out of memory (a retry may succeed: the server frees the request's memory), 500 for any other
-    server error."""
+    503 when the GPU ran out of memory (a retry may succeed: the server frees the request's memory) or more requests
+    are in flight than --max-requests (Overloaded), 504 past --request-timeout (TimedOut), 500 for any other server
+    error."""
     if isinstance(e, RequestError):
         return 422
-    return 503 if out_of_memory(e) else 500
+    if isinstance(e, TimedOut):
+        return 504
+    return 503 if isinstance(e, Overloaded) or out_of_memory(e) else 500
 
 
 def _fail(futs, e):
@@ -1409,6 +1425,9 @@ class Server:
         self.max_options = max_options(self.fmt)
         self.rank_max = getattr(a, "rank_max_candidates", rank.MAX_CANDIDATES)  # rank candidates per request
         self.max_branches = getattr(a, "max_branches", MAX_BRANCHES)
+        self.max_requests = getattr(a, "max_requests", MAX_REQUESTS)
+        self.request_timeout = getattr(a, "request_timeout", None)
+        self.max_prompt = int(getattr(a, "max_prompt_mb", MAX_PROMPT_MB) * 2**20)
         self.max_body = int(getattr(a, "max_body_mb", MAX_BODY_BYTES / 2**20) * 2**20)
         self.orders = served_orders(a, self.fmt)
         # the prompt layout (prompt.LAYOUTS; 2.4.1): --layout, else the model's basal.json "layout", else canonical
@@ -1664,12 +1683,56 @@ class Server:
 
     async def serve(self, body):
         """One client request (POST /v1/systemone, /v1/basal, /v1/decisions or an MCP tool call): decide, which admits
-        it first. Counted as in flight from here to its answer or error (GET /health)."""
+        it first. Counted as in flight from here to its answer or error (GET /health); beyond --max-requests in flight
+        it is refused at once (Overloaded), and past --request-timeout it ends (TimedOut: its queued work is dropped,
+        an engine call already running finishes)."""
+        cap = getattr(self, "max_requests", MAX_REQUESTS)
+        if self.in_flight >= cap:
+            raise Overloaded(f"this server has {self.in_flight} requests in flight, the most it takes at once "
+                             f"(--max-requests {cap}); retry later")
         self.in_flight += 1
         try:
-            return await self.decide(body)
+            timeout = getattr(self, "request_timeout", None)
+            if timeout is None:
+                return await self.decide(body)
+            try:
+                return await asyncio.wait_for(self.decide(body), timeout)
+            except asyncio.TimeoutError:
+                raise TimedOut(f"no answer within this server's --request-timeout of {timeout:g} s") from None
         finally:
             self.in_flight -= 1
+
+    def prep_pool(self):
+        """The thread that renders and tokenizes the prompts of long requests (and reads them against the context), so
+        the event loop answers /health and admits other requests meanwhile; one thread: they are prepared in the order
+        they come."""
+        if getattr(self, "_prep_pool", None) is None:
+            self._prep_pool = ThreadPoolExecutor(1, thread_name_prefix="basal-prep")
+        return self._prep_pool
+
+    async def in_prep(self, big, fn, *args):
+        """fn(*args): a request's preparation; big (prompts over PREP_INLINE of text) in the preparation thread, so a
+        long request does not hold the event loop for the seconds it takes, a short one at once (as before)."""
+        if not big:
+            return fn(*args)
+        return await asyncio.get_running_loop().run_in_executor(self.prep_pool(), functools.partial(fn, *args))
+
+    def check_prompts(self, qs):
+        """--max-prompt-mb: the text of a request's prompts, counted before any is rendered (each prompt holds the
+        state, its question and its options, once per option order of the first pass) -> RequestError above it; else
+        the count."""
+        limit = getattr(self, "max_prompt", MAX_PROMPT_MB * 2**20)
+        n = prompts = 0
+        for q in qs:
+            for question, options in q["branches"]:
+                k = orders_for(self.orders, len(options))
+                prompts += k
+                n += k * (len(q["state"]) + len(question) + sum(map(len, options)))
+        if n > limit:
+            raise RequestError(f"the request's {prompts} prompts would hold {n / 2**20:.0f} MiB of text (each holds the "
+                               f"state), more than this server's --max-prompt-mb {limit / 2**20:g}: shorten the state "
+                               "or ask fewer questions / labels per request")
+        return n
 
     def admit(self, body):
         """Every check of a request that needs no engine work, in one place before any of it (the facts, media
@@ -1914,6 +1977,12 @@ class Server:
 
     async def worker(self):
         loop = asyncio.get_running_loop()
+        # the queue of this loop (a server decided in process under several asyncio.run: a queue bound to an earlier
+        # loop would fail its first wait here and leave every request waiting; its entries move to the new one)
+        if getattr(self.queue, "_loop", None) not in (None, loop):
+            old, self.queue = self.queue, asyncio.Queue()
+            while not old.empty():
+                self.queue.put_nowait(old.get_nowait())
         # engine calls in flight: 2 for the CUDA graph engine (one call's host work overlaps the other's forwards)
         slots = asyncio.Semaphore(len(self.lanes) if getattr(self, "lanes", None)
                                   else max(1, getattr(self.backend, "inflight", 1)))
@@ -2113,7 +2182,13 @@ class Server:
                                                      dict(m, max_soft_tokens=self.reread_image))
         return {j: (branches[j][2], o) for j, o in zip(redo, o2)}, n_tok, n_media
 
-    async def reread_pass(self, qs, branches, outs, longest, pol, lane):
+    def reread_branches(self, qs, branches, redo):
+        """--reread: the branches redo (indices) in the state_twice layout -> (branches, their prompt tokens)."""
+        again = [self.branch(branches[j][0], branches[j][1], qs[branches[j][0]], list(branches[j][2]), "state_twice")
+                 for j in redo]
+        return again, self.encode(again)[0]
+
+    async def reread_pass(self, qs, branches, outs, longest, pol, lane, big=False):
         """--reread T: the single-branch choice and yes / no questions of a request whose longest prompt has at most
         --reread-max-tokens tokens and whose calibrated top probability is below T, read again in the state_twice
         layout (in the option orders read so far) -> ({branch index: (perms, position probabilities)}, prompt tokens)."""
@@ -2122,9 +2197,7 @@ class Server:
         redo = self.to_reread(qs, branches, outs)
         if not redo:
             return {}, 0
-        again = [self.branch(branches[j][0], branches[j][1], qs[branches[j][0]], list(branches[j][2]), "state_twice")
-                 for j in redo]
-        n_tok = self.encode(again)[0]
+        again, n_tok = await self.in_prep(big, self.reread_branches, qs, branches, redo)
         o2 = await self.ask(again, pol, None, lane)  # (no state-cache cut: the state comes twice)
         return {j: (b2[2], o) for j, b2, o in zip(redo, again, o2)}, n_tok
 
@@ -2154,30 +2227,29 @@ class Server:
         gates = ask_gates(orig["questions"], qs)
         for q in qs:
             stored_fallback(self.cal, q)
-        # (question index, branch index, perms, prompts, code ids): every branch in the first pass's option orders
-        branches = [self.branch(i, bi, q) for i, q in enumerate(qs) for bi in range(len(q["branches"]))]
+        big = self.check_prompts(qs) > PREP_INLINE  # (counted before any prompt is rendered)
         truncation, cut, lane, n_media = None, None, "main", 0
         if m is not None:  # media: one forward per prompt (eager) or one vLLM call per request; no queue or truncation
+            branches = await self.in_prep(big, self.branches_of, qs)
             outs, n_tok, longest, n_media = await self.ask_media(qs, branches, m)
         else:
-            qs, branches, outs, n_tok, longest, truncation, cut, lane = await self.ask_text(body, qs, branches, pol)
+            qs, branches, outs, n_tok, longest, truncation, cut, lane = await self.ask_text(body, qs, None, pol, big)
         second = []
         if self.orders == "auto":  # the reversed option order, only for the branches that are uncertain in order 1
             redo = [j for j, (b, o) in enumerate(zip(branches, outs)) if self.uncertain(qs[b[0]], b[2], o)]
-            second = [self.branch(branches[j][0], branches[j][1], qs[branches[j][0]], [branches[j][2][0][::-1]])
-                      for j in redo]
-            if second:
+            if redo:
+                second, n2 = await self.in_prep(big, self.second_order, qs, branches, redo, m is None)
                 if m is not None:
                     o2, n2, _, nm2 = await self.ask_media(qs, second, m)
                     n_tok, n_media = n_tok + n2, n_media + nm2
                 else:
-                    n_tok += self.encode(second)[0]
+                    n_tok += n2
                     o2 = await self.ask(second, pol, cut, lane)
                 for j, b2, o in zip(redo, second, o2):
                     branches[j][2].extend(b2[2]); outs[j] = outs[j] + o
         reread = None
         if getattr(self, "reread", None) is not None and m is None:  # a second read of the uncertain short answers
-            reread, n2 = await self.reread_pass(qs, branches, outs, longest, pol, lane)
+            reread, n2 = await self.reread_pass(qs, branches, outs, longest, pol, lane, big)
             n_tok += n2
         elif getattr(self, "reread_image", None) is not None and m is not None:  # ... with the image at more tokens
             reread, n2, nm2 = await self.reread_image_pass(qs, branches, outs, m)
@@ -2246,10 +2318,32 @@ class Server:
             longest[j] = max(longest[j], n)
         return outs, sum(n for _, n, _ in res), longest, sum(nm for _, _, nm in res)
 
-    async def ask_text(self, body, qs, branches, pol):
-        """The text path (as before media): prompts tokenized, the context checked (or the state truncated, which
-        rebuilds the questions and branches), the queue -> (questions, branches, outs, prompt tokens, the longest
-        prompt of each branch, truncation, state cut, lane)."""
+    def branches_of(self, qs):
+        """(question index, branch index, perms, prompts, code ids): every branch in the first pass's option orders."""
+        return [self.branch(i, bi, q) for i, q in enumerate(qs) for bi in range(len(q["branches"]))]
+
+    def second_order(self, qs, branches, redo, text=True):
+        """--orders auto: the branches redo (indices) in the reversed option order -> (branches, their prompt tokens:
+        tokenized for the text path, 0 for media)."""
+        second = [self.branch(branches[j][0], branches[j][1], qs[branches[j][0]], [branches[j][2][0][::-1]])
+                  for j in redo]
+        return second, self.encode(second)[0] if text else 0
+
+    async def ask_text(self, body, qs, branches, pol, big=False):
+        """The text path (as before media): prompts rendered and tokenized, the context checked (or the state
+        truncated, which rebuilds the questions and branches: prepare_text, in the preparation thread when big); then
+        the queue -> (questions, branches, outs, prompt tokens, the longest prompt of each branch, truncation, state
+        cut, lane)."""
+        qs, branches, n_tok, longest, truncation, cut, lane = await self.in_prep(big, self.prepare_text, body, qs,
+                                                                                 branches)
+        outs = await self.ask(branches, pol, cut, lane)
+        return qs, branches, outs, n_tok, longest, truncation, cut, lane
+
+    def prepare_text(self, body, qs, branches=None):
+        """ask_text's work before the queue (in the preparation thread) -> (questions, branches, prompt tokens, the
+        longest prompt of each branch, truncation, state cut, lane)."""
+        if branches is None:
+            branches = self.branches_of(qs)
         n_tok, longest = self.encode(branches)
         truncation, limit, orig, excess = None, getattr(self, "context", None), qs[0]["state"], 0
         for _ in range(2):  # --context-overflow truncate: the state's head and tail, the questions and options whole
@@ -2271,9 +2365,7 @@ class Server:
             raise RequestError("evidence is not available for a state truncated to the context (shorten the state)")
         self.check_context(qs, branches, longest)
         cut = self.cut_of(qs[0], branches)
-        lane = self.lane_of(branches, longest, cut)
-        outs = await self.ask(branches, pol, cut, lane)
-        return qs, branches, outs, n_tok, longest, truncation, cut, lane
+        return qs, branches, n_tok, longest, truncation, cut, self.lane_of(branches, longest, cut)
 
     async def assemble(self, body, qs, branches, outs, m, n_tok, n_media, longest, second, truncation, lane, t0,
                        reread=None):
@@ -2664,6 +2756,16 @@ def parser():
     ap.add_argument("--max-branches", dest="max_branches", type=_positive(int), default=MAX_BRANCHES, metavar="N",
                     help="a request with more than N branches (a question counts 1, a multi question or a tool set "
                          "one per label) answers 422 before it is rendered. Default %(default)s")
+    ap.add_argument("--max-requests", dest="max_requests", type=_positive(int), default=MAX_REQUESTS, metavar="N",
+                    help="at most N requests in flight at once (queued, prepared or in the engine); one beyond them "
+                         "answers 503 (code OVERLOADED, Retry-After: 1) before any work. Default %(default)s")
+    ap.add_argument("--max-prompt-mb", dest="max_prompt_mb", type=_positive(float), default=MAX_PROMPT_MB,
+                    metavar="MB", help="a request whose prompts would hold more than MB MiB of text (each prompt holds "
+                                       "the state, its question and options; counted in characters before anything is "
+                                       "rendered, once per option order) answers 422. Default %(default)s")
+    ap.add_argument("--request-timeout", dest="request_timeout", type=_positive(float), default=None, metavar="S",
+                    help="a request not answered in S seconds answers 504 (code TIMEOUT); its work still queued is "
+                         "dropped, an engine call already running finishes. Default: none")
     ap.add_argument("--rank-max-candidates", dest="rank_max_candidates", type=int, default=rank.MAX_CANDIDATES,
                     metavar="N", help="rank questions (experimental): at most N candidates per request, all its rank "
                                       "questions together (HTTP 422 above; every 50 take one engine request through "
@@ -2752,7 +2854,8 @@ def error_body(e, error_format="basal"):
     if error_format == "openai":
         kind = "validation_error" if status == 422 else "server_error"
         return {"error": {"message": str(e), "type": kind, "code": status}}, status
-    code = {422: "INVALID_REQUEST", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[status]
+    code = getattr(e, "code", None) if isinstance(e, (Overloaded, TimedOut)) else \
+        {422: "INVALID_REQUEST", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[status]
     body = {"error": str(e), "code": code}
     if status == 422:
         body["detail"] = [{"loc": ["body"], "msg": str(e), "type": "value_error"}]
@@ -2787,9 +2890,12 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             torch.cuda.empty_cache()  # allocator, they failed the next requests too (ultra, 20 Oct)
         return e
 
+    def retry(e):  # (an overloaded server: when to ask again)
+        return {"Retry-After": "1"} if isinstance(e, Overloaded) else None
+
     def failed(e):
         body, status = error_body(logged(e), error_format)
-        return JSONResponse(body, status_code=status)
+        return JSONResponse(body, status_code=status, headers=retry(e))
 
     def route(answer, error):
         """A decision route: the body read once (request_json), answer(body) -> its JSON response, error(e) -> the
@@ -2821,7 +2927,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     def decision_failed(e):
         """An error of /v1/decisions in OpenAI's shape (400 for an invalid request)."""
         status = 400 if isinstance(logged(e), RequestError) else http_status(e)
-        return JSONResponse(dec.error_body(e, status), status_code=status)
+        return JSONResponse(dec.error_body(e, status), status_code=status, headers=retry(e))
 
     systemone, decisions = route(lambda body: srv.serve(body), failed), route(as_decision, decision_failed)
 
