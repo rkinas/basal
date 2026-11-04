@@ -33,6 +33,7 @@ import httpx
 import torch
 
 from . import server
+from .signals import exit_on_sigterm
 from .engine import resolve
 from .facts import inject as inject_facts
 from .prompt import PREFILL, RequestError, render
@@ -78,6 +79,7 @@ class Sidecar:
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         self.proc = subprocess.Popen(cmd, stdout=open(log, "ab"), stderr=subprocess.STDOUT, env=env)
         atexit.register(self.close)
+        exit_on_sigterm()  # SIGTERM runs atexit: the vLLM process does not outlive this one
 
     def close(self):
         if self.proc and self.proc.poll() is None:
