@@ -12,6 +12,7 @@ import asyncio
 import json
 import math
 import statistics
+import sys
 import time
 from pathlib import Path
 
@@ -140,6 +141,9 @@ def main():
         bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
         while len(bodies) < n:
             bodies += bodies
+        if len({json.dumps(b, sort_keys=True) for b in bodies[:n]} | {json.dumps(b, sort_keys=True) for b in bodies[n:2 * n]}) < 2 * n:
+            print("warning: fewer than 2 x N distinct requests: the mixed pass repeats requests of the probe "
+                  "(a weaker test; give more questions or --synthetic)", file=sys.stderr)
         return asyncio.run(determinism(a, bodies))
     asyncio.run(run(a))
 

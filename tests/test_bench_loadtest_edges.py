@@ -1,10 +1,17 @@
 """Regression tests for fix/bench-loadtest-edges (Z-1082)."""
+import argparse
+import asyncio
+import contextlib
+import io
 import json
+import sys
+import threading
 
 import pytest
 
 from basal import agree
 from basal import bench
+from basal import loadtest as lt
 
 
 def test_h5_a_gold_that_is_not_an_option_index_is_left_out_and_said(capsys):
@@ -49,3 +56,79 @@ def test_bg_the_gold_message_names_file_and_line(tmp_path):
                     + json.dumps(dict(state="s", question="q", options=["a", "b"], gold="B")), encoding="utf-8")
     with pytest.raises(SystemExit, match=r"q\.jsonl:2: gold 'B'"):
         bench.check_gold(bench.load_questions(str(path), 50))
+
+
+class Reply:
+    status_code = 200
+
+    def __init__(self, n_answers=2):
+        self.n = n_answers
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"answers": {f"q{i}": {"probabilities": {"a": .5, "b": .5}} for i in range(self.n)}}
+
+
+class Client:
+    hook = staticmethod(lambda count: Reply())
+    count = 0
+
+    def __init__(self, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None):
+        Client.count += 1
+        return Client.hook(Client.count)
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    Client.count, Client.hook = 0, staticmethod(lambda count: Reply())
+    monkeypatch.setattr(lt.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(lt, "load_questions", lambda p, n: [dict(state="s", question="q", options=["a", "b"])] * n)
+    return Client
+
+
+def ns(**kw):
+    d = dict(url="http://x", questions=[], synthetic=None, long_frac=0.0, seed=0, questions_per_request=1,
+             n_seq=3, n_conc=2, concurrency=4, early_exit=None, out=None, determinism=0)
+    d.update(kw)
+    return argparse.Namespace(**d)
+
+
+def within(fn, seconds=3):
+    """fn() in a daemon thread: ('hang',) when it does not return in time (main loops forever on these inputs)."""
+    box = []
+
+    def target():
+        try:
+            box.append(("done", fn()))
+        except SystemExit as e:
+            box.append(("exit", e.code))
+        except BaseException as e:  # noqa: BLE001
+            box.append(("raised", repr(e)))
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(seconds)
+    return box[0] if box else ("hang",)
+
+
+def test_h6b_determinism_warns_when_the_mixed_pass_repeats_the_probe(fake_http, monkeypatch):
+    seen = {}
+
+    async def fake_determinism(a, bodies):
+        seen["same"] = bodies[:a.determinism] == bodies[a.determinism:2 * a.determinism]
+    monkeypatch.setattr(lt, "determinism", fake_determinism)
+    monkeypatch.setattr(sys, "argv", ["lt", "--determinism", "4"])
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        lt.main()
+    assert not seen["same"] or "distinct" in err.getvalue()
