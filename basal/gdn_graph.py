@@ -1174,8 +1174,10 @@ class GDNGraphBackend(GraphBackend):
         if prefills:
             hits = [e if e is not None else prefills.get(key) for key, e in zip(keys, hits)]
         leaves = [self._leaves(packs[k], p) for k, p in zip(idx, P)]
+        share_cached = all(e is not None for e in hits) and all(q is not None for _, reads in leaves for q, _ in reads)
         first = {}
-        row = [first.setdefault(key if key is not None else r, len(first)) for r, key in enumerate(keys)]
+        row = [first.setdefault(key if key is not None and (share_cached or key in (prefills or {})) else r,
+                                len(first)) for r, key in enumerate(keys)]
         one = [row.index(r) for r in range(len(first))]
         # a prompt that is a root itself is read out in pass 1, so its unit needs pass 1
         needs_hidden = {row[r] for r, (_, reads) in enumerate(leaves) if any(q is None for q, _ in reads)}

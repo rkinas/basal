@@ -33,6 +33,21 @@ def observe_prefills(be, monkeypatch):
     return seen
 
 
+def test_repeated_roots_without_state_cache_keep_all_prefill_rows(monkeypatch):
+    # --deterministic refuses StateCache, so shared roots must retain their original batch shape.
+    be = Stub(tiny())
+    assert be.state_cache is None
+    rnd = random.Random(42)
+    state = [1] + [rnd.randrange(3, 50) for _ in range(20)]
+    gs = [requests(rnd, state)[2] for _ in range(3)]
+    assert be._cache_keys(gs, be._units(gs)) == (None, {})
+    seen = observe_prefills(be, monkeypatch)
+    first = check(be, gs)
+    assert [tuple(ids.shape) for ids in seen] == [(3, 32)]
+    assert all(row[:21].tolist() == state for row in seen[0])
+    assert be.run_shared(gs) == first
+
+
 @pytest.mark.parametrize("warm", [False, True])
 @pytest.mark.parametrize("bits,budget", [(16, 1 << 24), (8, 1 << 24), (16, 0), (8, 1)])
 def test_identical_cold_roots_run_once(monkeypatch, warm, bits, budget):
@@ -46,10 +61,12 @@ def test_identical_cold_roots_run_once(monkeypatch, warm, bits, budget):
     rnd = random.Random(42)
     state = [1] + [rnd.randrange(3, 50) for _ in range(20)]
     gs = requests(rnd, state)
+    be.replays.clear()
     first = check(be, gs)
     assert [tuple(ids.shape) for ids in seen] == [(1, 32)]
     assert seen[0][0, :21].tolist() == state
     assert be.state_cache.stats()["hits"] == 0
+    assert all(rows == 1 for kind, rows, _ in be.replays if kind == "tree")
     seen.clear()
     again = be.run_shared(gs)
     if budget > 1:
@@ -79,9 +96,28 @@ def test_reuse_across_batches_with_mixed_cold_roots(monkeypatch, bits, budget):
     monkeypatch.setattr(be, "_tree_hidden", observed_tree)
     seen = observe_prefills(be, monkeypatch)
     check(be, gs)
-    assert [tuple(ids.shape) for ids in seen] == [(1, 32), (2, 32)]
+    assert [tuple(ids.shape) for ids in seen] == [(1, 32)] * 3
     assert [r[:21].tolist() for ids in seen for r in ids] == states
     assert all(not memo for memo in locals_seen)  # the last consumer releases each checkpoint
+
+
+def test_split_groups_keep_original_batching_and_complete_once(monkeypatch):
+    be = Stub(tiny())
+    be.state_cache = StateCache(0)
+    rnd = random.Random(12)
+    state = [1] + [rnd.randrange(3, 50) for _ in range(20)]
+    other = [1] + [rnd.randrange(3, 50) for _ in range(20)]
+    gs = [requests(rnd, state)[2], requests(rnd, other)[1], requests(rnd, other)[1]]
+    monkeypatch.setattr(be, "_oversize", lambda pack, n: n > 2)
+    assert len(be._units(gs)) > len(gs)
+    seen = observe_prefills(be, monkeypatch)
+    done = []
+    got = be.run_shared(gs, done=lambda k, result: done.append((k, result)))
+    assert sorted(done) == list(enumerate(got))
+    assert len(done) == len(gs)
+    assert [tuple(ids.shape) for ids in seen] == [(3, 32), (1, 32)]
+    assert [rows for kind, rows, _ in be.replays if kind == "tree"] == [3, 1]
+    check(be, gs)
 
 
 def test_uncached_root_readout_keeps_its_forward_row(monkeypatch):

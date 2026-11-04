@@ -2606,7 +2606,7 @@ class GraphBackend(EagerBackend):
                 if e is not None:
                     source.append(None)
                     continue
-                if key is None or key not in first:
+                if prefills is None or key not in prefills or key not in first:
                     first[key] = len(cold)
                     cold.append(r)
                 source.append(first[key])
@@ -2933,8 +2933,19 @@ class GraphBackend(EagerBackend):
         for k, key in enumerate(keys or ()):
             if key is not None and k not in hits:
                 remaining[key] = remaining.get(key, 0) + 1
-        prefills = {key: None for key, n in remaining.items() if n > 1}
+        group_sizes = [0] * len(groups)
+        for unit in units:
+            group_sizes[unit[2]] += 1
+        # A split request can itself use B>1 on main; keep the call's original batching in that case.
+        prefills = {key: None for key, n in remaining.items() if n > 1} if all(n <= 1 for n in group_sizes) else {}
+        forwards = []
         for idx, kind in self._forwards(units, hits):
+            # Keep prefill and suffix on B1 together: shrinking only prefill mixes two numerical batch regimes.
+            if prefills and kind == "tree" and any(keys[k] in prefills for k in idx):
+                forwards.extend(([k], kind) for k in idx)
+            else:
+                forwards.append((idx, kind))
+        for idx, kind in forwards:
             with self._launch:  # the static buffers of a graph are shared by concurrent calls
                 if kind == "compact":
                     h = self._compact_hidden(packs, idx)
