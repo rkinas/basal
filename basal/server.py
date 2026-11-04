@@ -228,7 +228,7 @@ def listed_options(name, crit):
 MAX_BRANCHES = 4096  # --max-branches: questions of a request, a multi question or a tool set one per label
 MAX_REQUESTS = 1024  # --max-requests: requests in flight at once (a request beyond them: 503 with Retry-After)
 MAX_PROMPT_MB = 512  # --max-prompt-mb: the text of a request's prompts (each holds the state), counted before rendering
-PREP_INLINE = 2**20  # a request whose prompts hold more text is rendered and tokenized off the event loop (prep_pool)
+PREP_INLINE = 2**16  # a request whose prompts hold more text is rendered and tokenized off the event loop (prep_pool)
 
 
 class Overloaded(RuntimeError):
