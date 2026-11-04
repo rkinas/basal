@@ -8,6 +8,7 @@ import pytest
 
 from basal import agree
 from basal import bench
+from basal import calibrate as cal
 from basal import loadtest
 from basal import selfcheck
 
@@ -60,3 +61,13 @@ def nan_under_load(monkeypatch, tmp_path, body):
 def test_v4_a_nan_under_load_is_a_change_of_1_wherever_it_stands(monkeypatch, tmp_path, body):
     d = nan_under_load(monkeypatch, tmp_path, body)
     assert d["max_abs_diff"] == 1.0 and d["identical"] == 0
+
+
+@pytest.mark.parametrize("bad", [float("nan"), 1.5, -0.1])
+def test_e1_a_confidence_outside_0_1_is_refused(bad):
+    with pytest.raises(ValueError, match="confidence"):
+        cal.ece([(bad, True), (0.5, False)])
+
+
+def test_e1_clean_confidences_still_give_an_ece():
+    assert cal.ece([(0.9, True), (0.5, False), (1.0, True)]) >= 0.0

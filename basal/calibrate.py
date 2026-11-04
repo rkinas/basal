@@ -529,6 +529,8 @@ def ece(cs, bins=10):
     if not cs:
         return None
     c, ok = np.array([x for x, _ in cs]), np.array([o for _, o in cs], float)
+    if not np.all((c >= 0) & (c <= 1)):  # NaN or out of range falls in no bin: its weight would vanish and the ECE look better
+        raise ValueError("ece: every confidence must lie in [0, 1] (got NaN or a value outside)")
     e = 0.0
     for lo, hi in zip(np.linspace(0, 1, bins + 1)[:-1], np.linspace(0, 1, bins + 1)[1:]):
         m = (c > lo) & (c <= hi)
