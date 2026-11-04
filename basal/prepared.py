@@ -155,7 +155,7 @@ def load(d):
     for f in files:
         try:
             res.append(_count(torch.compiler.load_cache_artifacts(f.read_bytes())))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001  (the fla configs below are loaded all the same)
             res.append(f"not loaded ({type(e).__name__})")
     if res:  # (several flag sets: per file)
         out["inductor"] = res[0] if len(res) == 1 else {f.name: r for f, r in zip(files, res)}
