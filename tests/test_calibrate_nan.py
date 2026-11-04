@@ -1,4 +1,5 @@
 """Regression tests for fix/calibrate-nan (Z-1082)."""
+import json
 import math
 import random
 import time
@@ -61,3 +62,12 @@ def test_h2_a_bucket_whose_temperature_sits_on_the_edge_of_the_grid_is_warned_ab
             if r.get("T") and not r.get("T_type") and any(math.isclose(r["T"], x) for x in cal.T_GRID)]
     assert edge, "the fixture no longer puts a bucket on the edge"
     assert any(f"choice {b} options" in w for b in edge for w in cal.warnings(report, [0.05]))
+
+
+def test_h4_lines_with_a_null_id_are_not_one_group(tmp_path):
+    q = {"type": "noul", "instructions": "Late?", "gold": "yes"}
+    path = tmp_path / "x.jsonl"
+    path.write_text("\n".join(json.dumps({"id": None, "state": "s", "questions": {"q": q}}) for _ in range(5)),
+                    encoding="utf-8")
+    _, decisions, _, _ = cal.read(str(path))
+    assert len({d["group"] for d in decisions}) == 5

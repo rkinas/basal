@@ -358,10 +358,10 @@ def read(path):
                 errors.append(f"{at}: {str(e).removeprefix(f'question {name!r}: ')}")
                 continue
             body["questions"][name] = clean
-            group = q.get("group", rec.get("group", rec.get("id", n)))
+            group = next((v for v in (q.get("group"), rec.get("group"), rec.get("id")) if v is not None), n)
             d = dict(line=n, req=len(bodies), name=name, prim=item.get("base", t), gold=gold,
                      keys=[str(k) for k in item["keys"]], group=str(group),
-                     family=str(q.get("family", rec.get("family", name))))
+                     family=str(next((v for v in (q.get("family"), rec.get("family")) if v is not None), name)))
             if t == "multi":
                 d.update(prim="multi", set=dict(
                     id=label_set_id(item["keys"], item["labels"], item["fallback"]), objective=item["objective"],
