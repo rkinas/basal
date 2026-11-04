@@ -59,3 +59,31 @@ def test_p95_is_the_nearest_rank(monkeypatch, tmp_path, n_seq, p95):
     asyncio.run(loadtest.run(a))
     out = json.loads((tmp_path / "l.json").read_text(encoding="utf-8"))
     assert round(out["p95_ms"], 6) == p95 and out["errors"] == 0, out
+
+
+@pytest.mark.parametrize("extra", [[], ["--determinism", "3"]])
+def test_no_simple_items_exits_instead_of_spinning(monkeypatch, tmp_path, extra, capsys):
+    """A question file of full requests only (or an empty one) gave no bodies, and doubling an empty list until it
+    reached n never ended (one CPU at 100%, no request sent)."""
+    full = tmp_path / "full.jsonl"
+    full.write_text(json.dumps({"state": "s", "questions": {"q": {"type": "noul", "instructions": "?"}}}) + "\n",
+                    encoding="utf-8")
+    (tmp_path / "empty.jsonl").write_text("", encoding="utf-8")
+    sent = []
+    real = httpx.AsyncClient
+    monkeypatch.setattr(loadtest.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(
+        lambda r: sent.append(r) or httpx.Response(200, json={"answers": {}})), **kw))
+    for f in (full, tmp_path / "empty.jsonl"):
+        monkeypatch.setattr(sys, "argv", ["basal-loadtest", "--questions", str(f), "--n-seq", "2", "--n-conc", "2",
+                                          *extra])
+        with pytest.raises(SystemExit, match="no simple items in"):
+            loadtest.main()
+    assert sent == []
+
+
+@pytest.mark.parametrize("flag", ["--n-conc", "--determinism"])
+def test_negative_counts_are_refused(monkeypatch, flag, capsys):
+    monkeypatch.setattr(sys, "argv", ["basal-loadtest", flag, "-1"])
+    with pytest.raises(SystemExit) as e:
+        loadtest.main()
+    assert e.value.code == 2 and "must be 0 or more" in capsys.readouterr().err
