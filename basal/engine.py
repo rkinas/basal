@@ -1098,6 +1098,7 @@ def graph_two_way_refused(model_dir, state_cache_gb=0, prefix=False, batches="de
 
 KV_GROUP = 128  # low-bit state cache: tokens per group of a key channel
 KV_GROUP_D = 64  # and channels per group of a value token
+KV_STACK_BYTES = 64 << 20  # kv_quant_layers: layers stacked per call, up to this many bytes of keys (or values)
 
 
 @torch.no_grad()
@@ -1208,17 +1209,23 @@ def graph_options(model_dir, dtype="bfloat16", quant=None, compile=False, attn="
 
 def kv_quant_layers(kv, bits):
     """kv_quant of every layer's keys and values ([(K, V)] per layer), the layers of one shape and dtype stacked into
-    one call: kv_quant's groups never span heads, so each layer's codes, steps and lows are those of the layer alone
-    (and 4-bit pairs never span layers: head sizes are even), in a few dozen kernel launches instead of 16-18 per tensor
-    (basal-2.0-4.5B: 1,920 per store) -> (number of layers, [(layer indices, keys' kv_quant, values' kv_quant)])."""
+    one call per KV_STACK_BYTES (kv_quant's float32 temporaries are a few times the stacked bytes: a long state's
+    store stays within the memory the per-layer calls needed, give or take one chunk): kv_quant's groups never span
+    heads, so each layer's codes, steps and lows are those of the layer alone (and 4-bit pairs never span layers: head
+    sizes are even), in a few dozen kernel launches instead of 16-18 per tensor and layer (basal-2.0-4.5B: 1,920 per
+    store) -> (number of layers, [(layer indices, keys' kv_quant, values' kv_quant)])."""
     groups = {}
     for i, (k, v) in enumerate(kv):
         groups.setdefault((tuple(k.shape), k.dtype, tuple(v.shape), v.dtype), []).append(i)
     out = []
     for (ks, _, vs, _), idx in groups.items():
-        K = torch.stack([kv[i][0] for i in idx]).view(len(idx) * ks[0], *ks[1:])
-        V = torch.stack([kv[i][1] for i in idx]).view(len(idx) * vs[0], *vs[1:])
-        out.append((idx, kv_quant(K, bits, True), kv_quant(V, bits, False)))
+        per = max(t.numel() * t.element_size() for t in kv[idx[0]])  # bytes of one layer's keys or values
+        step = max(1, KV_STACK_BYTES // max(per, 1))
+        for c in range(0, len(idx), step):
+            part = idx[c: c + step]
+            K = torch.stack([kv[i][0] for i in part]).view(len(part) * ks[0], *ks[1:])
+            V = torch.stack([kv[i][1] for i in part]).view(len(part) * vs[0], *vs[1:])
+            out.append((part, kv_quant(K, bits, True), kv_quant(V, bits, False)))
     return len(kv), out
 
 
