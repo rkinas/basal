@@ -106,6 +106,10 @@ def test_models_endpoint_reports_the_bucket_temperatures():
     ({"state": "s", "questions": {"q": {"type": "tool", "tools": [{"type": "web"}]}}}, None, "function tools only"),
     ({"state": "s", "questions": {"q": dict(Q, type="chioce")}}, None, "unknown type 'chioce'"),
     ({"state": "s", "questions": {"q": Q}, "lang": "de"}, None, "lang must be"),
+    (None, b'{"state": "s", "questions": {"q": {"type": "choice", "criteria": [NaN, "b"]}}}', "option key"),
+    (None, b'{"state": "s", "questions": {"q": {"type": "multi", "criteria": ["a", 1e999]}}}', "option key"),
+    (None, b'{"state": "s", "questions": {"q": {"type": "act", "criteria": [-Infinity, "b"], '
+           b'"costs": {"wrong": 1}}}}', "option key"),
 ])
 def test_invalid_requests_answer_422(body, content, message):
     srv = AppServer(Engine())
