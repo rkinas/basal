@@ -13,7 +13,7 @@ adds the slices in fp32. For GPUs without FP8 (Ampere, sm80 / sm86): their int8 
 """
 import torch
 
-from .fp8block import BLOCK, BlockFP8Linear, fits  # noqa: F401  (fits: the same shapes)
+from .fp8block import BLOCK, BlockFP8Linear, fits, grid  # noqa: F401  (fits: the same shapes)
 
 INT8_MAX = 127.0
 # the GEMM's tiles and launch, fixed for every shape as fp8block's (a row's output must not depend on how many rows
@@ -124,11 +124,7 @@ def _build():
         N = w.shape[0]
         c = torch.empty((M, N), dtype=dtype, device=q.device)
         if M:
-            cf = dict(CONFIG)
-            if N % cf["BN"]:
-                cf["BN"] = BLOCK
-            grid = ((M + cf["BM"] - 1) // cf["BM"] * (N // cf["BN"]),)
-            wrap_triton(kernel)[grid](q, s, w, ws, c, M, N, K, BK=BLOCK, num_stages=stages, **cf)
+            wrap_triton(kernel)[grid(M, N, CONFIG)](q, s, w, ws, c, M, N, K, BK=BLOCK, num_stages=stages, **CONFIG)
         return c
 
     return op
