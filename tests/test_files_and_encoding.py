@@ -9,6 +9,7 @@ import pytest
 from basal import bench
 from basal import calibrate as cal
 from basal import loadtest
+from basal import navtree
 
 
 GOOD = json.dumps({"state": "s", "options": ["a", "b"]})
@@ -46,3 +47,27 @@ def test_v5_determinism_creates_the_directory_of_out(monkeypatch, tmp_path):
     a = argparse.Namespace(determinism=2, url="http://test/v1/systemone", concurrency=2, out=str(out))
     asyncio.run(loadtest.determinism(a, bodies))
     assert json.loads(out.read_text(encoding="utf-8"))["determinism"]["requests"] == 2
+
+
+def ids(*dirs):
+    return [d[0] for d in navtree.documents([str(x) for x in dirs])]
+
+
+def test_e3_notes_md_and_notes_txt_get_distinct_ids(tmp_path):
+    (tmp_path / "notes.md").write_text("# A\n\ntext one", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("text two", encoding="utf-8")
+    assert ids(tmp_path) == ["notes", "notes.txt"]
+
+
+def test_e3_one_file_name_under_two_inputs_gets_distinct_ids(tmp_path):
+    for d in ("a", "b"):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "readme.md").write_text("# R\n\ntext " + d, encoding="utf-8")
+    got = ids(tmp_path / "a", tmp_path / "b")
+    assert len(got) == 2 and len(set(got)) == 2
+
+
+def test_e3_different_names_keep_the_plain_id(tmp_path):
+    (tmp_path / "a.md").write_text("# A\n\ntext", encoding="utf-8")
+    (tmp_path / "b.md").write_text("# B\n\ntext", encoding="utf-8")
+    assert ids(tmp_path) == ["a", "b"]

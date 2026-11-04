@@ -173,6 +173,7 @@ def passages(blocks, max_chars=2000, min_chars=0):
 
 def documents(inputs):
     """(id, title, group, kind, text) of every document under the inputs (folders: in sorted order)."""
+    seen = set()  # x.md and x.html, or one file name under two inputs: the second id keeps its extension / path
     for inp in inputs:
         root = Path(inp)
         files = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUFFIXES) \
@@ -194,7 +195,10 @@ def documents(inputs):
                         yield str(d.get("id", f"{rel.with_suffix('').as_posix()}:{n + 1}")), d.get("title"), \
                             d.get("group"), k, d[k]
             else:
-                yield rel.with_suffix("").as_posix(), None, \
+                doc_id = next(c for c in (rel.with_suffix("").as_posix(), rel.as_posix(), f.as_posix(), f"{len(seen)}:{f}")
+                              if c not in seen)
+                seen.add(doc_id)
+                yield doc_id, None, \
                     rel.parent.as_posix() if rel.parent != Path(".") else None, kind, \
                     f.read_text(encoding="utf-8", errors="replace")
 
