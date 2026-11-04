@@ -341,6 +341,7 @@ def main(argv=None):
             print(f"{'':<{w}}accuracy {r['accuracy']:.4f} vs {r['reference_accuracy']:.4f} "
                   f"(paired 95% CI of the difference [{lo:+.4f}, {hi:+.4f}], {len(gold)} items)")
     if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(dict(model=model, revision=revision, reference=a.reference, version=__version__,
                                                questions=len(qs), rows=rows), indent=1), encoding="utf-8")
     return 0 if all(r["gate"] == "pass" for r in rows) else 1

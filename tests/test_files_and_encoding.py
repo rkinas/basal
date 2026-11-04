@@ -1,10 +1,14 @@
 """Regression tests for fix/files-and-encoding (Z-1089)."""
+import argparse
+import asyncio
 import json
 
+import httpx
 import pytest
 
 from basal import bench
 from basal import calibrate as cal
+from basal import loadtest
 
 
 GOOD = json.dumps({"state": "s", "options": ["a", "b"]})
@@ -30,3 +34,15 @@ def test_v2_a_labelled_file_with_a_bom_is_read(tmp_path):
     p.write_bytes(b"\xef\xbb\xbf" + json.dumps({"id": "r1", "state": "s", "questions": {"q": q}}).encode() + b"\n")
     _, decisions, _, _ = cal.read(str(p))
     assert len(decisions) == 1
+
+
+def test_v5_determinism_creates_the_directory_of_out(monkeypatch, tmp_path):
+    def handler(request):
+        return httpx.Response(200, json={"answers": {"q": {"probabilities": {"x": 0.6, "y": 0.4}}}})
+    real = httpx.AsyncClient
+    monkeypatch.setattr(loadtest.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    bodies = [{"state": s, "questions": {}} for s in ("a", "b", "c", "d")]
+    out = tmp_path / "new" / "dir" / "d.json"
+    a = argparse.Namespace(determinism=2, url="http://test/v1/systemone", concurrency=2, out=str(out))
+    asyncio.run(loadtest.determinism(a, bodies))
+    assert json.loads(out.read_text(encoding="utf-8"))["determinism"]["requests"] == 2
