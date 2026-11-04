@@ -244,8 +244,23 @@ def listed_options(name, crit):
     return {k: None for k in crit}
 
 
-def check_body(body):
-    """The shape of a decision request (its questions are read by to_items) -> RequestError (HTTP 422)."""
+MAX_BODY_BYTES = 256 * 2**20  # --max-body-mb: a request body (8 media items of 20 MB are ~214 MB in base64)
+MAX_BRANCHES = 4096  # --max-branches: questions of a request, a multi question or a tool set one per label
+
+
+def branch_count(q):
+    """What a question of a request costs before it is read: one branch per label of a multi question or a tool set
+    ("multi": true), one for any other question (tasks and rank have limits of their own)."""
+    if q.get("type", "choice") == "multi" and isinstance(q.get("criteria"), (dict, list)):
+        return max(1, len(q["criteria"]))
+    if q.get("type") == "tool" and q.get("multi") and isinstance(q.get("tools"), list):
+        return max(1, len(q["tools"]))
+    return 1
+
+
+def check_body(body, max_branches=MAX_BRANCHES):
+    """The shape of a decision request (its questions are read by to_items) -> RequestError (HTTP 422); its branches
+    (branch_count) at most max_branches, before anything is rendered."""
     if not isinstance(body, dict):
         raise RequestError("the request body must be a JSON object")
     for k in ("state", "questions"):
@@ -255,6 +270,56 @@ def check_body(body):
         raise RequestError('"questions" must be an object of {name: question object}')
     if not body["questions"]:  # (an empty object reached the engine and failed there with a 500)
         raise RequestError('"questions" must name at least one question')
+    n = sum(branch_count(q) for q in body["questions"].values())
+    if n > max_branches:
+        raise RequestError(f"{n} branches (a question counts 1, a multi question or a tool set one per label): more "
+                           f"than this server's --max-branches {max_branches}")
+
+
+def limit_body(app, max_bytes):
+    """ASGI: a request body over max_bytes answers 413 before the app reads it (its Content-Length), or as soon as more
+    of it arrived (a body sent without one: the app sees the client gone, and its answer is replaced by the 413)."""
+    async def too_large(scope, send):
+        msg = f"the request body is larger than this server's limit of {max_bytes} bytes (--max-body-mb)"
+        body = {"error": {"message": msg, "type": "invalid_request_error", "param": None, "code": "PAYLOAD_TOO_LARGE"}} \
+            if scope["path"] in ("/v1/decisions", "/decisions") else {"error": msg, "code": "PAYLOAD_TOO_LARGE"}
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"), (b"connection", b"close")]})
+        await send({"type": "http.response.body", "body": json.dumps(body).encode()})
+
+    async def limited(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+        length = dict(scope.get("headers", ())).get(b"content-length", b"")
+        if length.isdigit() and int(length) > max_bytes:
+            await too_large(scope, send)
+            return
+        seen, over = 0, False
+
+        async def counted():
+            nonlocal seen, over
+            if over:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > max_bytes:
+                    over = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def answer(message):
+            if not over:
+                await send(message)
+        try:
+            await app(scope, counted, answer)
+        except Exception:  # noqa: BLE001  (the app's error over a body it never got whole)
+            if not over:
+                raise
+        if over:
+            await too_large(scope, send)
+    return limited
 
 
 QUESTION_TYPES = ("choice", "noul", "score", "act", "multi", "tool")  # the types a question can have
@@ -1345,6 +1410,8 @@ class Server:
         self.fmt = model_format(md)  # prompt format of the model (basal.json "prompt"; 1 when absent)
         self.max_options = max_options(self.fmt)
         self.rank_max = getattr(a, "rank_max_candidates", rank.MAX_CANDIDATES)  # rank candidates per request
+        self.max_branches = getattr(a, "max_branches", MAX_BRANCHES)
+        self.max_body = int(getattr(a, "max_body_mb", MAX_BODY_BYTES / 2**20) * 2**20)
         self.orders = served_orders(a, self.fmt)
         # the prompt layout (prompt.LAYOUTS; 2.4.1): --layout, else the model's basal.json "layout", else canonical
         self.layout = getattr(a, "layout", None) or model_layout(md)
@@ -1602,7 +1669,7 @@ class Server:
         Counted as in flight from here to its answer or error (GET /health)."""
         self.in_flight += 1
         try:
-            check_body(body)
+            check_body(body, getattr(self, "max_branches", MAX_BRANCHES))
             return await self.decide(body)
         finally:
             self.in_flight -= 1
@@ -2533,6 +2600,17 @@ def add_engine_args(ap):
     return ap
 
 
+def _positive(kind):
+    """argparse type: a number of kind above 0."""
+    def read(text):
+        v = kind(text)
+        if not (v > 0 and math.isfinite(v)):
+            raise argparse.ArgumentTypeError(f"must be a number above 0, got {text!r}")
+        return v
+    read.__name__ = kind.__name__
+    return read
+
+
 def parser():
     ap = argparse.ArgumentParser(description="basal typed-decision server")
     add_engine_args(ap)
@@ -2546,6 +2624,12 @@ def parser():
                          "with other model files (a commit to the card alone keeps it) or with another adapter "
                          "(default: a warning, and its thresholds are not applied)")
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
+    ap.add_argument("--max-body-mb", dest="max_body_mb", type=_positive(float), default=MAX_BODY_BYTES / 2**20,
+                    metavar="MB", help="a request body over MB megabytes (MiB) answers 413 before it is read whole. "
+                                       "Default %(default)g: the largest media request (8 items of 20 MB) fits")
+    ap.add_argument("--max-branches", dest="max_branches", type=_positive(int), default=MAX_BRANCHES, metavar="N",
+                    help="a request with more than N branches (a question counts 1, a multi question or a tool set "
+                         "one per label) answers 422 before it is rendered. Default %(default)s")
     ap.add_argument("--rank-max-candidates", dest="rank_max_candidates", type=int, default=rank.MAX_CANDIDATES,
                     metavar="N", help="rank questions (experimental): at most N candidates per request, all its rank "
                                       "questions together (HTTP 422 above; every 50 take one engine request through "
@@ -2649,6 +2733,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
+    from starlette.middleware import Middleware
     from starlette.requests import ClientDisconnect
     from starlette.responses import JSONResponse, PlainTextResponse
     from starlette.routing import Route
@@ -2790,7 +2875,9 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     routes = [Route("/v1/systemone", systemone, methods=["POST"]), Route("/v1/basal", systemone, methods=["POST"]),
               Route("/v1/decisions", decisions, methods=["POST"]), Route("/v1/models", models),
               Route("/health", health), Route("/health/", health), Route("/metrics", metrics), *mcp_routes]
-    return Starlette(routes=ui.routes(routes, counts) if ui is not None else routes, lifespan=lifespan)
+    limit = [Middleware(limit_body, getattr(srv, "max_body", MAX_BODY_BYTES))]  # (413 before a body is read whole)
+    return Starlette(routes=ui.routes(routes, counts) if ui is not None else routes, lifespan=lifespan,
+                     middleware=limit)
 
 
 def main():

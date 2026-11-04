@@ -82,7 +82,9 @@ one shared state (SOAM); asking them in one request is faster than separate requ
 - Errors return `{"error": "..."}` with a status code (2.3.1; before, every error was 422):
   - **422**: the request is invalid and must be changed (a body that is not a JSON object, a missing `state` or
     `questions`, a wrong field value, too many options, a prompt longer than the context, a field not available in
-    the server's mode or model);
+    the server's mode or model, more branches than `--max-branches`, 4,096 by default);
+  - **413**: the body is larger than `--max-body-mb` (256 MiB by default; the largest media request, 8 items of 20 MB,
+    is about 214 MB in base64), refused before it is read whole (`code` `PAYLOAD_TOO_LARGE`);
   - **503**: the GPU ran out of memory (CUDA, MPS or Metal). The server frees the failed request's memory, so a retry,
     later or on another server, may succeed;
   - **500**: any other server error;
