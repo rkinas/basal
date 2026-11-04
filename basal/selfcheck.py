@@ -108,7 +108,7 @@ def compare(ref, got):
     """Probability dicts of one question -> (top-1 agrees, agrees outside near ties, max |dp|, sum |dp|, options)."""
     keys = list(ref)
     r, g = [ref[k] for k in keys], [got.get(k, 0.0) for k in keys]
-    if any(x != x or abs(x) == float("inf") for x in g):  # a NaN answer is the largest possible change, never an agreement
+    if any(x != x or abs(x) == float("inf") for x in g + r):  # a NaN or infinite answer or reference is the largest possible change, never an agreement
         return False, False, 1.0, float(len(keys)), len(keys)
     a, b = max(range(len(r)), key=r.__getitem__), max(range(len(g)), key=g.__getitem__)
     dps = [abs(x - y) for x, y in zip(r, g)]
