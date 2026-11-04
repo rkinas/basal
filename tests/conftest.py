@@ -6,4 +6,21 @@ the readout accumulates in float32; the float32 compute of Qwen3.5 (basal-omni-p
 (MLXBackend) unless it is set."""
 import os
 
+import pytest
+import torch
+
 os.environ["MLX_ENABLE_TF32"] = "0"
+
+_SDPA = ("flash", "mem_efficient", "math", "cudnn")
+
+
+@pytest.fixture(autouse=True)
+def _restore_sdpa_backends():
+    """EagerBackend turns SDPA backends off process-wide (cuDNN on CUDA; flash and memory-efficient too for Gemma 4),
+    and the switches also choose the CPU kernel. A test that builds one would otherwise change the attention kernel,
+    and so the bf16 rounding, of every later test in the same process: under pytest-xdist, which tests follow it
+    depends on how the files are split between the workers."""
+    before = {k: getattr(torch.backends.cuda, f"{k}_sdp_enabled")() for k in _SDPA}
+    yield
+    for k, on in before.items():
+        getattr(torch.backends.cuda, f"enable_{k}_sdp")(on)
