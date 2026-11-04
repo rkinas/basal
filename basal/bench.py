@@ -193,12 +193,14 @@ def fresh(be, prompts):
     a repeated prompt (the warm-up of the same group, the single-order call before the two-order call) almost for free.
     Put a new nonce in front of the prompts of a question in a timed call so that they are computed; both option orders
     of the question get the same nonce, so the second order still reuses the first order's prefix, as in real serving
-    (in the throughput call every question has its own nonce, so questions share no prefix). The answers of timed
-    calls are discarded."""
+    (in the throughput call every question has its own nonce, so questions share no prefix). The nonce goes after a
+    leading BOS text, which Ollama strips before sending the prompt (it adds BOS itself). The answers of timed calls
+    are discarded."""
     if getattr(be, "http", None) is None:  # not an HTTP engine: cold() clears what there is to clear
         return prompts
     nonce = f"{random.getrandbits(64):016x}\n"
-    return [nonce + p for p in prompts]
+    bos = getattr(getattr(be, "tok", None), "bos_token", None) or ""
+    return [p[:len(bos)] + nonce + p[len(bos):] if bos and p.startswith(bos) else nonce + p for p in prompts]
 
 
 def timed(fn, reps, be=None):

@@ -88,3 +88,15 @@ def test_lat2_p95_is_the_nearest_rank(monkeypatch, n, p95):
     monkeypatch.setattr(bench_module, "sync", lambda be_: None)
     _, out = bench_module.measure(Quiet(), groups(n + 5), n)  # the first 5 samples of each kind are dropped
     assert out["lat2_p95_ms"] == p95, out
+
+
+def test_the_nonce_goes_after_the_bos_text():
+    """OllamaBackend._raw strips a leading BOS text (Ollama adds BOS itself): the nonce must not come before it."""
+    class Http:
+        http = object()
+        tok = type("Tok", (), {"bos_token": "<bos>"})()
+
+    a, b = bench_module.fresh(Http(), ["<bos>x", "<bos>y"])
+    assert a.startswith("<bos>") and a.endswith("\nx") and b.endswith("\ny") and a[:-1] == b[:-1]
+    assert bench_module.fresh(Http(), ["no bos"])[0].endswith("\nno bos")
+    assert bench_module.fresh(Quiet(), ["<bos>x"]) == ["<bos>x"]  # not an HTTP engine: unchanged
