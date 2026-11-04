@@ -41,7 +41,7 @@ jobs:
       - run: uv venv
       - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: uv pip install -e ".[test]"
-      - run: uv run --no-sync pytest -q
+      - run: uv run --no-sync pytest -q -n 2 --dist loadfile  # whole files per worker: module fixtures load once
 
   test-macos:
     runs-on: macos-latest  # Apple Silicon: also runs the MLX tests
@@ -53,4 +53,4 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --frozen --extra test
-      - run: uv run --no-sync pytest -q
+      - run: uv run --no-sync pytest -q -n 2 --dist loadfile  # whole files per worker: module fixtures load once
