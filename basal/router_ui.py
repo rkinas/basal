@@ -43,6 +43,17 @@ def slim(state):
     return out
 
 
+def shown(name, value):
+    """An option's value as the page shows it: redact()'s, and for --route SCRIPT=URL[,URL] each URL redacted on its
+    own (the whole value parses as no URL: its user, password and query would be shown)."""
+    if name == "fallback_extra":
+        return "(set)" if value else value
+    if name == "route" and isinstance(value, list):
+        return [x.partition("=")[0] + "=" + ",".join(redact("url", u) for u in x.partition("=")[2].split(","))
+                if isinstance(x, str) and "=" in x else redact(name, x) for x in value]
+    return redact(name, value)
+
+
 def versions():
     out = {}
     for p in PACKAGES:
@@ -71,8 +82,7 @@ class RouterUI:
                 self.pools.setdefault(u, []).append(name)
         defaults = defaults or {}
         opts = vars(a) if a is not None else {}
-        self.config = {"options": [[k, ("(set)" if v else v) if k == "fallback_extra" else redact(k, v),
-                                    k in defaults and defaults[k] != v] for k, v in opts.items()],
+        self.config = {"options": [[k, shown(k, v), k in defaults and defaults[k] != v] for k, v in opts.items()],
                        "facts": self.facts()}
         self.attach()
 
