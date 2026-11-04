@@ -55,9 +55,9 @@ from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so bas
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
-from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, lang_of, letter_ids, max_options,
-                     media_messages, model_format, model_layout, model_option_isolation, model_two_way, once_ids,
-                     option_tokens, reads_request, render, tokens_once)
+from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, defang, lang_of, letter_ids,
+                     max_options, media_messages, model_format, model_layout, model_option_isolation, model_two_way,
+                     once_ids, option_tokens, reads_request, render, tokens_once)
 from .sets import label_set_id
 from .sets import select as select_set
 from .sets import validate as validate_set
@@ -1546,7 +1546,7 @@ class Server:
         prompt and the user header "State:" / "Stan:"), checked against the prompt's token ids; None when not found."""
         head = FORMATS[self.fmt]["templates"][q["lang"]]["user"].split("{state}")[0]
         text = render(self.tok, q["state"], q["question"], q["options"], q["lang"], self.fmt)
-        i = text.find(head + q["state"]) if q["state"] else -1
+        i = text.find(head + defang(self.tok, q["state"])) if q["state"] else -1  # as rendered (special tokens broken)
         if i < 0:
             return None
         memo = self.__dict__.setdefault("_template_ids", {})
@@ -1565,11 +1565,12 @@ class Server:
         short state can also be a word of the system prompt)."""
         head = FORMATS[self.fmt]["templates"][q["lang"]]["user"].split("{state}")[0]
         text = render(self.tok, q["state"], q["question"], q["options"], q["lang"], self.fmt)
-        i = text.find(head + q["state"]) if q["state"] else -1
+        shown = defang(self.tok, q["state"])  # the state as rendered (special tokens broken)
+        i = text.find(head + shown) if q["state"] else -1
         if i < 0:
             return None
         full = self.tok(text, add_special_tokens=False).input_ids
-        pre = self.tok(text[: i + len(head) + len(q["state"])], add_special_tokens=False).input_ids
+        pre = self.tok(text[: i + len(head) + len(shown)], add_special_tokens=False).input_ids
         while pre and full[: len(pre)] != pre:  # the last token merges with what follows: end one token earlier
             pre = pre[:-1]
         return len(pre) or None
