@@ -781,6 +781,32 @@ def out_of_memory(e):
         "out of memory" in str(e).lower() or "OutOfMemory" in str(e))
 
 
+SURROGATE = re.compile(rb"\\u[dD][89a-fA-F]")  # a \u escape of a UTF-16 surrogate (raw UTF-8 cannot carry one)
+
+
+def unicode_body(raw, body):
+    """body (parsed from the bytes raw), refused when a string in it holds a lone surrogate: "\\ud800" is valid JSON
+    but no Unicode text, and the tokenizer, the answer's UTF-8 and the UI's view of the request failed on it with HTTP
+    500. Only a body with a surrogate escape is walked (an escaped pair, as an emoji, reads as one character)."""
+    if not SURROGATE.search(raw):
+        return body
+    todo = [body]
+    while todo:
+        x = todo.pop()
+        if isinstance(x, str):
+            try:
+                x.encode("utf-8")
+            except UnicodeEncodeError:
+                raise RequestError("the request holds a lone surrogate (an unpaired \\ud800-\\udfff escape in a "
+                                   "string): send valid Unicode text") from None
+        elif isinstance(x, dict):
+            todo += x  # (its keys)
+            todo += x.values()
+        elif isinstance(x, list):
+            todo += x
+    return body
+
+
 def http_status(e):
     """The status code of a failed request: 422 for an invalid request (RequestError: the client must change it),
     503 when the GPU ran out of memory (a retry may succeed: the server frees the request's memory), 500 for any other
@@ -2780,7 +2806,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             counts["seconds"] += time.perf_counter() - t
             return failed(RequestError(f"the request body is not valid JSON: {e}"))
         try:
-            out = await until_disconnect(request, srv.serve(body))
+            out = await until_disconnect(request, srv.serve(unicode_body(await request.body(), body)))
             if out is None:  # the client is gone: its queued work was dropped, no one reads an answer
                 return JSONResponse(*CLIENT_GONE)
             return JSONResponse(out)
@@ -2800,7 +2826,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                 body = await request.json()
             except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
                 raise RequestError(f"the request body is not valid JSON: {e}") from None
-            s1, specs = dec.to_systemone(body)
+            s1, specs = dec.to_systemone(unicode_body(await request.body(), body))
             out = await until_disconnect(request, srv.serve(s1))
             if out is None:  # the client is gone (as on /v1/systemone)
                 return JSONResponse(*CLIENT_GONE)

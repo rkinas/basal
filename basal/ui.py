@@ -399,8 +399,9 @@ class UI:
             answer = answer if answer is not None and json.loads(answer) is not None else b"null"
         except ValueError:
             answer = json.dumps(answer.decode("utf-8", "replace")).encode()
-        return (json.dumps(meta)[:-1] + ', "request": ' + json.dumps(body, ensure_ascii=False) + ', "answer": ').encode() \
-            + answer + b"}"
+        # (a lone surrogate the request held, refused with 422, is written as its \u escape: it is no UTF-8)
+        return (json.dumps(meta)[:-1] + ', "request": ' + json.dumps(body, ensure_ascii=False) + ', "answer": ').encode(
+            "utf-8", "backslashreplace") + answer + b"}"
 
     def page(self, app):
         """app with GET /ui (the page) and its fonts in front of it, open (the page asks for the key when GET
