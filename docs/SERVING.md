@@ -461,8 +461,9 @@ basal-serve --model Remek/basal-omni-1.0-mini --mode fast --ui on   # then open 
 `--ui full` also shows the requests themselves: a click on a row of the recent requests opens the request as it was
 sent and its answer (or the error). The server keeps references to the last 200 requests' bodies (images included) and
 answers in memory, with no copy and nothing on disk, and serialises one only when the page asks for it
-(`GET /ui/request/<id>`). That text is visible to whoever can open the page: on a shared host use `--api-keys`. `--ui on`
-never keeps a request's text.
+(`GET /ui/request/<id>`). That text is visible to whoever can open the page: on a shared host use `--api-keys`, with
+which a kept request opens only for the key that sent it or an admin key (`"admin": true`; another client's key gets
+403). `--ui on` never keeps a request's text.
 
 **Open one page at a time.** What the page costs a request: one append of its metadata to a ring in memory (0.3 µs on an
 Apple M4 Pro's CPU, 0.7 µs on the H100 host's). The rest (totals, percentiles, rates, the configuration view) is computed when a page reads

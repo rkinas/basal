@@ -12,7 +12,8 @@ imported and basal-serve handles requests as without it.
 
 --ui full also keeps references to the last RECENT requests' parsed bodies and their answers (the bytes already sent),
 no copy and no serialisation on the request path; GET /ui/request/<id> serialises one of them when the page asks
-(behind the same key check as /ui/state). They live in memory only, like everything here."""
+(behind the same key check as /ui/state; with --api-keys, only for the key that made the request or an admin key: the
+keys are clients, who do not read each other's documents). They live in memory only, like everything here."""
 import bisect
 import itertools
 import json
@@ -313,7 +314,8 @@ class UI:
         from . import __version__
         self.srv, self.a, self.mode, self.version = srv, a, mode, __version__
         self.ring = deque(maxlen=RING)  # (end perf_counter, endpoint, status, seconds, questions, options[, id])
-        # --ui full: (id, parsed body (or its bytes when it was not JSON), answer bytes, ring row) of the last RECENT
+        # --ui full: (id, parsed body (or its bytes when it was not JSON), answer bytes, ring row, the name of the API
+        # key that made it or None) of the last RECENT
         self.bodies, self.ids = (deque(maxlen=RECENT), itertools.count(1)) if full else (None, None)
         self.wall0, self.perf0 = time.time(), time.perf_counter()
         self.started = started or self.wall0
@@ -346,8 +348,9 @@ class UI:
             body, rid = getattr(request, "_json", None), next(ids)
             row = (t1, endpoint, response.status_code, t1 - t, *size(body), rid)
             ring.append(row)
+            key = (getattr(request, "scope", None) or {}).get("basal.api_key")  # (set by protect with --api-keys)
             bodies.append((rid, body if body is not None else getattr(request, "_body", None),
-                           getattr(response, "body", None), row))
+                           getattr(response, "body", None), row, key.get("name") if key else None))
             return response
         out = recorded if bodies is None else recorded_full
         out.__name__ = f"recorded_{handler.__name__}"
@@ -363,7 +366,10 @@ class UI:
             return Response(self.state(counts), media_type="application/json", headers={"Cache-Control": "no-store"})
 
         async def one(request):
-            data = self.request_json(request.path_params["rid"])
+            data = self.request_json(request.path_params["rid"], request.scope.get("basal.api_key"))
+            if data is False:
+                return JSONResponse({"error": "this request was made with another API key (an admin key reads every "
+                                     "request)", "code": "FORBIDDEN"}, status_code=403)
             if data is None:
                 return JSONResponse({"error": f"not kept: --ui full keeps the last {RECENT} requests",
                                      "code": "NOT_FOUND"}, status_code=404)
@@ -372,13 +378,17 @@ class UI:
                if isinstance(r, Route) and r.path in DECISIONS else r for r in routes]
         return out + [Route("/ui/state", state)] + ([Route("/ui/request/{rid:int}", one)] if self.bodies is not None else [])
 
-    def request_json(self, rid):
+    def request_json(self, rid, key=None):
         """GET /ui/request/<id> (--ui full): the request's metadata, its body as parsed (a body that was not JSON as
-        text) and the answer it got (the bytes sent, as JSON), or None when it is no longer kept."""
+        text) and the answer it got (the bytes sent, as JSON), or None when it is no longer kept. key: the caller's API
+        key record (--api-keys; None without): False when it is neither the key that made the request nor an admin
+        key."""
         kept = next((b for b in self.bodies if b[0] == rid), None)
         if kept is None:
             return None
-        _, body, answer, row = kept
+        _, body, answer, row, owner = kept
+        if key is not None and not key.get("admin", False) and key.get("name") != owner:
+            return False
         if isinstance(body, (bytes, bytearray)):
             body = body.decode("utf-8", "replace")
         meta = {"id": rid, "time": round(self.wall0 + row[0] - self.perf0, 3), "endpoint": row[1], "status": row[2],
