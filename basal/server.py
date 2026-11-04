@@ -1821,7 +1821,9 @@ class Server:
         if body.get("facts", "off") not in ("off", "auto"):
             raise RequestError('facts must be "off" or "auto"')
         if body.get("facts") == "auto":  # append computed calendar / arithmetic facts (PL dates, gaps, VAT)
-            state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+            # (a regex pass over the whole state, ~1 s per MB: off the event loop, which answers /health meanwhile)
+            text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+            state = await asyncio.to_thread(inject_facts, text)
         if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
             if body.get("media") is not None:
                 raise RequestError("give media or images, not both")
