@@ -46,6 +46,8 @@ async def run(a):
     n = 10 + a.n_seq + a.n_conc
     qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else load_questions(a.questions, n)
     bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
+    if not bodies:
+        raise SystemExit("no questions with options in --questions")
     while len(bodies) < n:  # small question files are reused
         bodies += bodies
     async with httpx.AsyncClient(timeout=300) as c:
@@ -139,6 +141,8 @@ def main():
         qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic \
             else load_questions(a.questions, n)
         bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
+        if not bodies:
+            raise SystemExit("no questions with options in --questions")
         while len(bodies) < n:
             bodies += bodies
         if len({json.dumps(b, sort_keys=True) for b in bodies[:n]} | {json.dumps(b, sort_keys=True) for b in bodies[n:2 * n]}) < 2 * n:

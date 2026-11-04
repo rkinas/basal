@@ -132,3 +132,8 @@ def test_h6b_determinism_warns_when_the_mixed_pass_repeats_the_probe(fake_http, 
     with contextlib.redirect_stderr(err):
         lt.main()
     assert not seen["same"] or "distinct" in err.getvalue()
+
+
+def test_n2_a_question_file_without_a_usable_question_fails_fast(fake_http, monkeypatch):
+    monkeypatch.setattr(lt, "load_questions", lambda p, n: [])
+    assert within(lambda: asyncio.run(lt.run(ns())))[0] == "exit"
