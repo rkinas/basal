@@ -1052,6 +1052,26 @@ def kv_dequant(e, bits, keys):
     return (q.view(H, T, D // G, G).float() * step.float() + lo.float()).view(H, T, D).to(dtype)
 
 
+WROWS_BYTES = 64 << 20  # the fp32 code rows an engine keeps (one entry per option-code set, least recently used out)
+
+
+def code_rows(cache, key, make):
+    """cache[key], made by make() when missing: the fp32 output-head rows of one set of option codes. The cache keeps
+    the most recently used sets within WROWS_BYTES (every option count and code set was kept for good: up to ~0.7 GB);
+    an entry is the same rows whenever it is made again."""
+    w = cache.pop(key, None)
+    if w is None:
+        w = make()
+    cache[key] = w  # (most recently used last)
+    size = lambda x: 0 if x is None else int(x.nbytes)  # noqa: E731  (torch and MLX arrays)
+    total = sum(size(x) for x in cache.values())
+    for old in list(cache):
+        if total <= WROWS_BYTES or old == key:
+            break
+        total -= size(cache.pop(old))
+    return w
+
+
 class StateCache:
     """Keys and values of request states (the root of a unit cut at the state boundary: template and state), keyed by a
     hash of their token ids, kept on the GPU within a byte budget with least-recently-used eviction. A request whose
@@ -2399,13 +2419,13 @@ class GraphBackend(EagerBackend):
         rows are kept in fp32: the code logits are computed in fp32 from the hidden state (bf16 logits of magnitude
         16-32 have steps of 0.125, which clumps the probabilities)."""
         key = tuple(sorted({i for ids in lids for i in ids}))
-        if key not in self._wrows:
-            self._wrows[key] = self.model.lm_head.weight.index_select(0, self._to_dev(torch.tensor(key))).float()
+        W = code_rows(self._wrows, key, lambda: self.model.lm_head.weight.index_select(
+            0, self._to_dev(torch.tensor(key))).float())
         col = {t: j for j, t in enumerate(key)}
         K = max(map(len, lids))
         idx = self._to_dev(torch.tensor([[col[i] for i in ids] + [0] * (K - len(ids)) for ids in lids]))
         pad = self._to_dev(torch.tensor([[False] * len(ids) + [True] * (K - len(ids)) for ids in lids]))
-        return self._wrows[key], idx, pad
+        return W, idx, pad
 
     def _letters(self, z, idx, pad, lids):
         p = torch.softmax(z.float().gather(1, idx).masked_fill(pad, float("-inf")), -1).tolist()  # one device sync
@@ -3790,12 +3810,11 @@ class MLXBackend:
         """fp32 rows of the output head for the code ids in key (cached), as GraphBackend._rows: the code logits are
         computed in fp32 from the hidden state (bf16 logits of magnitude 16-32 step by 0.125, which clumps the
         probabilities). None for a quantised head (its logits come from the head itself)."""
-        rows = self.__dict__.setdefault("_wrows", {})
-        if key not in rows:
+        def make():
             m = self.lm
             head = m.model.embed_tokens if m.args.tie_word_embeddings else m.lm_head
-            rows[key] = None if hasattr(head, "scales") else head.weight[self.mx.array(key)].astype(self.mx.float32)
-        return rows[key]
+            return None if hasattr(head, "scales") else head.weight[self.mx.array(key)].astype(self.mx.float32)
+        return code_rows(self.__dict__.setdefault("_wrows", {}), key, make)
 
     def _letters(self, h, lids):
         """Hidden states [n, d] at the readout positions -> softmax over each readout's codes (float32)."""
