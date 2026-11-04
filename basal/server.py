@@ -2537,13 +2537,26 @@ class Server:
     def log_decision(self, body, out):
         """Propensity log (one JSON line per request): the served probabilities q(a) of every question, so production
         feedback can later be used off-policy. `reviewed` is filled in by the caller's feedback, not here."""
-        h = hashlib.sha256(json.dumps([body.get("state"), body.get("questions")], sort_keys=True,
-                                      ensure_ascii=False, default=str).encode()).hexdigest()
+        payload = [body.get("state"), body.get("questions")]
+        media = [hashlib.sha256(str(m.get("data", "") if isinstance(m, dict) else m).encode()).hexdigest()
+                 for m in (body.get("media") or body.get("images") or [])]
+        if media or body.get("lang"):  # (a request without them keeps the key it always had)
+            payload += [media, body.get("lang")]
+        h = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+
+        def finite(v):  # a NaN / inf would be written as the non-standard JSON tokens NaN / Infinity
+            if isinstance(v, float):
+                return v if math.isfinite(v) else None
+            if isinstance(v, dict):
+                return {k: finite(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [finite(x) for x in v]
+            return v
         rec = {"ts": time.time(), "model": self.name, "request_sha256": h, "reviewed": None,
                "answers": {k: {f: v for f, v in a.items() if f in ("type", "choice", "action", "selected", "tool",
                                                                     "tools", "probabilities", "confidence")}
                            for k, a in out["answers"].items()}}
-        self.log.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self.log.write(json.dumps(finite(rec), ensure_ascii=False) + "\n")
 
 
 def add_engine_args(ap):
