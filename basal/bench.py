@@ -28,6 +28,7 @@ import torch
 from . import adapter as adapter_module
 from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend, MLXBackend,
                      MPSBackend, OllamaBackend, SGLangBackend, VLLMBackend, resolve)
+from .jsonl import read_lines
 from .prompt import letter_ids, max_options, model_format, render
 from .server import MODES, adapter_refused, adapter_refused_kind, default_mode
 
@@ -149,7 +150,7 @@ def load_questions(paths, n, seed=0):
     with "questions" are skipped)."""
     if isinstance(paths, (str, Path)):
         paths = [paths]
-    qs = [json.loads(line) for p in paths for line in Path(p).read_text(encoding="utf-8").splitlines() if line.strip()]
+    qs = [json.loads(line) for p in paths for line in read_lines(p) if line.strip()]
     qs = [q for q in qs if "options" in q]
     random.Random(seed).shuffle(qs)
     return qs[:n]

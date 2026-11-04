@@ -43,6 +43,7 @@ import torch
 
 from .agree import QUESTIONS, build, compare, decisions, orders  # noqa: F401 (shared with basal-agree)
 from .engine import ATTN, GraphBackend, resolve
+from .jsonl import read_lines
 from .server import lean_arg, merge_arg
 from .prompt import model_format
 
@@ -148,7 +149,7 @@ def main(argv=None):
             raise SystemExit(f"--against {a.against}: a different tokenizer")
     qs = None
     if a.questions:
-        qs = [json.loads(x) for x in Path(a.questions).read_text(encoding="utf-8").splitlines() if x.strip()]
+        qs = [json.loads(x) for x in read_lines(a.questions) if x.strip()]
         qs = [q for q in qs if "options" in q and 2 <= len(q["options"]) <= (255 if fmt == 2 else 10)][: a.n_questions]
     single, multi, long = build(ref_be.tok, fmt, a.n_single, a.n_multi, a.n_long, a.seed, qs)
     rnd = random.Random(a.seed)

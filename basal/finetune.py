@@ -32,6 +32,7 @@ from . import __version__
 from .calibrate import InputError, load
 from .engine import default_device, resolve
 from .facts import inject as inject_facts
+from .jsonl import read_lines
 from .prompt import letter_ids, max_options, model_format, model_layout, model_option_isolation, model_two_way, render
 from .server import to_items
 
@@ -48,7 +49,7 @@ def split(path, holdout=0.25, seed=0):
     """Labelled JSONL -> (train decisions with their bodies, held-out line texts, skipped counts). A line goes with the
     group of its first decision."""
     bodies, decisions = load(path)
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    lines = read_lines(path)
     side = {}
     for d in decisions:
         side.setdefault(d["line"], in_holdout(d["group"], holdout, seed))
