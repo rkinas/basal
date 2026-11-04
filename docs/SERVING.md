@@ -528,7 +528,9 @@ digests (never plaintext secrets):
 {"keys": [{"name": "laptop", "sha256": "<64-character lowercase SHA-256 hex digest>", "admin": false}]}
 ```
 
-Send the secret as `Authorization: Bearer <secret>` or `X-API-Key: <secret>`. `GET /health` remains open.
+Send the secret as `Authorization: Bearer <secret>` or `X-API-Key: <secret>` (when both are sent, a valid one is
+accepted even if the other is stale). `GET /health` remains open, and so do `HEAD /health` and the path with a
+trailing slash `/health/`, for the probe of a load balancer; every other method and path needs a key.
 `GET /v1/keys` requires an admin key and reports each key's in-memory `last_used` time. File changes take effect
 without restarting the server. MCP at `/mcp` uses the same authentication.
 

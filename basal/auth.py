@@ -1,5 +1,6 @@
 """API-key authentication for basal-serve."""
 import hashlib
+import asyncio
 import hmac
 import json
 import os
@@ -13,23 +14,45 @@ import uuid
 class ApiKeys:
     def __init__(self, path):
         self.path = os.fspath(path)
-        self._lock = threading.Lock()
-        self._signature = None
-        self._loaded_at = None
+        self._lock = threading.Lock()  # the file: a reload may wait for a rewrite in place (never on the event loop)
+        self._usage_lock = threading.Lock()
+        self._good = None  # (signature, records, loaded_at) of the last good read, replaced as ONE tuple: a reader without the lock never sees a half-set state
+        self._bad = None  # (signature, time) of a file that could not be read: not read again for 2 s
         self._usage = {}
         self._warned = False
 
-    def _load(self):
+    def _cached(self):
+        """The records while the file is as it was when read (for 2 s), [] while it is as it was when it failed to read
+        (fail closed, no second wait), else None: the file has to be read."""
         try:
+            stat = os.stat(self.path)
+        except OSError:
+            return None
+        signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        now = time.monotonic()
+        good = self._good  # one read: signature, records and time belong together
+        if good is not None and signature == good[0] and now - good[2] <= 2:
+            return good[1]
+        bad = self._bad
+        if bad is not None and signature == bad[0] and now - bad[1] <= 2:
+            return []
+        return None
+
+    def _load(self):
+        signature = None
+        try:
+            cached = self._cached()
+            if cached is not None:
+                return cached
             stat = os.stat(self.path)
             signature = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
             now = time.monotonic()
-            if signature == self._signature and now - self._loaded_at <= 2:
-                return self._records
             from .textio import read_text
             try:
                 data = json.loads(read_text(self.path))
-            except json.JSONDecodeError:  # the file is being rewritten in place: read it once more after the write
+            except ValueError:  # JSONDecodeError, UnicodeDecodeError (cut inside a character): the file is being
+                # rewritten in place; read it once more after the write. This waits, so check() and usage() reach it
+                # from the event loop only through a thread (acheck, to_thread), and a failure is remembered for 2 s.
                 time.sleep(0.05)
                 data = json.loads(read_text(self.path))
             records = data["keys"]
@@ -38,32 +61,45 @@ class ApiKeys:
                     len(k["sha256"]) != 64 or any(c not in "0123456789abcdefABCDEF" for c in k["sha256"])
                     or not isinstance(k.get("admin", False), bool) for k in records):
                 raise ValueError("invalid API key file")
-            self._signature, self._records, self._warned = signature, records, False
-            self._loaded_at = now
+            self._good, self._warned = (signature, records, now), False
             return records
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
-            self._signature, self._records = None, []
+            self._good = None
+            if signature is not None:
+                self._bad = (signature, time.monotonic())
             if not self._warned:
                 print(f"basal: cannot read API key file: {e}", file=sys.stderr, flush=True)
                 self._warned = True
             return []
 
+    def _records_now(self):
+        records = self._cached()  # without the lock: a reload in another thread does not hold this one up
+        if records is None:
+            with self._lock:
+                records = self._load()
+        return records
+
     def check(self, secret):
-        with self._lock:
-            digest = hashlib.sha256(secret.encode()).hexdigest()
-            for record in self._load():
-                if hmac.compare_digest(digest, record["sha256"].lower()):
-                    return record
+        digest = hashlib.sha256(secret.encode()).hexdigest()
+        for record in self._records_now():
+            if hmac.compare_digest(digest, record["sha256"].lower()):
+                return record
         return None
 
+    async def acheck(self, secret):
+        """check() for the event loop: a read of the file (which may wait for a rewrite) runs in a thread."""
+        if self._cached() is not None:
+            return self.check(secret)
+        return await asyncio.to_thread(self.check, secret)
+
     def touch(self, name):
-        with self._lock:
+        with self._usage_lock:
             self._usage[name] = time.time()
 
     def usage(self):
-        with self._lock:
-            return [{"name": key["name"], "last_used": self._usage.get(key["name"])}
-                    for key in self._load()]
+        records = self._records_now()
+        with self._usage_lock:
+            return [{"name": key["name"], "last_used": self._usage.get(key["name"])} for key in records]
 
 
 async def _json(send, status, body, headers=()):
@@ -87,7 +123,10 @@ def protect(app, keys, cors_origins=()):
             authorization = headers.get(b"authorization", b"").decode("latin1")
             secret = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
             x_key = headers.get(b"x-api-key", b"").decode("latin1")
-            record = next((r for r in (keys.check(s) for s in (x_key, secret) if s) if r is not None), None)
+            for s in (x_key, secret):
+                record = await keys.acheck(s) if s else None
+                if record is not None:
+                    break
             if record is None:
                 if path in ("/v1/decisions", "/decisions"):
                     body = {"error": {"message": "missing or invalid API key", "type": "authentication_error",
@@ -102,7 +141,7 @@ def protect(app, keys, cors_origins=()):
             if record is not None and not record.get("admin", False):
                 await _json(send, 403, {"error": "admin key required", "code": "FORBIDDEN"})
                 return
-            await _json(send, 200, {"keys": keys.usage() if keys else []})
+            await _json(send, 200, {"keys": await asyncio.to_thread(keys.usage) if keys else []})
             return
         await app(scope, receive, send)
 
