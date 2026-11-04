@@ -891,7 +891,7 @@ def conformal_p_min(p_gold, level):
 
 def conformal_needed(level):
     """The fewest decisions of a type that give a coverage level a p_min (ceil((n + 1) level) <= n)."""
-    n = 1
+    n = max(1, int(level / (1 - level)) - 3)  # below this n the condition holds for sure: no walk from 1
     while math.ceil(round((n + 1) * level, 9)) > n:
         n += 1
     return n

@@ -1,6 +1,7 @@
 """Regression tests for fix/numeric-edges (Z-1089)."""
 import asyncio
 import contextlib
+import math
 import signal
 
 import pytest
@@ -37,3 +38,15 @@ def test_z1_concurrency_1_still_collects():
     async def decide(b):
         return {"ok": 1}
     assert asyncio.run(cal.collect(decide, [{}, {}], concurrency=1)) == [{"ok": 1}, {"ok": 1}]
+
+
+@pytest.mark.parametrize("level,n", [(0.9, 9), (0.95, 19), (0.99, 99)])
+def test_z2_the_usual_levels_keep_their_counts(level, n):
+    assert cal.conformal_needed(level) == n
+
+
+def test_z2_a_level_next_to_one_does_not_walk_from_n_1():
+    level = 0.999999999999
+    with within(2):
+        n = cal.conformal_needed(level)
+    assert math.ceil(round((n + 1) * level, 9)) <= n
