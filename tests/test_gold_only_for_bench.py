@@ -11,7 +11,7 @@ def test_z2_a_file_with_a_letter_gold_is_taken_by_loadtest_and_ordercheck(tmp_pa
     from basal import loadtest, ordercheck
     path = tmp_path / "q.jsonl"
     path.write_text(json.dumps(dict(state="s", question="q", options=["a", "b"], gold="B")) + "\n", encoding="utf-8")
-    assert len(bench.load_questions(str(path), 10)) == 1  # the reader both commands call
-    assert loadtest.load_questions is bench.load_questions
+    assert len(bench.questions_or_exit(str(path), 10)) == 1  # the reader both commands call
+    assert loadtest.questions_or_exit is bench.questions_or_exit
     assert "check_gold" not in inspect.getsource(loadtest) + inspect.getsource(ordercheck)
-    assert "load_questions" in inspect.getsource(ordercheck)
+    assert "questions_or_exit" in inspect.getsource(ordercheck)

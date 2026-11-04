@@ -265,7 +265,7 @@ class Gemma4Graph:
             self.merged = self.fp8 = 0
             if fp8 == "nvfp4" and not isinstance(nvfp4_amax, dict):
                 import json
-                with open(nvfp4_amax) as f:
+                with open(nvfp4_amax, encoding="utf-8") as f:
                     nvfp4_amax = json.load(f)
             for i, layer in enumerate(self.layers):
                 layer.to(stream)
@@ -393,7 +393,7 @@ class Gemma4Graph:
         if scope not in ("all", "mlp"):
             raise ValueError(f"--nvfp4-scope {scope!r}: all or mlp")
         if not isinstance(amax, dict):
-            with open(amax) as f:
+            with open(amax, encoding="utf-8") as f:
                 amax = json.load(f)
         build()
         n = 0

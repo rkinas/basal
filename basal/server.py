@@ -104,7 +104,7 @@ def nvfp4_args(a, md=None, quant=None):
     if not path:
         return {}
     import json
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         amax = json.load(f)
     return dict(nvfp4_amax=amax.get("amax", amax), nvfp4_scope=getattr(a, "nvfp4_scope", "all"))
 

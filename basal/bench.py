@@ -162,9 +162,11 @@ def load_questions(paths, n, seed=0):
                 try:
                     q = json.loads(line)
                 except ValueError as e:
-                    raise SystemExit(f"{p}:{lineno}: not JSON ({e})") from None
+                    raise ValueError(f"{p}:{lineno}: not JSON ({e})") from None
+                if isinstance(q, (str, list)):  # a text or a list is no question: skipped, as it always was
+                    continue
                 if not isinstance(q, dict):
-                    raise SystemExit(f"{p}:{lineno}: a line must be a JSON object, not {type(q).__name__}")
+                    raise ValueError(f"{p}:{lineno}: a line must be a JSON object, not {type(q).__name__}")
                 if "options" in q:
                     q = _Item(q)
                     q.src = f"{p}:{lineno}"
@@ -187,6 +189,14 @@ def check_gold(qs):
         g = q["gold"]
         if not (isinstance(g, int) and not isinstance(g, bool) and 0 <= g < len(opts)):
             raise SystemExit(f"{where}: gold {g!r} of {str(q.get('question', ''))[:40]!r} is not an option index 0..{len(opts) - 1}")
+
+
+def questions_or_exit(paths, n):
+    """load_questions for a command: its ValueError (file:line and what is wrong) ends the command with that message."""
+    try:
+        return load_questions(paths, n)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
 
 
 def groups_for(tok, qs, fmt=1):
@@ -312,7 +322,7 @@ def main():
         why = adapter_refused_kind(*MODES.get(m.split("@")[0], ("", None))[:2])
         if why:
             raise SystemExit(adapter_refused(adapter.name, f"--modes {m}", why))
-    qs = load_questions(a.questions, a.n)
+    qs = questions_or_exit(a.questions, a.n)
     check_gold(qs)
     if a.lat_n < 1 or len(qs) < 6:  # the first 5 timed calls are warm-up and dropped: nothing would be left to take a median of
         raise SystemExit(f"basal-bench needs --lat-n >= 1 and at least 6 questions (got {len(qs)} questions, --lat-n {a.lat_n})")

@@ -19,7 +19,7 @@ from pathlib import Path
 import httpx
 
 from . import synth
-from .bench import DEFAULT_QUESTIONS, load_questions
+from .bench import DEFAULT_QUESTIONS, questions_or_exit
 
 
 def body(q, early_exit=None, questions=1):
@@ -44,7 +44,7 @@ async def run(a):
     # warm-up, sequential and concurrent phases ask different requests (as far as the questions go), so an engine with
     # a prefix cache across requests (vLLM, SGLang, llama.cpp) cannot answer a timed request from an earlier phase
     n = 10 + a.n_seq + a.n_conc
-    qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else load_questions(a.questions, n)
+    qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else questions_or_exit(a.questions, n)
     bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
     if not bodies:
         raise SystemExit("no questions with options in --questions")
@@ -143,7 +143,7 @@ def main():
     if a.determinism:
         n = 2 * a.determinism
         qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic \
-            else load_questions(a.questions, n)
+            else questions_or_exit(a.questions, n)
         bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
         if not bodies:
             raise SystemExit("no questions with options in --questions")

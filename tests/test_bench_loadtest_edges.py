@@ -94,7 +94,7 @@ class Client:
 def fake_http(monkeypatch):
     Client.count, Client.hook = 0, staticmethod(lambda count: Reply())
     monkeypatch.setattr(lt.httpx, "AsyncClient", Client)
-    monkeypatch.setattr(lt, "load_questions", lambda p, n: [dict(state="s", question="q", options=["a", "b"])] * n)
+    monkeypatch.setattr(lt, "questions_or_exit", lambda p, n: [dict(state="s", question="q", options=["a", "b"])] * n)
     return Client
 
 
@@ -136,7 +136,7 @@ def test_h6b_determinism_warns_when_the_mixed_pass_repeats_the_probe(fake_http, 
 
 
 def test_n2_a_question_file_without_a_usable_question_fails_fast(fake_http, monkeypatch):
-    monkeypatch.setattr(lt, "load_questions", lambda p, n: [])
+    monkeypatch.setattr(lt, "questions_or_exit", lambda p, n: [])
     assert within(lambda: asyncio.run(lt.run(ns())))[0] == "exit"
 
 

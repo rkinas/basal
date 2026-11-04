@@ -25,12 +25,26 @@ def test_v1_a_file_saved_with_a_bom_is_read(tmp_path):
     assert len(bench.load_questions(p, 10)) == 1
 
 
-@pytest.mark.parametrize("line", ["5", "null", '"a text with options"', "{broken"])
-def test_v1_a_row_that_is_not_an_object_names_file_and_line(tmp_path, line):
+@pytest.mark.parametrize("line", ["5", "null", "{broken", "true"])
+def test_v1_a_row_that_is_not_an_object_names_file_and_line_in_a_ValueError(tmp_path, line):
     p = tmp_path / "q.jsonl"
     p.write_text(GOOD + "\n" + line + "\n", encoding="utf-8")
-    with pytest.raises(SystemExit, match=r"q\.jsonl:2"):
+    with pytest.raises(ValueError, match=r"q\.jsonl:2"):
         bench.load_questions(p, 10)
+
+
+@pytest.mark.parametrize("line", ['"a text"', "[1, 2]"])
+def test_v1_a_text_or_a_list_row_is_skipped_as_on_main(tmp_path, line):
+    p = tmp_path / "q.jsonl"
+    p.write_text(line + "\n" + GOOD + "\n", encoding="utf-8")
+    assert len(bench.load_questions(p, 10)) == 1
+
+
+def test_v1_the_command_ends_with_the_message_not_a_traceback(tmp_path):
+    p = tmp_path / "q.jsonl"
+    p.write_text(GOOD + "\n{broken\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"q\.jsonl:2"):
+        bench.questions_or_exit(p, 10)
 
 
 def test_v2_a_labelled_file_with_a_bom_is_read(tmp_path):
@@ -77,20 +91,33 @@ def test_e3_different_names_keep_the_plain_id(tmp_path):
     assert ids(tmp_path) == ["a", "b"]
 
 
-@pytest.mark.parametrize("value", ["", "tmpcache", "./cache"])
-def test_e4_an_empty_or_relative_xdg_cache_home_is_ignored(monkeypatch, value):
+def agree_cache_default(monkeypatch):
+    """The default of agree's --cache as the command builds it."""
+    seen = {}
+
+    def grab(self, args=None, namespace=None):
+        seen["cache"] = self.get_default("cache")
+        raise SystemExit(0)
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", grab)
+    with pytest.raises(SystemExit):
+        agree.main([])
+    return Path(seen["cache"])
+
+
+@pytest.mark.parametrize("value", ["", "cache/here"])
+def test_e4_an_empty_or_relative_xdg_cache_home_is_ignored_by_the_cache_option(monkeypatch, value):
     monkeypatch.setenv("XDG_CACHE_HOME", value)
-    assert agree.cache_home() == Path.home() / ".cache"
+    assert agree_cache_default(monkeypatch) == Path.home() / ".cache" / "basal" / "agree"
 
 
-def test_e4_an_absolute_one_is_used(monkeypatch, tmp_path):
+def test_e4_an_absolute_one_is_used_by_the_cache_option(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    assert agree.cache_home() == tmp_path
+    assert agree_cache_default(monkeypatch) == tmp_path / "basal" / "agree"
 
 
-def test_e4_none_gives_the_home_cache(monkeypatch):
+def test_e4_none_gives_the_home_cache_in_the_cache_option(monkeypatch):
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
-    assert agree.cache_home() == Path.home() / ".cache"
+    assert agree_cache_default(monkeypatch) == Path.home() / ".cache" / "basal" / "agree"
 
 
 @pytest.fixture
@@ -109,3 +136,25 @@ def test_e6_the_tokenizer_and_config_of_a_utf8_model_are_read_under_ansi(tmp_pat
     assert interpolate.tokenizer_key(tmp_path / "tokenizer.json")[1] == {"\u0101": 0, "b": 1}
     assert interpolate.tokenizer_settings(tmp_path / "tokenizer.json")["model"]["vocab"]["\u0101"] == 0
     assert interpolate.config_key(tmp_path / "config.json")["architectures"] == ["\u0101"]
+
+
+@pytest.mark.parametrize("name", ["gdn_graph", "server", "gemma4_graph", "interpolate", "calibrate", "bench", "loadtest", "agree"])
+def test_e6_every_text_file_these_modules_open_names_its_encoding(name):
+    """open() and read_text() / write_text() without an encoding use the locale of the machine (cp1252 on Windows)."""
+    import ast
+    tree = ast.parse((Path(__file__).resolve().parent.parent / "basal" / f"{name}.py").read_text(encoding="utf-8"))
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        kw = {k.arg for k in node.keywords}
+        if isinstance(f, ast.Name) and f.id == "open":
+            mode = node.args[1].value if len(node.args) > 1 and isinstance(node.args[1], ast.Constant) else next(
+                (k.value.value for k in node.keywords if k.arg == "mode" and isinstance(k.value, ast.Constant)), "r")
+            if "b" not in str(mode) and "encoding" not in kw:
+                bad.append(node.lineno)
+        elif isinstance(f, ast.Attribute) and f.attr in ("read_text", "write_text") and "encoding" not in kw:
+            if not (f.attr == "write_text" and len(node.args) > 1) and not (f.attr == "read_text" and node.args):
+                bad.append(node.lineno)
+    assert bad == [], f"basal/{name}.py: text open without encoding at lines {bad}"
