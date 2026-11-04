@@ -18,7 +18,10 @@ Input (JSONL): one /v1/systemone request per line, every question with its corre
           (0 = first level), key or text; act: an outcome, as for choice (yes / no for true / false outcomes);
           multi: the list of labels that apply (keys or descriptions; [] = none)
   group   optional, on the line or on a question: decisions of one group (twins, duplicates, one customer) stay on
-          the same side of the FIT / CERT split; default: one group per line (its questions share the state)
+          the same side of the FIT / CERT split; default: one group per line (its questions share the state). The
+          bound of a threshold counts every decision as independent: when a type or task has more FIT decisions than
+          groups (several claims or fields of one document, questions about one state), the report warns that errors
+          shared within a group make the bound optimistic
   family  optional, on the line or on a question: the task family of the leave-one-family-out ECE gate (default: the
           question name)
   id      optional, used in messages.
@@ -1014,6 +1017,7 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
         cert = [r for r in cert_rows if r["prim"] == t]
         # as served: a choice question of a format-2 file gets its option-count bucket temperature first
         report["types"][t] = dict(n=len(rs), n_fit=len(rs) - len(cert), n_cert=len(cert),
+                                  fit_groups=len({r["group"] for r in rs if not is_cert(r["group"])}),
                                   accuracy=float(np.mean([ok for _, ok in served(rs, {})])),
                                   T_shipped=shipped_T.get(t), T=temps.get(t), source=source.get(t, "default 1.0"),
                                   ece_shipped=ece(served(cert, shipped_T, shipped_B)),
@@ -1108,6 +1112,7 @@ def fit_tasks(rows, targets, shipped=None):
         cf = [(r["c"], r["ok"]) for r in rs if not is_cert(r["group"])]
         cc = [(r["c"], r["ok"]) for r in rs if is_cert(r["group"])]
         e = dict(n=len(rs), n_fit=len(cf), n_cert=len(cc), accuracy=float(np.mean([r["ok"] for r in rs])),
+                 fit_groups=len({r["group"] for r in rs if not is_cert(r["group"])}),
                  method=METHOD, targets={})
         for risk in targets:
             old = ((shipped or {}).get(t) or {}).get(str(float(risk)))
@@ -1261,11 +1266,22 @@ def task_table(report):
     return "\n".join(lines)
 
 
+def clustered(name, n_fit, groups):
+    """The warning of a type or task with more FIT decisions than groups (None when each group has one)."""
+    if not groups or n_fit <= groups:
+        return None
+    return (f"{name}: {n_fit} FIT decisions in {groups} groups ({n_fit / groups:.1f} per group): the bound counts every "
+            "decision as independent, so when the decisions of one group share their errors (claims or fields of one "
+            "document, questions about one state) the certified thresholds are optimistic")
+
+
 def task_warnings(report, dropped=()):
     out = []
     for t, e in report.items():
         if e["n"] < RECOMMENDED:
             out.append(f"{t}: only {e['n']} labelled decisions: the bounds are loose")
+        if clustered(t, e["n_fit"], e.get("fit_groups")):
+            out.append(clustered(t, e["n_fit"], e.get("fit_groups")))
         for risk, x in e["targets"].items():
             if x["confidence"] is None:
                 out.append(f"max_error {float(risk):g}: {t} has no certified threshold; its answers report "
@@ -1286,6 +1302,8 @@ def warnings(report, targets):
     if not report["n_fit"] or not report["n_cert"]:
         out.append("one side of the FIT / CERT split is empty: use more groups")
     for t, r in report["types"].items():
+        if clustered(t, r["n_fit"], r.get("fit_groups")):
+            out.append(clustered(t, r["n_fit"], r.get("fit_groups")))
         if r["source"].startswith("fitted") and any(math.isclose(r["T"], x) for x in T_GRID):
             out.append(f"{t}: the fitted temperature is at the edge of the search ({r['T']:.2f}): too few errors "
                        "or too few decisions to fit it; label more or raise --min-per-type")
