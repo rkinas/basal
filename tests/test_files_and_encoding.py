@@ -2,10 +2,12 @@
 import argparse
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
 
+from basal import agree
 from basal import bench
 from basal import calibrate as cal
 from basal import loadtest
@@ -71,3 +73,19 @@ def test_e3_different_names_keep_the_plain_id(tmp_path):
     (tmp_path / "a.md").write_text("# A\n\ntext", encoding="utf-8")
     (tmp_path / "b.md").write_text("# B\n\ntext", encoding="utf-8")
     assert ids(tmp_path) == ["a", "b"]
+
+
+@pytest.mark.parametrize("value", ["", "tmpcache", "./cache"])
+def test_e4_an_empty_or_relative_xdg_cache_home_is_ignored(monkeypatch, value):
+    monkeypatch.setenv("XDG_CACHE_HOME", value)
+    assert agree.cache_home() == Path.home() / ".cache"
+
+
+def test_e4_an_absolute_one_is_used(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert agree.cache_home() == tmp_path
+
+
+def test_e4_none_gives_the_home_cache(monkeypatch):
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    assert agree.cache_home() == Path.home() / ".cache"
