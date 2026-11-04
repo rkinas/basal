@@ -143,10 +143,10 @@ def listing(cands, idx, label, title):
     for n, i in enumerate(idx, 1):
         g = cands[i][2]
         if g is not None and g != group:
-            lines.append(f"[{g}]")
+            lines.append("[" + g.replace("\n", " ") + "]")
         group = g
         names[i] = f"{label} {n}"
-        lines.append(f"{names[i]}: {cands[i][1]}")
+        lines.append(f"{names[i]}: " + cands[i][1].replace("\n", "\n  "))  # (a continuation line is indented: no forged entry)
     return "\n".join(lines), names
 
 
