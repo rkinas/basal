@@ -58,6 +58,8 @@ def state(rnd, lang, tokens):
 def items(n, tokens=1500, seed=0, options=None, spread=0.33, langs=("pl", "en"), long_frac=0.0, long_tokens=(3000, 10000)):
     """n items; state lengths uniform in tokens * (1 +- spread), except a share long_frac of long states (uniform in
     long_tokens; a long-document tail); options: fixed count, else 2..6 at random."""
+    if options is not None and options < 2:
+        raise ValueError(f"options must be at least 2, not {options}")
     rnd = random.Random(seed)
     out = []
     for i in range(n):

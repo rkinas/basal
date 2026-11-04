@@ -11,6 +11,7 @@ import pytest
 from basal import agree
 from basal import bench
 from basal import calibrate as cal
+from basal import synth
 from basal import tasks
 
 
@@ -98,3 +99,13 @@ def test_z6_a_number_of_400_digits_is_none(integer):
 
 def test_z6_an_ordinary_number_still_parses():
     assert tasks.parse_number("12 345") == 12345
+
+
+@pytest.mark.parametrize("options", [0, 1, -3])
+def test_z7_options_below_2_are_refused(options):
+    with pytest.raises(ValueError, match="options"):
+        synth.items(3, options=options)
+
+
+def test_z7_two_options_still_work():
+    assert len(synth.items(3, options=2)) == 3
