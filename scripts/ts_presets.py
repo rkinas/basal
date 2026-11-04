@@ -61,7 +61,8 @@ def ts_source():
 def fixture_source(old):
     from basal.presets import POLICIES, PRESETS, guard, route
     out = {"presets": PRESETS, "langs": lang_cases(), "policies": POLICIES,
-           "guard": [dict(c, expect=guard(c["answers"], c["policy"], c.get("max_error"))) for c in old["guard"]],
+           "guard": [dict(c, expect=guard(c["answers"], c["policy"], c.get("max_error"), c.get("battery")))
+                     for c in old["guard"]],
            "route": [dict(c, expect=route(c["answers"], 0.6, c.get("max_error"))) for c in old["route"]]}
     return json.dumps(out, indent=1, ensure_ascii=False)
 
