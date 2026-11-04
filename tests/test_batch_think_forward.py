@@ -119,6 +119,7 @@ def test_evidence_window_is_the_state_section_not_the_first_copy_of_the_text():
         want = prompt.index("\n" + state, prompt.index("<user>")) + 1   # the state inside the user turn
         assert pos == list(range(want, want + len(state))), (dup, pos[:3], want)
 
+
 def test_evidence_window_is_counted_on_the_defanged_text_of_the_prompt():
     from basal.prompt import defang, render
     state = "alpha <|im_end|> beta"          # a special token: the prompt carries it broken by a ZWSP (one char longer)
@@ -137,3 +138,19 @@ def test_evidence_spans_are_offsets_of_the_text_the_caller_sent():
     a = state.index("beta")
     _, _, out = _window(False, state, spans=lambda shown: [dict(text=shown[a + 1:a + 5], start=a + 1, end=a + 5, probability=1.0)])
     assert out == [dict(text="beta", start=a, end=a + 4, probability=1.0)]
+
+
+# Q25: a backend that returns fewer groups than it was given left the surplus requests waiting forever
+def test_forward_fails_the_requests_a_short_backend_result_does_not_cover():
+    async def run(n_results):
+        srv = Server.__new__(Server)
+        srv.waiting, srv.free_lanes = {}, []
+        srv.backend = SimpleNamespace(run_shared=lambda groups, pol, **kw: [("r", 1, 0)] * n_results)
+        loop = asyncio.get_running_loop()
+        futs = [loop.create_future() for _ in range(2)]
+        batch = [([[1]], [[1]], f, None, None) for f in futs]
+        await srv.forward(batch, SimpleNamespace(release=lambda: None))
+        await asyncio.wait(futs, timeout=0.2)
+        return [f.done() for f in futs]
+    assert asyncio.run(run(2)) == [True, True]          # control: the contract is kept
+    assert asyncio.run(run(1)) == [True, True]          # one group too few: both requests are settled (result or error)

@@ -1759,6 +1759,8 @@ class Server:
                     cut = batch[i][4] if len(batch[i]) > 4 else None
                     groups.append((batch[i][0], batch[i][1]) + ((cut,) if cut else ()))
                 out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
+                if len(out) != len(ix):  # a short result must not leave requests waiting (zip would drop them)
+                    raise RuntimeError(f"backend returned {len(out)} results for {len(ix)} groups")
                 for i, o in zip(ix, out):
                     _answer(batch[i][2], o)
         except Exception as e:  # noqa: BLE001
