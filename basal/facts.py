@@ -27,7 +27,7 @@ Money arithmetic, appended after the facts above, at most MAX_TOTAL lines in all
   state2 = inject(state)              # the same function adds the facts in training
 """
 import re
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 
@@ -36,6 +36,7 @@ MONTHS = ["stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca",
 WEEKDAYS = ["poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela"]
 HEADER = "Fakty pomocnicze (wyliczone automatycznie, bez oceny prawnej):"
 MAX_DATES, MAX_DURATIONS, MAX_AMOUNTS = 6, 3, 3
+MAX_CHARS = 1_000_000  # basal-serve's "facts": "auto" reads a state of at most this many characters (HTTP 422 beyond)
 
 DATE_TXT = re.compile(r"\b(\d{1,2}) (" + "|".join(MONTHS) + r") (\d{4})(?: r\.)?")
 DATE_NUM = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b")
@@ -45,16 +46,24 @@ DUR_WORD = re.compile(r"\b(tydzień|tygodnia|miesiąc|miesiąca|rok|roku)\b")
 YEAR_BEFORE = re.compile(r"\d{4}(?:-\d{2}-\d{2})?\s+$")  # "2025 roku", "2025-03-03 roku": part of a date
 AGO = re.compile(r"\b(\d{1,3}) (dni|dzień) temu\b")
 TODAY = re.compile(r"\b(?:[Dd]ziś|[Dd]zisiaj)(?: jest| mamy|:)? ")
-AMOUNT = re.compile(r"(?<![\d,.])\b(\d{1,3}(?:[  ]\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?) zł\b")
+# Not the start of an amount: a digit group whose group before it is itself a group of the same run ("… 111 111").
+# The run's earlier group reads the same groups to the same end, so the amount was found there or does not exist;
+# without this, every group of a long run with no "zł" after it rescanned the run to its end (quadratic: 40 kB of
+# "111 " took 14 s).
+IN_RUN = r"(?!(?<=[ \u00a0]\d{3}[ \u00a0])\d{3})"
+IN_RUN_SP = r"(?!(?<=[  ]\d{3}[  ])\d{3})"  # the same for AMOUNT, whose groups are separated by a space only
+AMOUNT = re.compile(r"(?<![\d,.])\b(" + IN_RUN_SP + r"\d{1,3}(?:[  ]\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?"
+                    r"|\d+(?:,\d{2})?) zł\b")
 VAT = re.compile(r"(?<![\d,.])\b(23|8|5) ?%")
 VAT_CTX = re.compile(r"\bVAT\b|\bpodat\w* od towarów")
 
 # money arithmetic
 MAX_TOTAL, MAX_COMPARE, MAX_PLAIN, MAX_EURO = 12, 6, 3, 3
-AMT = r"\d{1,3}(?:[ \u00a0]\d{3})*(?:,\d{2})?"
-STATED = re.compile(r"(?<![\d,.])\b(\d{1,3}(?:[ \u00a0]\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)"
+AMT = IN_RUN + r"\d{1,3}(?:[ \u00a0]\d{3})*(?:,\d{2})?"
+STATED = re.compile(r"(?<![\d,.])\b(" + IN_RUN + r"\d{1,3}(?:[ \u00a0]\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?"
+                    r"|\d+(?:,\d{2})?)"
                     r"[ \u00a0]?(?:zł|PLN)\b")
-EURO_AMT = r"(?<![\d,])\b(\d{1,3}(?:[ \u00a0]\d{3})*(?:,\d{1,2})?)[ \u00a0]?(?:euro\b|EUR\b|€)"
+EURO_AMT = r"(?<![\d,])\b(" + IN_RUN + r"\d{1,3}(?:[ \u00a0]\d{3})*(?:,\d{1,2})?)[ \u00a0]?(?:euro\b|EUR\b|€)"
 EURO = re.compile(EURO_AMT)
 RATE = r"(\d{1,2},\d{2,4})[ \u00a0]?(?:zł|PLN)\b"
 RATE_ANY = re.compile(r"(?<![\d,])\b" + RATE)
@@ -73,6 +82,8 @@ TIER = re.compile(r"(?<![\d,])\b(" + AMT + r") zł(?: netto| brutto)?(?: za (?:s
                   r" (?:szt\.|sztuk)")
 QTY = re.compile(r"(?<![\d,])(?<!\d[ \u00a0])\b(\d{1,5})[ \u00a0](?:szt\.|sztuk[ia]?\b)")
 QTY_PRE = ("poniżej ", "od ", "do ", "powyżej ", "najmniej ", "min. ", "–", "-")
+EQ_NEXT = re.compile(r"\s*=")  # "1 EUR =": the euro of a rate
+TIMES_NEXT = re.compile(r"[ \u00a0]?×")  # "5 szt. × 12,00 zł": a product line, not the ordered quantity
 FEE = re.compile(r"\b(?:[Dd]ostawa|[Ww]ysyłka|[Tt]ransport|[Pp]rzesyłka|[Kk]oszty? (?:dostawy|wysyłki|transportu|przesyłki))\b")
 
 
@@ -125,27 +136,21 @@ def _dates(text):
                 found.append((m.start(), date(*conv(m.groups()))))
             except ValueError:
                 pass
-    out = []
-    for _, d in sorted(found):
-        if d not in out:
-            out.append(d)
-    return out
+    return list(dict.fromkeys(d for _, d in sorted(found)))
 
 
 def _durations(text):
-    out = []
+    out = {}  # (n, unit) in order of first appearance
     for m in DURATION.finditer(text):
         n, u = int(m.group(1)), m.group(2)
         unit = "d" if u.startswith("d") else "w" if u.startswith("ty") else "m" if u.startswith("mie") else "y"
-        if (n, unit) not in out and not text[m.end():m.end() + 5].startswith(" temu"):
-            out.append((n, unit))
+        if not text[m.end():m.end() + 5].startswith(" temu"):
+            out.setdefault((n, unit))
     for m in DUR_WORD.finditer(text):  # "w terminie tygodnia", "miesiąca", "roku" = 1 unit
         if YEAR_BEFORE.search(text[max(0, m.start() - 20):m.start()]):
             continue
-        unit = {"ty": "w", "mi": "m", "ro": "y"}[m.group(1)[:2]]
-        if (1, unit) not in out:
-            out.append((1, unit))
-    return out[:MAX_DURATIONS]
+        out.setdefault((1, {"ty": "w", "mi": "m", "ro": "y"}[m.group(1)[:2]]))
+    return list(out)[:MAX_DURATIONS]
 
 
 def _plus(d, n, unit):
@@ -210,17 +215,24 @@ def _rates(text):
     explicit = {m.start(1): (m.start(2), m.group(2)) for m in EURO_X_RATE.finditer(text)}
     rates += list(explicit.values())
     rates = [(p, r) for p, r in rates if 1 < _dec(r) < 10]
-    return rates, {k: v for k, v in explicit.items() if v in rates}
+    kept = set(rates)
+    return rates, {k: v for k, v in explicit.items() if v in kept}
 
 
 def _vat_rates(text):
     """The VAT rates a text states: 23, 8 or 5% (not a decimal like 13,5%) with "VAT" or "podatek od towarów (i usług)"
     in the same sentence; "5% wartości przedmiotu sporu" or "stopa referencyjna 5%" is not a VAT rate."""
     bounds = [m.start() for m in BOUND.finditer(text)]
+    ctx = [(m.start(), m.end()) for m in VAT_CTX.finditer(text)]  # (they cannot overlap: these are all of them)
+    has = {}  # sentence -> it names VAT (a context match lies inside it)
     out = set()
     for m in VAT.finditer(text):
         i = bisect_left(bounds, m.start())
-        if VAT_CTX.search(text, bounds[i - 1] + 1 if i else 0, bounds[i] if i < len(bounds) else len(text)):
+        if i not in has:
+            a, b = bounds[i - 1] + 1 if i else 0, bounds[i] if i < len(bounds) else len(text)
+            j = bisect_left(ctx, (a,))
+            has[i] = j < len(ctx) and ctx[j][1] <= b
+        if has[i]:
             out.add(int(m.group(1)))
     return out
 
@@ -237,13 +249,18 @@ def _money(text, covered):
     # unit price, fee, budget, spending), "subj" (a labelled amount or a lone line price, compared via the pool)
     st = [dict(s=m.start(), v=_dec(m.group(1)), use=None, lab=(LABEL.match(text, m.end()) or [None, None])[1])
           for m in STATED.finditer(text)]
+    at = {a["s"]: a for a in st}  # (in text order: lookups by position, not scans of every amount per lookup)
+    starts = [a["s"] for a in st]
 
     def stated_at(pos):
-        return next((a for a in st if a["s"] == pos), None)
+        return at.get(pos)
 
     def first_free(a, n):
         lim = a + len(_cut(text, a, n))
-        return next((x for x in st if a <= x["s"] < lim and x["use"] is None), None)
+        for i in range(bisect_left(starts, a), bisect_left(starts, lim)):
+            if st[i]["use"] is None:
+                return st[i]
+        return None
 
     calc, refs, subjects = [], [], []
 
@@ -256,11 +273,12 @@ def _money(text, covered):
     distinct = {}
     for _, r in rates:
         distinct.setdefault(_dec(r), r)
-    eur = []
+    eur, seen = [], set()
     for m in EURO.finditer(text):
-        if text[max(0, m.start() - 3):m.start()] == "za " or re.match(r"\s*=", text[m.end():]):
+        if text[max(0, m.start() - 3):m.start()] == "za " or EQ_NEXT.match(text, m.end()):
             continue  # the "za 1 euro" / "1 EUR =" of a rate
-        if _dec(m.group(1)) not in [v for _, v in eur]:
+        if _dec(m.group(1)) not in seen:
+            seen.add(_dec(m.group(1)))
             eur.append((m.start(), _dec(m.group(1))))
     for p, v in eur[:MAX_EURO]:
         if p in explicit:
@@ -283,11 +301,12 @@ def _money(text, covered):
     m = BUDGET.search(text)
     b = first_free(m.end(), 80) if m else None
     if b:
-        used = []
+        used, taken = [], set()
         for u in USED.finditer(text):
             x = first_free(u.end(), 40) if sent(u.start()) in (sent(b["s"]), sent(b["s"]) + 1) else None
-            if x and x is not b and all(x is not y for _, y in used):
+            if x and x is not b and x["s"] not in taken:
                 used.append((u.group(1), x))
+                taken.add(x["s"])
         if used:
             r = b["v"] - sum(x["v"] for _, x in used)
             calc.append(f"budżet {_pl_amount(b['v'])} − " + " − ".join(f"{w} {_pl_amount(x['v'])}" for w, x in used)
@@ -324,9 +343,13 @@ def _money(text, covered):
     tiers = list(TIER.finditer(text))
     if len(tiers) >= 2:
         spans = [(m.start(), m.end()) for m in tiers]
+
+        def in_tier(pos):
+            i = bisect_right(spans, (pos, float("inf"))) - 1
+            return i >= 0 and pos < spans[i][1]
         qs = {int(m.group(1)) for m in QTY.finditer(text)
-              if not any(s <= m.start() < e for s, e in spans) and not re.match(r"[ \u00a0]?×", text[m.end():])
-              and not text[:m.start()].endswith(QTY_PRE)}
+              if not in_tier(m.start()) and not TIMES_NEXT.match(text, m.end())
+              and not text.endswith(QTY_PRE, 0, m.start())}
         if len(qs) == 1:
             q, hits = qs.pop(), []
             for m in tiers:
@@ -383,24 +406,40 @@ def _money(text, covered):
     pool += [(a["v"], 1, -100 - i) for i, a in enumerate(st) if a["use"] is None]
 
     # 7. comparisons (symbols only)
-    uniq = []
+    first = {}
     for x in pool:
-        if all((x[0], x[1]) != (y[0], y[1]) for y in uniq):
-            uniq.append(x)
-    n_plain = sum(x[1] == 1 for x in uniq)
-    pairs = []
-    for i, x in enumerate(uniq):
-        for j in range(i + 1, len(uniq)):
-            y = uniq[j]
-            n = (x[1] == 1) + (y[1] == 1)
-            if x[2] != y[2] and (n < 2 or n_plain <= MAX_PLAIN):
-                pairs.append((n, i, j))
+        first.setdefault((x[0], x[1]), x)  # the first of each (value, kind), in pool order
+    uniq = list(first.values())
     comps = []
-    for _, i, j in sorted(pairs)[:MAX_COMPARE]:
+    for _, i, j in _first_pairs(uniq, MAX_COMPARE):
         x, y = (uniq[i], uniq[j]) if uniq[i][1] <= uniq[j][1] else (uniq[j], uniq[i])
         op = ">" if x[0] > y[0] else "<" if x[0] < y[0] else "="
         comps.append(f"{_pl_amount(x[0])} {op} {_pl_amount(y[0])}")
     return calc, comps
+
+
+def _first_pairs(uniq, k):
+    """The first k of the sorted (n, i, j), i < j, n = how many of the two are other stated amounts (kind 1), of the
+    pairs of different groups (pairs of two kind-1 amounts only when there are at most MAX_PLAIN of them), without
+    building every pair: a text with thousands of amounts made all of their pairs (quadratic time and memory)."""
+    plain = [i for i, x in enumerate(uniq) if x[1] == 1]
+    other = [i for i, x in enumerate(uniq) if x[1] != 1]
+    out = []
+    for n in (0, 1, 2):
+        if n == 2 and len(plain) > MAX_PLAIN:
+            break
+        for i, x in enumerate(uniq):
+            need = n - (x[1] == 1)  # how many kind-1 amounts j adds
+            if need not in (0, 1):
+                continue
+            js = plain if need else other
+            for t in range(bisect_right(js, i), len(js)):
+                j = js[t]
+                if x[2] != uniq[j][2]:
+                    out.append((n, i, j))
+                    if len(out) == k:
+                        return out
+    return out
 
 
 def facts(text):

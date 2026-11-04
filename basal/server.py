@@ -52,7 +52,7 @@ from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFB
                      resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
-from .facts import inject as inject_facts
+from .facts import MAX_CHARS as FACTS_MAX_CHARS, inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, defang, lang_of, letter_ids,
@@ -1842,8 +1842,12 @@ class Server:
         if body.get("facts", "off") not in ("off", "auto"):
             raise RequestError('facts must be "off" or "auto"')
         if body.get("facts") == "auto":  # append computed calendar / arithmetic facts (PL dates, gaps, VAT)
-            # (a regex pass over the whole state, ~1 s per MB: off the event loop, which answers /health meanwhile)
+            # (a regex pass over the whole state, linear in its length: off the event loop, which answers /health
+            # meanwhile)
             text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+            if len(text) > FACTS_MAX_CHARS:
+                raise RequestError(f'facts "auto" reads a state of at most {FACTS_MAX_CHARS} characters, this one has '
+                                   f'{len(text)}: send "facts": "off" or a shorter state')
             state = await asyncio.to_thread(inject_facts, text)
         if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
             if body.get("media") is not None:
