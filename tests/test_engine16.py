@@ -277,27 +277,69 @@ def test_cascade_why(monkeypatch):
     assert be._cascade_why is None and not E.cascade_ok(be.model.config)
 
 
+def split_group(be, rnd, roots=1, root_prompt=False):
+    """A group split into parts (be.BRANCH_TOKENS 12): 8 prompts of 6 tokens below each root (roots: how many
+    different roots of the same length), the root itself as one more prompt with root_prompt; and a pass-1 row counter."""
+    toks = []
+    for r in range(roots):
+        state = [1 + r] + [rnd.randrange(3, 50) for _ in range(23)]
+        toks += [state + [20 + q % 3, 21, 22 + q, 30, 31, 32] for q in range(8)]
+    if root_prompt:
+        toks.append(list(toks[0][:24]))
+    be.BRANCH_TOKENS = 12
+    rows, orig = [], be._graph
+    be._graph = lambda B, L: (rows.append(B), orig(B, L))[1]
+    return toks, [[30, 31]] * len(toks), rows
+
+
 @pytest.mark.parametrize("cached", [False, True])
 def test_parts_of_a_split_group_compute_their_root_once(cached):
     """A group with more than BRANCH_TOKENS below its root (a rank stage over many passages in one context) is split
     into parts; they share the group's root, computed in one pass-1 row and read by the other parts from a store
-    (the state cache, or the call's own without one): 2.5.2 ran pass 1 once per part. Every readout still equals its
-    prompt run alone."""
+    (the state cache, without counting a hit, or the call's own without one): 2.5.2 ran pass 1 once per part. Every
+    readout still equals its prompt run alone."""
     from basal.engine import StateCache
-    rnd = random.Random(0)
-    state = [1] + [rnd.randrange(3, 50) for _ in range(23)]
-    toks = [state + [20 + q % 3, 21, 22 + q, 30, 31, 32] for q in range(8)]  # 8 x 6 tokens below the root
-    lids = [[30, 31]] * len(toks)
     be = Stub(tiny())
-    be.BRANCH_TOKENS = 12
+    toks, lids, rows = split_group(be, random.Random(0))
     if cached:
         be.state_cache = StateCache(1e9)
-    rows, orig = [], be._graph
-    be._graph = lambda B, L: (rows.append(B), orig(B, L))[1]
-    g = (toks, lids, len(state)) if cached else (toks, lids)
+    g = (toks, lids, 24) if cached else (toks, lids)
     assert len(be._units([g], share=True)) > 1
     check(be, [g])
     assert rows == [1]  # one pass-1 forward of one row
+    if cached:
+        assert be.state_cache.stats()["hits"] == 0  # (reuse inside the request is no cache hit)
+
+
+def test_split_roots_are_shared_only_where_exact_and_safe():
+    """Parts share a root only when it is the same tokens (two roots of one length in one group keep theirs), never
+    with a readout inside the root (a prompt that is the root itself), not through an 8-bit state cache (its entries
+    are quantised), not while another call holds the call store, and not when the root does not fit that store; then
+    every part computes its root as before. Every readout equals its prompt run alone in each case."""
+    from basal.engine import StateCache
+    be = Stub(tiny())
+    toks, lids, rows = split_group(be, random.Random(1), roots=2)
+    check(be, [(toks, lids)])
+    assert sum(rows) == 2  # one pass-1 row per root, each shared by its own parts
+    be = Stub(tiny())
+    toks, lids, rows = split_group(be, random.Random(2), root_prompt=True)
+    check(be, [(toks, lids)])
+    be = Stub(tiny())
+    toks, lids, rows = split_group(be, random.Random(3))
+    be.state_cache = StateCache(1e9, bits=8)
+    n = len(be._units([(toks, lids, 24)], share=True))
+    check(be, [(toks, lids, 24)])
+    assert sum(rows) >= n > 1  # every part its own pass-1 row
+    be = Stub(tiny())
+    toks, lids, rows = split_group(be, random.Random(4))
+    with be._call_store:  # another call holds it
+        check(be, [(toks, lids)])
+    assert sum(rows) > 1
+    be = Stub(tiny())
+    toks, lids, rows = split_group(be, random.Random(5))
+    be._free_memory = lambda: be.PASS2_RESERVE  # no room beyond the reserve
+    check(be, [(toks, lids)])
+    assert sum(rows) > 1
 
 
 def test_pass2_graphs():

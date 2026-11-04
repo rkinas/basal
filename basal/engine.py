@@ -1156,6 +1156,13 @@ class StateCache:
         with self.lock:
             return key in self.entries
 
+    def peek(self, key):
+        """A stored entry's keys / values without counting a hit or a miss or updating its recency (a root that parts of
+        one request share, _shared_roots), or None."""
+        with self.lock:
+            e = self.entries.get(key)
+        return None if e is None else self._unpack(e[0])
+
     def put(self, key, kv, tokens=None, replaces=None):
         """Stores a state's keys / values; with its token ids (tokens) it is also found by states that begin with it.
         replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step)."""
@@ -2595,7 +2602,7 @@ class GraphBackend(EagerBackend):
                     traceback.clear_frames(e.__traceback__)  # (the failed forward's tensors, held by the error)
                     torch.cuda.empty_cache()
                     self.one_forward = min(self.one_forward, L - 1)
-                    return self._tree_hidden(packs, idx, keys, hits)
+                    return self._tree_hidden(packs, idx, keys, hits, store)
         else:
             L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(b, self.BATCHES)
             g, ids, kv, *ro, h1 = self._graph(B, L)
@@ -2607,12 +2614,16 @@ class GraphBackend(EagerBackend):
                 ro[0].copy_(self._to_dev(np.array([[p - 1] for p in P] + [[0]] * (B - b), dtype=np.int64)),
                             non_blocking=True)
             g.replay()
+        own = store is not None and store is not self.state_cache  # a call's own store (_shared_roots)
         store = self.state_cache if store is None else store
         if h1 is not None and store is not None:  # store the roots computed here
             for r, key in enumerate(keys):
-                if key is not None and hits[r] is None:
-                    store.put(key, [(kb[r, :, : P[r]].clone(), vb[r, :, : P[r]].clone()) for kb, vb in kv],
-                              tokens=packs[idx[r]][0][: P[r]])
+                if key is None or hits[r] is not None:
+                    continue
+                if own and sum(2 * kb[r, :, : P[r]].nbytes for kb, _ in kv) > store.budget - store.used:
+                    continue  # (does not fit: not cloned; the waiting parts compute the root as before)
+                store.put(key, [(kb[r, :, : P[r]].clone(), vb[r, :, : P[r]].clone()) for kb, vb in kv],
+                          tokens=packs[idx[r]][0][: P[r]])
         S = next((x for x in sfx if n2 <= x), None)
         graph = None
         # a pass-2 graph, rows padded (stale buffer rows are masked); Gemma 4: over the longer plain graphs' roots too
@@ -2890,40 +2901,52 @@ class GraphBackend(EagerBackend):
                     hits[k] = e
         return keys, hits
 
+    _call_store = threading.Lock()  # one call at a time keeps the roots of its split groups in a store of its own
+
     def _shared_roots(self, units, keys, hits):
         """The parts of a group split by _units (more than BRANCH_TOKENS below its root: many long branches, such as
         a rank stage over hundreds of passages in one context) have the same root tokens: the first computes them in
         pass 1 and stores their keys / values, the others wait ("cached" batches launch after every pass 1) and run pass
         2 over them. 2.5.2 ran pass 1 of the same root once per part, with the state cache too (every part was a miss
-        when the call began). -> (keys, store, waiting): per unit the key its root is stored under (the state cache's,
-        else this call's own for the parts of split groups, None for the others), where (the state cache, else a store
-        for this call within the free GPU memory beyond PASS2_RESERVE: a root that does not fit is computed per part
-        as before) and the units that wait for a root another unit computes."""
+        when the call began). -> (keys, store, waiting): per unit the key its root is stored under (None for the
+        others), where, and the units that wait for a root another unit of their group computes.
+        - With --state-cache-gb: the state cache's keys (the roots cut at the state) and entries, read without counting
+          a hit (StateCache.peek); with --state-cache-bits 8 its entries are quantised, so nothing is shared (the parts
+          compute theirs, as before).
+        - Without: a store for this call, keyed by the roots' tokens, within the free GPU memory beyond PASS2_RESERVE
+          (a root that does not fit is computed per part as before), held by one call at a time (_call_store: two
+          calls sizing stores from the same free memory could exceed it together; the other computes per part).
+        A part with a readout inside the root (a prompt that is the root itself) never waits: it needs pass 1."""
+        none = keys, None, set()
         if not self.SHARE_SPLIT_ROOTS:
-            return keys, None, set()
-        store = self.state_cache
-        if keys is None:
-            parts = {}
+            return none
+        if keys is not None:
+            if self.state_cache.bits != 16:
+                return none
+            store = self.state_cache
+        else:
+            cand = {}
             for k, (pk, _, g, _) in enumerate(units):
                 if len(pk[4]) > 1:
-                    parts.setdefault((g, pk[2].index(1)), []).append(k)
-            shared = [ks for ks in parts.values() if len(ks) > 1]
-            if not shared:
-                return None, None, set()
-            keys = [None] * len(units)
-            for ks in shared:
-                for k in ks:
-                    keys[k] = ("root", units[k][2], units[k][0][2].index(1))
+                    cand.setdefault((g, pk[2].index(1)), []).append(k)
+            cand = [ks for ks in cand.values() if len(ks) > 1]
+            if not cand or not self._call_store.acquire(blocking=False):
+                return none
             free = self._free_memory()
             store = StateCache((1 << 62) if free is None else max(free - self.PASS2_RESERVE, 0))
+            keys = [None] * len(units)
+            for k in (k for ks in cand for k in ks):
+                pk = units[k][0]
+                keys[k] = store.key(pk[0][: pk[2].index(1)])  # (equal keys: equal root tokens)
         first, waiting = set(), set()  # (only parts of one group: other requests with the same state keep their own
         for k, key in enumerate(keys):  # pass-1 rows, batched as before)
             if key is None or k in hits:
                 continue
-            if (units[k][2], key) in first:
+            pk, g = units[k][0], units[k][2]
+            if (g, key) in first and min(pk[3]) >= pk[2].index(1):
                 waiting.add(k)
             else:
-                first.add((units[k][2], key))
+                first.add((g, key))
         return keys, store, waiting
 
     @torch.no_grad()
@@ -2942,32 +2965,36 @@ class GraphBackend(EagerBackend):
         keys, hits = self._cache_keys(groups, units)
         self._extend_states(units, keys, hits)
         keys, store, waiting = self._shared_roots(units, keys, hits)
-        for idx, kind in self._forwards(units, set(hits) | waiting):
-            with self._launch:  # the static buffers of a graph are shared by concurrent calls
-                if kind == "compact":
-                    h = self._compact_hidden(packs, idx)
-                elif kind == "plain":
-                    h = self._plain_hidden(packs, idx)
-                elif keys is None:
-                    h = self._tree_hidden(packs, idx)
-                else:
-                    for k in idx:  # computed by an earlier forward of this call (not stored: computed again here)
-                        if k in waiting and k not in hits:
-                            e = store.get(keys[k])
-                            if e is not None:
-                                hits[k] = e
-                    h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx],
-                                          *(() if store is None else (store,)))
-                W, cols, pad = self._rows([x for k in idx for x in units[k][1]])
-                p = torch.softmax(self._code_logits(h, W).gather(1, cols).masked_fill(pad, float("-inf")), -1)
-                if cuda:
-                    host = torch.empty(p.shape, dtype=p.dtype, pin_memory=True)
-                    host.copy_(p, non_blocking=True)
-                    ev = torch.cuda.Event()
-                    ev.record()
-                    pending.append((idx, host, ev))
-                else:
-                    pending.append((idx, p, None))
+        try:
+            for idx, kind in self._forwards(units, set(hits) | waiting):
+                with self._launch:  # the static buffers of a graph are shared by concurrent calls
+                    if kind == "compact":
+                        h = self._compact_hidden(packs, idx)
+                    elif kind == "plain":
+                        h = self._plain_hidden(packs, idx)
+                    elif keys is None:
+                        h = self._tree_hidden(packs, idx)
+                    else:
+                        for k in idx:  # computed by an earlier forward of this call (not stored: computed again)
+                            if k in waiting and k not in hits:
+                                e = store.peek(keys[k])
+                                if e is not None:
+                                    hits[k] = e
+                        h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx],
+                                              *(() if store is None else (store,)))
+                    W, cols, pad = self._rows([x for k in idx for x in units[k][1]])
+                    p = torch.softmax(self._code_logits(h, W).gather(1, cols).masked_fill(pad, float("-inf")), -1)
+                    if cuda:
+                        host = torch.empty(p.shape, dtype=p.dtype, pin_memory=True)
+                        host.copy_(p, non_blocking=True)
+                        ev = torch.cuda.Event()
+                        ev.record()
+                        pending.append((idx, host, ev))
+                    else:
+                        pending.append((idx, p, None))
+        finally:
+            if store is not None and store is not self.state_cache:
+                self._call_store.release()  # (the forwards that read it are launched; its tensors go with it)
         res = [[None] * len(g[0]) for g in groups]
         left = [0] * len(groups)
         for u in units:
