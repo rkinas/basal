@@ -8,7 +8,7 @@
   "types": "./dist/index.d.ts",
   "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
   "files": ["dist", "README.md"],
-  "engines": {"node": ">=18"},
+  "engines": {"node": ">=18.17"},
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && tsc -p test/tsconfig.json && node --test \"test/*.test.mjs\""

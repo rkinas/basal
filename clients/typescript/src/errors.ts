@@ -2,7 +2,7 @@
  *  - "validation" (422): the request is invalid and must be changed;
  *  - "unavailable" (503): the GPU ran out of memory, or the server is still starting; a retry later or on another server may succeed;
  *  - "server" (500 and other statuses);
- *  - "timeout" / "network": no answer (the request may or may not have run). */
+ *  - "timeout" / "network": no answer, or the response broke off (the request may or may not have run). */
 export type ErrorKind = "validation" | "unavailable" | "server" | "timeout" | "network";
 
 export class BasalError extends Error {

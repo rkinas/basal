@@ -161,6 +161,41 @@ describe("errors", () => {
   });
 });
 
+describe("errors through the whole response (a fetch of the test's own)", () => {
+  const respond = (body, status = 200) => async () => new Response(body, { status });
+  const stream = (start) => new ReadableStream({ start });
+
+  test("a body that stalls after the headers is a timeout, one that breaks is a network error", async () => {
+    const stall = async (_u, init) => new Response(stream((c) => init.signal.addEventListener("abort", () => c.error(init.signal.reason))));
+    await assert.rejects(new Basal({ fetch: stall, timeout: 0.05 }).health(), (e) => e instanceof BasalError && e.kind === "timeout" && e.retryable);
+    const broken = respond(stream((c) => { c.enqueue(new TextEncoder().encode('{"sta')); c.error(new TypeError("socket hang up")); }));
+    await assert.rejects(new Basal({ fetch: broken }).health(), (e) => e instanceof BasalError && e.kind === "network" && /socket hang up/.test(e.detail));
+  });
+
+  test("the caller's abort while the body is read passes through", async () => {
+    const ac = new AbortController();
+    const slow = async (_u, init) => new Response(stream((c) => {
+      init.signal.addEventListener("abort", () => c.error(init.signal.reason));
+      setTimeout(() => ac.abort(new Error("mine")), 10);
+    }));
+    await assert.rejects(new Basal({ fetch: slow }).health(ac.signal), (e) => !(e instanceof BasalError) && e.message === "mine");
+  });
+
+  test("statuses and malformed JSON keep their kinds; only 503 is retryable", async () => {
+    await assert.rejects(new Basal({ fetch: respond("not json") }).health(), (e) => e.kind === "server" && e.status === 200 && !e.retryable);
+    for (const [status, kind, retryable] of [[422, "validation", false], [500, "server", false], [503, "unavailable", true],
+      [429, "server", false], [502, "server", false], [504, "server", false]])
+      await assert.rejects(new Basal({ fetch: respond('{"error": "x"}', status) }).health(),
+        (e) => e.status === status && e.kind === kind && e.retryable === retryable && e.detail === "x");
+  });
+
+  test("a timeout that is not a number of seconds > 0 is refused; a fraction of a millisecond is rounded", async () => {
+    for (const timeout of [0, -1, NaN, Infinity, "5", 5e9]) assert.throws(() => new Basal({ timeout }), RangeError, String(timeout));
+    const ok = respond('{"status": "ok", "running": 0, "queued": 0}');
+    assert.equal((await new Basal({ fetch: ok, timeout: 0.0015 }).health()).status, "ok");
+  });
+});
+
 describe("request bodies (a recording fetch)", () => {
   const recorder = (answers) => {
     const seen = [];
