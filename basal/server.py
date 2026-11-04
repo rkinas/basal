@@ -1262,6 +1262,84 @@ def temper(p, T):
     return torch.softmax(torch.log(p.clamp_min(1e-12)) / T, -1) if T != 1.0 else p
 
 
+def serve_options(a):
+    """Every check of basal-serve's options (parser) that needs no model, in one function that reads only `a` (and
+    whether the --calibration file exists): SystemExit with the reason, as at start-up, before anything is read or
+    downloaded; testable without weights or a GPU. Resolves --lean / --tree into `a`. -> (engine kind, quantisation,
+    compiled) of --mode. Server.__init__ runs it first; the checks that read the model (its config, basal.json,
+    calibration) or the adapter follow there."""
+    validate_quant(a.mode, a.quant)
+    kind, quant, comp = MODES[a.mode]
+    if getattr(a, "compile_scope", "model") == "layer" and (kind != "graph" or not comp):
+        raise SystemExit(f"--compile-scope layer: the CUDA graph engine's compiled modes (--mode fast), not "
+                         f"--mode {a.mode}")
+    if kind == "gguf" and not a.gguf:
+        raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
+    if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
+        raise SystemExit(f"--calibration {a.calibration}: no such file")  # a typo must not serve uncalibrated
+    why = lanes_refused(a, kind)  # before any model is read
+    if why:
+        raise SystemExit(why)
+    if getattr(a, "state_cache_bits", 16) != 16 and (kind != "graph" or not (
+            getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on")):
+        raise SystemExit("--state-cache-bits 8 needs --state-cache-gb or --prefix-cache on in the CUDA graph "
+                         "engine (fast, fast-nocompile, fp8, int8, nvfp4)")
+    if getattr(a, "state_cache_lock", "off") == "on" and (kind != "graph" or not getattr(a, "state_cache_gb", 0)):
+        raise SystemExit("--state-cache-lock on needs --state-cache-gb in the CUDA graph engine (fast, "
+                         "fast-nocompile, fp8, int8, nvfp4)")
+    if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit", "mlx")):
+        raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or "
+                         "--mode mlx and is not combined with --deterministic (a cached state changes the shapes of "
+                         "the forwards)")
+    if getattr(a, "layout", None) not in (None, "canonical"):
+        refuse_layout_caches(a.layout, a)
+    if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind not in ("graph", "mlx")):
+        raise SystemExit("--prefix-cache needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or --mode "
+                         "mlx and is not combined with --deterministic")
+    a.lean, a.tree = lean_tree(getattr(a, "lean", "off"), getattr(a, "tree", "dense"), kind, comp, a.quant or quant)
+    refuse_lean_flex(a.lean, a.tree)
+    if getattr(a, "batches", "default") not in ("default", "auto") and kind not in ("graph", "exit"):
+        raise SystemExit("--batches needs the CUDA graph engine (fast, fast-nocompile, fast-exit, fp8, nvfp4)")
+    if getattr(a, "fp8_scaling", "auto") == "block" and (a.quant or quant) != "fp8":
+        raise SystemExit("--fp8-scaling block needs --mode fp8")
+    if getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS) < 0:
+        raise SystemExit("--fp8-bf16-layers: give 0 or more layers")
+    if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4",
+                                                                                                    "int8")):
+        raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
+    if getattr(a, "long_lane_gdn", "off") == "on" and getattr(a, "long_lane", "off") != "on":
+        raise SystemExit("--long-lane-gdn on needs --long-lane on")
+    if getattr(a, "graph_memory_gb", None) is not None:
+        if kind != "graph":
+            raise SystemExit("--graph-memory-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
+                             "nvfp4)")
+        if not a.graph_memory_gb > 0:
+            raise SystemExit(f"--graph-memory-gb {a.graph_memory_gb:g}: give a size in GiB above 0")
+    if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
+        raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
+    if getattr(a, "global_attn", "flex") != "flex" and kind != "graph":
+        raise SystemExit("--global-attn needs the CUDA graph engine (--mode fast, fast-nocompile, fp8, nvfp4)")
+    attn = getattr(a, "attn", "auto")
+    if attn not in ("auto", "fa2") and kind not in ("graph", "exit"):
+        raise SystemExit(f"--attn {attn} needs the CUDA graph engine (--mode fast, fast-nocompile, fast-exit, fp8, "
+                         "nvfp4)")
+    if getattr(a, "mlx_packed", False) and kind != "mlx":
+        raise SystemExit("--mlx-packed needs --mode mlx (or mlx-q8)")
+    if getattr(a, "mlx_forward", "mlx-lm") != "mlx-lm" and kind != "mlx":
+        raise SystemExit("--mlx-forward needs --mode mlx (or mlx-q8)")
+    if getattr(a, "mlx_compute", "auto") != "auto" and kind != "mlx":
+        raise SystemExit("--mlx-compute needs --mode mlx")
+    if kind == "mps" and a.device == "cuda":
+        raise SystemExit("--mode mps runs on Apple Silicon or the CPU (--device mps / cpu); on CUDA: --mode fast")
+    if getattr(a, "media", "off") == "on" and kind not in ("eager", "vllm"):
+        raise SystemExit("--media on needs --mode eager or vllm (the media paths of basal-omni)")
+    if getattr(a, "ple_offload", "off") == "on" and kind != "eager":
+        raise SystemExit("--ple-offload on needs --mode eager")
+    if getattr(a, "eager_attn", "math") != "math" and kind != "eager":
+        raise SystemExit("--eager-attn needs --mode eager (the CUDA graph engine takes --attn)")
+    return kind, quant, comp
+
+
 class Server:
     LONG_BATCH, LONG_BATCH_TOKENS = 4, 32768  # --long-lane: long requests (and their tokens) per long-lane engine call
     SCHED_CALL_TOKENS = 8192  # --scheduler: prompt tokens of long requests per main-lane engine call (at least one)
@@ -1275,66 +1353,16 @@ class Server:
     calls_running = None  # {call: perf_counter at its start} of the engine calls running now (liveness)
 
     def __init__(self, a):
-        validate_quant(a.mode, a.quant)
-        kind, quant, comp = MODES[a.mode]
-        if getattr(a, "compile_scope", "model") == "layer" and (kind != "graph" or not comp):
-            raise SystemExit(f"--compile-scope layer: the CUDA graph engine's compiled modes (--mode fast), not "
-                             f"--mode {a.mode}")
+        kind, quant, comp = serve_options(a)  # (every option check that needs no model, before anything is read)
         # --adapter: read (and refused when it is not a plain LoRA) before any weights are downloaded
         self.adapter = adapter_module.read(a.adapter) if getattr(a, "adapter", None) else None
         if self.adapter and adapter_refused_kind(kind, a.quant or quant):
             raise SystemExit(adapter_refused(self.adapter.name, f"--mode {a.mode}",
                                              adapter_refused_kind(kind, a.quant or quant)))
-        if kind == "gguf" and not a.gguf:
-            raise SystemExit("--mode gguf needs --gguf <file.gguf> (--model gives tokenizer and calibration)")
-        if a.calibration and not a.no_calibration and not Path(a.calibration).exists():
-            raise SystemExit(f"--calibration {a.calibration}: no such file")  # a typo must not serve uncalibrated
-        why = lanes_refused(a, kind)  # before any model is read
-        if why:
-            raise SystemExit(why)
         if a.deterministic:
             deterministic_setup(kind)
         elif getattr(a, "fp8_accum", "fast") == "full":  # FP8 checkpoints: the same GEMM arithmetic as --deterministic
             set_fp8_fast_accum(False)
-        if getattr(a, "state_cache_bits", 16) != 16 and (kind != "graph" or not (
-                getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on")):
-            raise SystemExit("--state-cache-bits 8 needs --state-cache-gb or --prefix-cache on in the CUDA graph "
-                             "engine (fast, fast-nocompile, fp8, int8, nvfp4)")
-        if getattr(a, "state_cache_lock", "off") == "on" and (kind != "graph" or not getattr(a, "state_cache_gb", 0)):
-            raise SystemExit("--state-cache-lock on needs --state-cache-gb in the CUDA graph engine (fast, "
-                             "fast-nocompile, fp8, int8, nvfp4)")
-        if getattr(a, "state_cache_gb", 0) and (a.deterministic or kind not in ("graph", "exit", "mlx")):
-            raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or "
-                             "--mode mlx and is not combined with --deterministic (a cached state changes the shapes of "
-                             "the forwards)")
-        if getattr(a, "layout", None) not in (None, "canonical"):
-            refuse_layout_caches(a.layout, a)
-        if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind not in ("graph", "mlx")):
-            raise SystemExit("--prefix-cache needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or --mode "
-                             "mlx and is not combined with --deterministic")
-        a.lean, a.tree = lean_tree(getattr(a, "lean", "off"), getattr(a, "tree", "dense"), kind, comp, a.quant or quant)
-        refuse_lean_flex(a.lean, a.tree)
-        if getattr(a, "batches", "default") not in ("default", "auto") and kind not in ("graph", "exit"):
-            raise SystemExit("--batches needs the CUDA graph engine (fast, fast-nocompile, fast-exit, fp8, nvfp4)")
-        if getattr(a, "fp8_scaling", "auto") == "block" and (a.quant or quant) != "fp8":
-            raise SystemExit("--fp8-scaling block needs --mode fp8")
-        if getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS) < 0:
-            raise SystemExit("--fp8-bf16-layers: give 0 or more layers")
-        if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4",
-                                                                                                        "int8")):
-            raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
-        if getattr(a, "long_lane_gdn", "off") == "on" and getattr(a, "long_lane", "off") != "on":
-            raise SystemExit("--long-lane-gdn on needs --long-lane on")
-        if getattr(a, "graph_memory_gb", None) is not None:
-            if kind != "graph":
-                raise SystemExit("--graph-memory-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
-                                 "nvfp4)")
-            if not a.graph_memory_gb > 0:
-                raise SystemExit(f"--graph-memory-gb {a.graph_memory_gb:g}: give a size in GiB above 0")
-        if getattr(a, "vllm_preset", "default") != "default" and kind != "vllm":
-            raise SystemExit("--vllm-preset needs --mode vllm (the CUDA graph engine has --deterministic)")
-        if getattr(a, "global_attn", "flex") != "flex" and kind != "graph":
-            raise SystemExit("--global-attn needs the CUDA graph engine (--mode fast, fast-nocompile, fp8, nvfp4)")
         if kind == "vllm" and VLLM_PRESETS.get(getattr(a, "vllm_preset", "default")):
             what = _recurrent(a.model, a.revision)  # before vLLM starts: its batch-invariant mode raises in the engine core
             if what:
@@ -1342,17 +1370,6 @@ class Server:
                                  f"{what} (a recurrent state, such as Qwen3.5's Gated DeltaNet); serve it with the default "
                                  "preset (answers can vary run to run on near-ties) or --mode eager (exact)")
         attn = getattr(a, "attn", "auto")
-        if attn not in ("auto", "fa2") and kind not in ("graph", "exit"):
-            raise SystemExit(f"--attn {attn} needs the CUDA graph engine (--mode fast, fast-nocompile, fast-exit, fp8, "
-                             "nvfp4)")
-        if getattr(a, "mlx_packed", False) and kind != "mlx":
-            raise SystemExit("--mlx-packed needs --mode mlx (or mlx-q8)")
-        if getattr(a, "mlx_forward", "mlx-lm") != "mlx-lm" and kind != "mlx":
-            raise SystemExit("--mlx-forward needs --mode mlx (or mlx-q8)")
-        if getattr(a, "mlx_compute", "auto") != "auto" and kind != "mlx":
-            raise SystemExit("--mlx-compute needs --mode mlx")
-        if kind == "mps" and a.device == "cuda":
-            raise SystemExit("--mode mps runs on Apple Silicon or the CPU (--device mps / cpu); on CUDA: --mode fast")
         if kind in ("graph", "exit"):  # before the weights are downloaded (mps: MPSBackend, when it shares prefixes)
             what = _recurrent(a.model, a.revision)
             gdn = bool(what) and _gdn(a.model, a.revision)
@@ -1422,12 +1439,6 @@ class Server:
         why = nvfp4_calibration_refused(md, kind, quant, a)
         if why:
             raise SystemExit(why)
-        if getattr(a, "media", "off") == "on" and kind not in ("eager", "vllm"):
-            raise SystemExit("--media on needs --mode eager or vllm (the media paths of basal-omni)")
-        if getattr(a, "ple_offload", "off") == "on" and kind != "eager":
-            raise SystemExit("--ple-offload on needs --mode eager")
-        if getattr(a, "eager_attn", "math") != "math" and kind != "eager":
-            raise SystemExit("--eager-attn needs --mode eager (the CUDA graph engine takes --attn)")
         self.prepared = None  # --prepared: the compiled kernels of an earlier start on this GPU class (basal-prepare)
         if kind in ("graph", "exit") and comp and getattr(a, "prepared", "auto") != "off" and torch.cuda.is_available():
             from . import prepared
