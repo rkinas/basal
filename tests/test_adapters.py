@@ -1,5 +1,6 @@
 """Presets (basal-run --preset, Basal.preset) and the agent-framework adapters, against a fake server (the frameworks
 themselves are stubbed: they are not dependencies)."""
+import asyncio
 import json
 import sys
 import types
@@ -43,6 +44,48 @@ def test_preset_language_follows_the_state():
     assert body["questions"]["urgency"]["instructions"] == "Jak pilna jest sprawa?"
     assert to_request({"state": "x", "questions": {"q": {}}}, preset="triage")["questions"] == {"q": {}}  # own wins
     assert to_request({"state": "s"}, preset="triage", lang="en")["questions"]["needs_human"]["type"] == "noul"
+
+
+SHORT = [  # short lines as people type them: Polish often without diacritics (#92), English with Polish names
+    ("Aplikacja na iPhone wylogowuje mnie co kilka minut.", "pl"), ("nie dziala logowanie", "pl"),
+    ("NIE DZIALA LOGOWANIE", "pl"), ("Czy moge zmienic adres dostawy?", "pl"), ("Mam problem z faktura", "pl"),
+    ("Prosze o kontakt", "pl"), ("to jest pilne", "pl"), ("Czego dotyczy zgłoszenie?", "pl"),
+    ("Klient zgłasza, że nie działa logowanie do konta", "pl"),
+    ("The customer cannot log in to the account", "en"), ("App logs me out every few minutes on iPhone.", "en"),
+    ("i cant login", "en"), ("Please do", "en"), ("Why do I have to do this?", "en"), ("ACME Co. invoice", "en"),
+    ("Order nr 123 w/o invoice", "en"), ("PO 12345 not received", "en"), ("Meeting in Kraków", "en"),
+    ("The customer from Łódź cannot log in", "en"), ("Login broken", "en"), ("", "en"), (None, "en"),
+]
+
+
+@pytest.mark.parametrize("text, lang", SHORT)
+def test_preset_language_of_short_lines(text, lang):
+    assert presets.lang_of(text) == lang
+
+
+def test_client_preset_is_worded_in_the_client_lang():
+    """Basal(lang=...) sends lang with every request, so a preset is worded in it too, not in the state's language;
+    a lang given to preset() still wins."""
+    from basal.client import AsyncBasal
+    seen = []
+
+    def handler(req):
+        body = json.loads(req.content)
+        seen.append(body)
+        return httpx.Response(200, json={"answers": {q: {"type": v["type"], "probabilities": {"a": 1.0}}
+                                                     for q, v in body["questions"].items()}})
+    state = "The customer cannot log in to the account"
+    Basal("http://basal", lang="pl", transport=httpx.MockTransport(handler)).preset(state, "triage")
+    Basal("http://basal", lang="pl", transport=httpx.MockTransport(handler)).preset(state, "triage", "en")
+
+    async def go():
+        async with AsyncBasal("http://basal", lang="pl", http=httpx.AsyncClient(
+                transport=httpx.MockTransport(handler))) as b:
+            await b.preset(state, "triage")
+    asyncio.run(go())
+    words = [b["questions"]["urgency"]["instructions"] for b in seen]
+    assert words == ["Jak pilna jest sprawa?", "How urgent is this case?", "Jak pilna jest sprawa?"]
+    assert [b["lang"] for b in seen] == ["pl", "pl", "pl"]
 
 
 def test_client_preset():
