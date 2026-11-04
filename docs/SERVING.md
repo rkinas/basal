@@ -579,8 +579,11 @@ Each input line is either a **simple item** or a **full request** (the formats c
 
 Simple items are sent with placeholder keys and `"option_keys": "hide"`, so the model sees exactly the option texts.
 Each output line contains `id`, the full `answers` (probabilities, confidence) and the server `latency_ms`; simple items
-also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. At the
-end `basal-run` prints a summary (items per second, median latency and accuracy if gold labels are present).
+also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. A line
+that is not valid (not JSON, a simple item without options) or whose request fails gets `error`, and the run goes on.
+Answers are written as they arrive, in input order, to `<output>.part`, which becomes `<output>` at the end (an
+interrupted run keeps its answers so far there); `--output` cannot be the `--input` file. At the end `basal-run`
+prints a summary (items per second, median latency and accuracy if gold labels are present).
 Ready-to-run examples (Polish and English) in `basal/examples/` of the repository, also installed with the package
 (`$EX` above):
 

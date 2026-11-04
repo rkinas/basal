@@ -8,18 +8,22 @@ Two input formats are accepted (they can be mixed):
   request  {"id": ..., "state": ..., "questions": {...}, "early_exit": ...}   a full /v1/systemone request body
 
 Output (one line per input line, same order): {"id", "answers", "latency_ms"} plus, for simple lines, "prediction"
-(index of the chosen option), "confidence" and "correct" when "gold" is given. A summary (accuracy if gold is present,
-latency) is printed at the end.
+(index of the chosen option), "confidence" and "correct" when "gold" is given; a line that cannot be sent or read
+back gets "error" instead, and the other lines go on. Lines are read and answers written as they go (at most a few
+times --concurrency lines are held), into <output>.part, renamed to <output> at the end: an interrupted run keeps the
+answers so far, in order, in <output>.part. A summary (accuracy if gold is present, latency) is printed at the end.
 """
 import argparse
 import asyncio
+import collections
 import json
+import os
 import statistics
+import sys
 import time
+from pathlib import Path
 
 import httpx
-
-from .jsonl import read_lines
 
 
 def to_request(item, early_exit=None, preset=None, lang=None):
@@ -60,36 +64,99 @@ def summarise(item, resp):
     return out
 
 
-async def run(a):
-    items = [json.loads(line) for line in read_lines(a.input) if line.strip()]
-    for i, it in enumerate(items):
-        it.setdefault("id", i)
-    results: list[dict] = [{} for _ in items]
+def failed(i, error, answers=None):
+    return {"id": i, "answers": answers, "latency_ms": None, "error": str(error)}
+
+
+def same_file(a, b):
+    a, b = Path(a), Path(b)
+    try:
+        return a.resolve() == b.resolve() or b.exists() and os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def lines(path):
+    """The item of every non-blank line (or the error of a line that is not a JSON object), read as they go and split
+    at "\n" only (U+2028 inside a string stays in its line)."""
+    with open(path, encoding="utf-8", newline="\n") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError as e:
+                yield ValueError(f"line {n}: not JSON ({e})")
+                continue
+            yield item if isinstance(item, dict) else ValueError(f"line {n}: not a JSON object")
+
+
+async def run(a, transport=None):
+    if same_file(a.input, a.output):
+        raise SystemExit(f"--output {a.output} is the --input file: give another file (the answers would replace "
+                         "the requests)")
+    part = Path(str(a.output) + ".part")
     sem = asyncio.Semaphore(a.concurrency)
-    async with httpx.AsyncClient(timeout=300) as c:
+    window = collections.deque()  # the lines in flight, in input order (a bounded reorder buffer)
+    n_items = n_err = 0
+    lat, graded = [], []
+    async with httpx.AsyncClient(timeout=300, transport=transport) as c:
         async def one(i, it):
+            if isinstance(it, Exception):
+                return failed(i, it)
+            it.setdefault("id", i)
             async with sem:
                 try:
-                    r = await c.post(a.url, json=to_request(it, a.early_exit, getattr(a, "preset", None),
-                                                            getattr(a, "lang", None)))
+                    body = to_request(it, a.early_exit, getattr(a, "preset", None), getattr(a, "lang", None))
+                except (KeyError, TypeError, ValueError, AttributeError) as e:  # a malformed line: its own error
+                    return failed(it["id"], f"not a valid line: {type(e).__name__}: {e}")
+                try:
+                    r = await c.post(a.url, json=body)
                     resp = r.json()
                 except (httpx.HTTPError, ValueError) as e:
-                    resp = {"error": str(e)}
-                results[i] = summarise(it, resp)
-        t0 = time.perf_counter()
-        await asyncio.gather(*(one(i, it) for i, it in enumerate(items)))
-        wall = time.perf_counter() - t0
-    with open(a.output, "w", encoding="utf-8") as f:
-        for r in results:
+                    resp = {"error": str(e) or type(e).__name__}
+            try:
+                return summarise(it, resp)
+            except (KeyError, TypeError, ValueError, AttributeError, IndexError) as e:
+                return failed(it["id"], f"unexpected answer: {type(e).__name__}: {e}",
+                              resp.get("answers") if isinstance(resp, dict) else None)
+
+        def put(f, r):
+            nonlocal n_items, n_err
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    ok = [r for r in results if "error" not in r]
-    lat = [r["latency_ms"] for r in ok if r["latency_ms"] is not None]
-    s = {"items": len(items), "errors": len(items) - len(ok), "seconds": round(wall, 2),
-         "items_per_s": round(len(items) / wall, 1) if wall else None,
+            n_items += 1
+            if "error" in r:
+                n_err += 1
+                return
+            if r.get("latency_ms") is not None:
+                lat.append(r["latency_ms"])
+            if "correct" in r:
+                graded.append(r["correct"])
+
+        done = False
+        t0 = time.perf_counter()
+        with open(part, "w", encoding="utf-8") as f:
+            try:
+                for i, it in enumerate(lines(a.input)):
+                    window.append(asyncio.ensure_future(one(i, it)))
+                    while len(window) >= 4 * a.concurrency or window and window[0].done():
+                        put(f, await window.popleft())
+                while window:
+                    put(f, await window.popleft())
+                done = True
+            finally:
+                for t in window:
+                    t.cancel()
+                if not done:
+                    f.flush()
+                    print(f"basal-run: stopped; the {n_items} answers so far are in {part}", file=sys.stderr)
+        wall = time.perf_counter() - t0
+    os.replace(part, a.output)
+    s = {"items": n_items, "errors": n_err, "seconds": round(wall, 2),
+         "items_per_s": round(n_items / wall, 1) if wall else None,
          "server_latency_p50_ms": round(statistics.median(lat), 2) if lat else None}
-    graded = [r for r in ok if "correct" in r]
     if graded:
-        s["accuracy"] = round(sum(r["correct"] for r in graded) / len(graded), 4)
+        s["accuracy"] = round(sum(graded) / len(graded), 4)
     print(json.dumps(s))
 
 
