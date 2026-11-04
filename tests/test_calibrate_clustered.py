@@ -3,7 +3,7 @@ decisions than groups (claims or fields of one document share their errors), and
 import numpy as np
 
 from basal import calibrate
-from basal.calibrate import ALPHA, fit, fit_tasks, is_cert, task_warnings, threshold, warnings
+from basal.calibrate import fit, fit_tasks, is_cert, task_warnings, threshold, warnings
 
 
 def test_a_task_with_many_decisions_per_group_is_warned():
@@ -35,16 +35,18 @@ def documents(rng, docs, per, mean, conc=2.0):
     return list(zip(conf.ravel().tolist(), (~wrong).ravel().tolist())), [f"d{i}" for i in range(docs) for _ in range(per)]
 
 
-def test_clustered_errors_are_certified_at_most_alpha_of_the_time():
-    """100 documents x 30 claims at a mean error of 1.2%, target 1%: counting the claims as independent certified the
-    target in about 10% of runs; counting them as the independent decisions they are worth stays under 5%."""
+def test_clustered_errors_are_certified_far_less_often():
+    """100 documents x 30 claims (70 in FIT) whose error rate varies by document, mean 1.2%, target 1%: counting the
+    claims as independent certified the target in about 15% of runs; the design effect brings it near 5% (the ICC is
+    estimated from the same 70 documents, so it is an approximation, not an exact bound)."""
     rng = np.random.default_rng(2026)
-    trials, naive, clus = 150, 0, 0
+    trials, naive, clus = 300, 0, 0
     for _ in range(trials):
         cs, groups = documents(rng, 100, 30, 0.012)
-        naive += threshold(cs, 0.01) is not None
-        clus += threshold(cs, 0.01, deff=calibrate.design_effect(cs, groups)[1]) is not None
-    assert naive / trials > 0.06 and clus / trials <= ALPHA
+        rows = [dict(task="verify", group=g, c=c, ok=ok) for (c, ok), g in zip(cs, groups)]
+        naive += threshold([(r["c"], r["ok"]) for r in rows if not is_cert(r["group"])], 0.01) is not None
+        clus += "verify" in fit_tasks(rows, [0.01])[0]
+    assert naive / trials >= 0.1 and clus / trials <= min(0.08, naive / trials / 2)
 
 
 def test_one_decision_per_group_or_unshared_errors_change_nothing():

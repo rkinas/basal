@@ -126,10 +126,11 @@ The shipped files were fitted with the same steps:
    (or task's) FIT decisions, and every level's accepted decisions and errors are divided by the design effect
    1 + (*m* − 1) *ρ*, *m* the mean size of the group a FIT decision is in (the same *m* for every level, which keeps the
    bound on the safe side when *ρ* is underestimated, as it is with rare errors). With one decision per group, or
-   errors that do not go together (*ρ* = 0), nothing changes. In a simulation of 100 documents × 30 claims whose error
-   rate varies by document (mean 1.05%, a 1% target), counting the claims as independent certified the target in 15%
-   of runs; the design effect brings it to 4%. Certifying such a task takes more labelled documents, not more claims
-   per document. The report gives `icc` and `design_effect` per type and task.
+   errors that do not go together (*ρ* = 0), nothing changes. This is an approximation, not an exact bound: *ρ* is
+   estimated from the same decisions. In simulations of 70 FIT documents × 30 claims whose error rate varies strongly
+   by document (a 1% target), counting the claims as independent certified a mean error of 1.2% in 15% of runs and of
+   1.05% in 20%; with the design effect, 5% and 7%. Certifying such a task takes more labelled documents, not more
+   claims per document. The report gives `icc` and `design_effect` per type and task.
    Each certificate is one test of one question type at one target error: its 95% holds for that type and target,
    which is what a request's `max_error` on a question of that type relies on. It is not a joint statement over all
    types and targets at once (with three types and two targets, the chance that at least one of the six is wrong can
