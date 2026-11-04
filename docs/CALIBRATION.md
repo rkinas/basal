@@ -35,6 +35,8 @@ answer `"calibration": "unvalidated"`. A format-2 model may ship an optional `CA
 - `--min-per-type 50`.
 - `--min-blend 10`: a type (or option-count bucket) with fewer FIT decisions than `--min-per-type` but at least this
   many gets its fitted temperature blended with the shipped one (below). `0` keeps the shipped one, as before 2.2.
+- `--keep-shipped noul` (a list of `choice`, `noul`, `score`): those types keep the compared file's temperature and
+  its thresholds together instead of being fitted (below, "Keeping a shipped type").
 - `--report-only`: print the report on your labelled requests (accuracy, ECE, the thresholds, the share automated,
   and how the compared file does on them) without writing a file. Use it to evaluate a model, or a calibration file
   given with `--calibration`, on your own data.
@@ -136,6 +138,22 @@ The shipped files were fitted with the same steps:
      own threshold and a type without one not at all. `automated_error` is their error on CERT, and
      `automated_at_pooled` is the share the single pooled threshold would automate, for comparison only. A target that
      is certified for no type gets 0.
+
+### Keeping a shipped type
+
+A fit can leave a type with no threshold at a `max_error` that the compared file certified: too few labelled decisions
+of the type, or none meeting the bound. Serving that file defers every answer of the type, although the shipped file
+automated part of them. A shipped threshold cannot simply be kept next to a fitted temperature: it was certified with
+the shipped temperature. The warning names such a type, and `--keep-shipped TYPE` keeps both together:
+
+- the type's temperature (for `choice` in a format-2 file also its option-count bucket temperatures) and its
+  per-type threshold at every target are the compared file's; a target where that file has none has none here;
+- each kept threshold is marked `"kept": "shipped"`, with its coverage and error on your FIT and CERT split, and the
+  report flags it when CERT does not confirm it; `fitted_on.kept_shipped` lists the kept types;
+- the other types are fitted as usual.
+
+The kept threshold is certified on the data the shipped file was fitted on, not on yours: read its CERT line before
+relying on it. Label more decisions of the type to fit it on your own data instead.
 
 The thresholds hold for the mix of question types and prompts you calibrated on. The leave-one-family-out ECE shows
 how well one temperature carries over to a kind of decision it was not fitted on, such as a new question in

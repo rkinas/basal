@@ -73,6 +73,12 @@ Method (the one the shipped files were fitted with):
     "task_gates"). The task thresholds a shipped file holds are kept only when the temperatures are (no decision
     questions in the input); otherwise a task without labelled questions has none and its answers report
     automated: null.
+  * --keep-shipped noul (a list of choice / noul / score; an act question counts as its base type): those types keep the compared
+    file's temperature (and for choice its option-count bucket temperatures) together with its per-type threshold of
+    every target, since a shipped threshold is certified only with the shipped temperature. For a type the labels do
+    not certify at a max_error the compared file did (the warning names it), this keeps automating it as the shipped
+    file did instead of deferring it. The report shows how the kept thresholds do on this file's FIT and CERT split
+    ("kept": "shipped" in the file, fitted_on.kept_shipped lists the types); the other types are fitted as usual;
   * fitted_on names the model (and its Hugging Face revision): basal-serve warns when a --calibration file was fitted
     on another model or revision, and refuses it with --strict-calibration.
 """
@@ -114,6 +120,7 @@ YES, NO = {"yes", "true", "tak"}, {"no", "false", "nie"}
 TASKS = ("classify", "verify", "extract")  # the tasks with an `automated` flag (compress has none)
 VERDICTS = ("supported", "contradicted", "not_stated")
 # what a file with task questions only does not take over from the file it keeps (written anew, or merged)
+KEPT_SOURCE = "shipped (--keep-shipped, with its thresholds)"
 KEPT_OUT = ("fitted_on", "certified_on", "baseline", "engine", "task_thresholds", "task_gates", "decision_calibration")
 # mean leave-one-family-out ECE of basal-1.5 (4.5B) per type on our calibration split (--reference basal-1.5)
 REFERENCE = {"basal-1.5": {"choice": 0.082, "noul": 0.062, "score": 0.109}}
@@ -620,21 +627,25 @@ def sample_size(decisions, units, targets):
 def cert_note(name, risk, x):
     """A written threshold (entry x: confidence, cert_accepted, cert_error, cert_upper95) that CERT does not confirm:
     its observed error is above the target, or too few accepted CERT decisions bring the upper bound below it. The
-    threshold is certified on FIT and stays; None when CERT confirms it."""
+    threshold is certified on FIT (a --keep-shipped one on the compared file's data) and stays; None when CERT confirms
+    it."""
     if x.get("confidence") is None:
         return None
+    where = "certified on FIT"
+    if x.get("kept"):  # --keep-shipped: certified where the compared file was fitted, measured here
+        name, where = f"{name} (kept shipped threshold)", "certified on the compared file's data"
     n = x.get("cert_accepted") or 0
     e = round((x.get("cert_error") or 0.0) * n)
     errs, need = f"{e} error{'' if e == 1 else 's'}", accepted_needed(risk)
     if n == 0:
-        return (f"{name} at max_error {risk:g}: certified on FIT; CERT accepts no decision at this threshold, so it "
+        return (f"{name} at max_error {risk:g}: {where}; CERT accepts no decision at this threshold, so it "
                 f"cannot confirm it (0 errors would need >= {need} accepted CERT decisions)")
     if e / n > risk:
-        return (f"{name} at max_error {risk:g}: certified on FIT, but CERT has {n} accepted, {errs} "
+        return (f"{name} at max_error {risk:g}: {where}, but CERT has {n} accepted, {errs} "
                 f"({pct(e / n)}), above the target: the threshold does not hold on CERT; label more data before "
                 "relying on it")
     if x.get("cert_upper95") is not None and x["cert_upper95"] > risk:
-        return (f"{name} at max_error {risk:g}: certified on FIT; CERT has {n} accepted, {errs}, upper bound "
+        return (f"{name} at max_error {risk:g}: {where}; CERT has {n} accepted, {errs}, upper bound "
                 f"{100 * x['cert_upper95']:.2f}% > {100 * risk:g}%, too few to confirm on CERT (0 errors would need "
                 f">= {need} accepted CERT decisions)")
     return None
@@ -675,10 +686,10 @@ def blend(T_fit, T_old, n, min_per_type):
     return float(math.exp(w * math.log(T_fit) + (1 - w) * math.log(T_old))), w
 
 
-def fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend=MIN_BLEND):
+def fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend=MIN_BLEND, keep=()):
     """Temperatures per type (and per choice bucket for format 2) fitted on FIT rows where there are enough decisions,
-    blended with the shipped ones from min_blend decisions (0: never), else the shipped ones -> (temps, source,
-    buckets, bucket source)."""
+    blended with the shipped ones from min_blend decisions (0: never), else the shipped ones; the types in `keep`
+    (--keep-shipped) take the shipped ones as they are -> (temps, source, buckets, bucket source)."""
     temps, source = {}, {}
     for t in PRIMS:
         rs = [r for r in fit_rows if r["prim"] == t]
@@ -709,11 +720,19 @@ def fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend=MIN_B
                 bsource[name] = f"shipped ({len(rs)} FIT decisions < {min_per_type})"
             else:
                 bsource[name] = f"type temperature ({len(rs)} FIT decisions < {min_per_type})"
+    for t in keep:  # with its thresholds: a shipped threshold is certified with the shipped temperature only
+        temps[t], source[t] = shipped_T[t], KEPT_SOURCE
+        if fmt == 2 and t == "choice":
+            buckets.pop("choice", None)
+            if shipped_B.get("choice"):
+                buckets["choice"] = dict(shipped_B["choice"])
+            for name, _, _ in BUCKETS:
+                bsource[name] = KEPT_SOURCE if name in (shipped_B.get("choice") or {}) else "type temperature (kept)"
     return temps, source, buckets, bsource
 
 
 def lofo(fit_rows, cert_rows, shipped_T, shipped_B, min_per_type, fmt, min_family=30, reference=None, draws=50, seed=0,
-         min_blend=MIN_BLEND):
+         min_blend=MIN_BLEND, keep=()):
     """Leave-one-family-out ECE per type: for every family the temperatures are fitted on the FIT decisions of the
     other families and applied to its CERT decisions. mean / max over the families with >= min_family CERT decisions of
     the type, mean_floor (the mean a perfectly calibrated predictor with the same confidences would show, `draws`
@@ -730,7 +749,7 @@ def lofo(fit_rows, cert_rows, shipped_T, shipped_B, min_per_type, fmt, min_famil
         if not held:
             continue
         temps, _, buckets, _ = fit_temps([r for r in fit_rows if fam(r) != f], shipped_T, shipped_B,
-                                         min_per_type, fmt, min_blend)
+                                         min_per_type, fmt, min_blend, keep)
         for t in types:
             cs = served([r for r in held if r["prim"] == t], temps, buckets)
             pooled[t] += cs
@@ -794,17 +813,23 @@ def fit_fallback(sets, T, min_per_set=30):
     return out
 
 
-def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk):
+def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk, baseline=None, keep=()):
     """The certified threshold of every type on its own decisions: a temperature changes neither the order of a type's
     yes/no confidences nor (up to ties) of its other confidences, so the accepted decisions do not depend on it, while
-    one threshold pooled over the types moves with the temperatures of the others."""
+    one threshold pooled over the types moves with the temperatures of the others. A type in `keep` takes the
+    threshold `baseline` certified for it (with the shipped temperature `temps` holds for it), measured on FIT and
+    CERT."""
     out = {}
     for t in PRIMS:
         cf = served([r for r in fit_rows if r["prim"] == t], temps, buckets)
-        if not cf:
+        if not cf and t not in keep:
             continue
         cc = served([r for r in cert_rows if r["prim"] == t], temps, buckets)
-        thr = threshold(cf, risk)
+        thr = certified(baseline, risk, t) if t in keep else threshold(cf, risk)
+        if t in keep and thr is None:
+            out[t] = dict(confidence=None, kept="shipped",
+                          reason="the compared file has no threshold for this type at this max_error")
+            continue
         if thr is None:
             out[t] = dict(confidence=None, reason=no_threshold_reason(cf, risk))
             continue
@@ -812,6 +837,8 @@ def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk):
         out[t] = dict(confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
                       fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"], cert_error=g_cert["error"],
                       cert_upper95=g_cert["upper95"], cert_accepted=g_cert["accepted"])
+        if t in keep:
+            out[t]["kept"] = "shipped"
     return out
 
 
@@ -917,17 +944,39 @@ def fit_conformal(fit_rows, cert_rows, temps, buckets, levels):
     return dict(method=CONFORMAL_METHOD, levels=out)
 
 
+def check_keep(keep, baseline):
+    """--keep-shipped: the types to keep, in PRIMS order; SystemExit when a type is not choice / noul / score, or the
+    compared file has no temperature or no threshold for it (a shipped threshold holds with its temperature only)."""
+    keep = set(keep)
+    if not keep:
+        return ()
+    if keep - set(PRIMS):
+        raise SystemExit(f"--keep-shipped {','.join(sorted(keep - set(PRIMS)))}: give question types among "
+                         f"{', '.join(PRIMS)} (an act question counts as its base type)")
+    shipped_T = (baseline or {}).get("temperature_per_prim") or {}
+    for t in sorted(keep):
+        if t not in shipped_T:
+            raise SystemExit(f"--keep-shipped {t}: the compared calibration has no {t} temperature to keep "
+                             "(give --calibration FILE or --model; not with --no-calibration)")
+        if not any(certified(baseline, float(r), t) is not None for r in (baseline.get("thresholds") or {})):
+            raise SystemExit(f"--keep-shipped {t}: the compared calibration has no {t} threshold to keep (a file "
+                             "fitted on other option orders loses its thresholds, as in basal-serve)")
+    return tuple(t for t in PRIMS if t in keep)
+
+
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
-        min_blend=MIN_BLEND, conformal=()):
+        min_blend=MIN_BLEND, conformal=(), keep=()):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
-    with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set."""
+    with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set.
+    The types in `keep` (--keep-shipped, see check_keep) take the temperatures and thresholds of `baseline`."""
     sets = [r for r in rows if r["prim"] == "multi"]
     rows = [r for r in rows if r["prim"] != "multi"]
     fit_rows = [r for r in rows if not is_cert(r["group"])]
     cert_rows = [r for r in rows if is_cert(r["group"])]
     shipped_T = baseline.get("temperature_per_prim", {})
     shipped_B = baseline.get("temperature_per_bucket", {}) if fmt == 2 else {}
-    temps, source, buckets, bsource = fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend)
+    keep = check_keep(keep, baseline)
+    temps, source, buckets, bsource = fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend, keep)
     cs_fit, cs_cert = served(fit_rows, temps, buckets), served(cert_rows, temps, buckets)
     shipped_cert = served(cert_rows, shipped_T, shipped_B)
     thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={})
@@ -941,7 +990,7 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
             entry = dict(confidence=thr, method=METHOD, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
                          fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"], cert_error=g_cert["error"],
                          cert_upper95=g_cert["upper95"], cert_accepted=g_cert["accepted"])
-        entry["per_type"] = per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk)
+        entry["per_type"] = per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk, baseline, keep)
         entry["pooled"] = POOLED_NOTE
         thresholds[str(float(risk))] = entry
         eff = effective_gate(cert_rows, temps, buckets, entry)
@@ -952,7 +1001,9 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
             report["compared"][str(float(risk))] = served_gate(cert_rows, shipped_T, shipped_B, baseline, risk)
         old = (baseline.get("thresholds") or {}).get(str(float(risk)), {}).get("confidence")
         report["targets"][risk] = dict(shipped=old, shipped_cert=gate(shipped_cert, old) if old is not None else None,
-                                       fitted=entry, fitted_cert=g_cert)
+                                       fitted=entry, fitted_cert=g_cert,
+                                       shipped_per_type={t: c for t in PRIMS
+                                                         if (c := certified(baseline, risk, t)) is not None})
     for k in floor_thresholds(thresholds, targets):  # the automated share of a floored target, as served
         eff = effective_gate(cert_rows, temps, buckets, thresholds[k])
         automated[k], automated_error[k] = eff["coverage"], eff["error"]
@@ -974,10 +1025,11 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
         if fmt == 2 and t == "choice":  # format 2: a choice question takes its bucket's temperature first
             report["types"][t]["not_served"] = dict(shipped=buckets_cover(shipped_B), fitted=buckets_cover(buckets))
     gates = dict(ece_lofo=lofo(fit_rows, cert_rows, shipped_T, shipped_B, min_per_type, fmt, min_family, reference,
-                               min_blend=min_blend),
+                               min_blend=min_blend, keep=keep),
                  automated_at=automated, automated_error=automated_error, automated_at_pooled=automated_pooled,
                  min_family=min_family)
     report["gates"] = gates
+    report["kept"] = list(keep)
     multi = fit_fallback(sets, temps.get("noul", 1.0), min_per_set) if sets else {}
     report["multi"] = multi
     extra = dict(gates=gates)
@@ -1167,7 +1219,8 @@ def table(report):
             per = r["fitted"].get("per_type") or {}
             lines.append(f"  {risk:g} per type: " + ", ".join(
                 f"{t} " + (f"{x['confidence']:.4f} ({pct(x['cert_coverage'])})" if x.get("confidence") is not None
-                           else "none (defers)") for t, x in per.items()))
+                           else "none (defers)") + (" kept shipped" if x.get("kept") else "")
+                for t, x in per.items()))
     if report.get("multi"):
         lines += ["", f"multi fallback     {'label set':<18}{'n':>5}{'threshold':>11}   {'IoU default -> fitted':<22}"
                       f"{'empty acc.':<17}false-empty"]
@@ -1246,8 +1299,12 @@ def warnings(report, targets):
         r = report["targets"][risk]
         for t, x in (r["fitted"].get("per_type") or {}).items():
             if x.get("confidence") is None:
+                shipped = (r.get("shipped_per_type") or {}).get(t)
                 out.append(f"max_error {risk:g}: {t} has no certified threshold; basal-serve defers every automatic "
-                           f"action of act and tool on {t} questions with this max_error")
+                           f"action of act and tool on {t} questions with this max_error"
+                           + (f" (the compared file certified {shipped:.4f}: --keep-shipped {t} keeps its {t} "
+                              "temperature and thresholds together)" if shipped is not None and not x.get("kept")
+                              else ""))
             elif cert_note(t, risk, x):
                 out.append(cert_note(t, risk, x))
     for t, g in ((report.get("gates") or {}).get("ece_lofo") or {}).items():
@@ -1315,7 +1372,7 @@ def refit(a, targets, reference, reference_name):
               "thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
         baseline = {k: v for k, v in baseline.items() if k not in ("thresholds", "multi", "task_thresholds")}
     cal, report = fit(rows, baseline, targets, a.min_per_type, head["fmt"], a.min_family, reference, a.min_per_set,
-                      a.min_blend, a.conformal)
+                      a.min_blend, a.conformal, a.keep_shipped)
     cal["gates"]["ece_reference"] = reference_name
     cal["engine"] = engine_name(head["kind"], head["quant"], head.get("vllm_preset"))
     cal["fitted_on"] = dict(data=head["data"], decisions=sum(r["prim"] != "multi" for r in rows),
@@ -1325,6 +1382,8 @@ def refit(a, targets, reference, reference_name):
                             model=head["model"], engine=head["engine"], orders=head["orders"],
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__} (--from-rows)")
     cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision") if head.get(k) is not None})
+    if report["kept"]:
+        cal["fitted_on"]["kept_shipped"] = report["kept"]
     cal["certified_on"] = "CERT split of fitted_on.data (30% by group)"
     cal["baseline"] = str(base_file) if baseline else "none"
     print(table(report))
@@ -1364,6 +1423,9 @@ def parser():
                     help="a type (or bucket) with fewer FIT decisions than --min-per-type but at least this many gets "
                          "the fitted temperature blended with the shipped one in proportion n / --min-per-type; 0 "
                          "keeps the shipped one")
+    ap.add_argument("--keep-shipped", dest="keep_shipped", default=None,
+                    help="question types (choice,noul,score) that keep the compared file's temperature and thresholds "
+                         "together instead of being fitted, e.g. a type these labels do not certify")
     ap.add_argument("--min-family", dest="min_family", type=int, default=30,
                     help="CERT decisions of a type a family needs for its leave-one-family-out ECE")
     ap.add_argument("--min-per-set", dest="min_per_set", type=int, default=30,
@@ -1400,6 +1462,7 @@ def main(argv=None):
         raise SystemExit(f"--conformal {a.conformal!r}: give coverage levels such as 0.8,0.9,0.95") from None
     if not all(0 < x < 1 for x in a.conformal):
         raise SystemExit("--conformal levels must lie between 0 and 1")
+    a.keep_shipped = tuple(x.strip() for x in (a.keep_shipped or "").split(",") if x.strip())
     if a.calibration and not Path(a.calibration).exists():
         raise SystemExit(f"--calibration {a.calibration}: no such file")
     if a.strict and a.reference is None:
@@ -1433,7 +1496,7 @@ def main(argv=None):
             raise SystemExit("no decisions to fit")
         if rows:
             cal, report = fit(rows, baseline, targets, a.min_per_type, fmt, a.min_family, reference, a.min_per_set,
-                              a.min_blend, a.conformal)
+                              a.min_blend, a.conformal, a.keep_shipped)
             cal["gates"]["ece_reference"] = reference_name
         else:  # task questions only: the temperatures and thresholds of the compared file stay as they are
             cal, report = {k: v for k, v in baseline.items() if k not in KEPT_OUT}, None
@@ -1517,6 +1580,8 @@ def main(argv=None):
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__}")
     if revision:
         cal["fitted_on"]["revision"] = revision
+    if report and report["kept"]:  # their temperatures and thresholds are the compared file's, not fitted here
+        cal["fitted_on"]["kept_shipped"] = report["kept"]
     if adapter:  # basal-serve applies the file only with this adapter (calibration_mismatch)
         cal["fitted_on"]["adapter"] = adapter
     if task_report:
