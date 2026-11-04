@@ -103,8 +103,9 @@ async def determinism(a, bodies):
         mixed = [x for pair in zip(probe, other) for x in pair]
         res = await asyncio.gather(*[one(b) for b in mixed])
     loaded = [probs(r) for r in res[::2]]
+    gap = lambda x, y: abs(x - y) if x == x and y == y else 1.0  # noqa: E731  a NaN is the largest possible change, not a skipped comparison
     diffs = [1.0 if [len(pa) for pa in p] != [len(qa) for qa in q] else  # an answer that vanished under load: the largest |dp|
-             max(abs(x - y) for pa, qa in zip(p, q) for x, y in zip(pa, qa)) for p, q in zip(alone, loaded)]
+             max(gap(x, y) for pa, qa in zip(p, q) for x, y in zip(pa, qa)) for p, q in zip(alone, loaded)]
     top = lambda ps: max(range(len(ps)), key=ps.__getitem__)  # noqa: E731
     flips = sum(top(pa) != top(qa) for p, q in zip(alone, loaded) for pa, qa in zip(p, q))
     out = dict(url=a.url, determinism=dict(requests=n, identical=sum(d == 0.0 for d in diffs), max_abs_diff=max(diffs),
