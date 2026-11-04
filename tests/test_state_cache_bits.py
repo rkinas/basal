@@ -36,6 +36,23 @@ def test_keys_per_channel_keep_small_channels():
     assert (y[..., 0] - c).abs().max() <= (c.max() - c.min()) / 30 * 1.01
 
 
+@pytest.mark.parametrize("bits", [8, 4])
+@pytest.mark.parametrize("T", [37, 300])
+def test_an_entry_comes_back_as_each_layer_quantised_alone(bits, T):
+    """The cache quantises the layers of one shape together (one call per shape, not 16-18 kernels per tensor and
+    layer); every layer it gives back equals that layer's own kv_quant / kv_dequant round trip, with layers of two
+    shapes (Gemma 4's layer types) interleaved."""
+    torch.manual_seed(0)
+    shapes = [(2, T, 128), (1, T // 2 + 1, 64)] * 3
+    kv = [((torch.randn(s) * (i + 1)).bfloat16(), torch.randn(s).bfloat16()) for i, s in enumerate(shapes)]
+    c = StateCache(1 << 30, bits=bits)
+    c.put(b"k", kv)
+    got = c.get(b"k")
+    for (k, v), (gk, gv) in zip(kv, got):
+        assert torch.equal(gk, kv_dequant(kv_quant(k, bits, True), bits, True))
+        assert torch.equal(gv, kv_dequant(kv_quant(v, bits, False), bits, False))
+
+
 def test_low_bit_entries_take_less_of_the_budget():
     kv = [(torch.randn(2, 256, 128).bfloat16(), torch.randn(2, 256, 128).bfloat16()) for _ in range(3)]
     sizes = {}

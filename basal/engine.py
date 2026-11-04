@@ -1067,6 +1067,34 @@ def code_rows(cache, key, make):
     return w
 
 
+def kv_quant_layers(kv, bits):
+    """kv_quant of every layer's keys and values ([(K, V)] per layer), the layers of one shape and dtype stacked into
+    one call: kv_quant's groups never span heads, so each layer's codes, steps and lows are those of the layer alone
+    (and 4-bit pairs never span layers: head sizes are even), in a few dozen kernel launches instead of 16-18 per tensor
+    (basal-2.0-4.5B: 1,920 per store) -> (number of layers, [(layer indices, keys' kv_quant, values' kv_quant)])."""
+    groups = {}
+    for i, (k, v) in enumerate(kv):
+        groups.setdefault((tuple(k.shape), k.dtype, tuple(v.shape), v.dtype), []).append(i)
+    out = []
+    for (ks, _, vs, _), idx in groups.items():
+        K = torch.stack([kv[i][0] for i in idx]).view(len(idx) * ks[0], *ks[1:])
+        V = torch.stack([kv[i][1] for i in idx]).view(len(idx) * vs[0], *vs[1:])
+        out.append((idx, kv_quant(K, bits, True), kv_quant(V, bits, False)))
+    return len(kv), out
+
+
+def kv_dequant_layers(e, bits):
+    """kv_quant_layers' entry -> [(K, V)] per layer in their dtype (views of one dequantised tensor per group)."""
+    n, groups = e
+    out = [None] * n
+    for idx, kq, vq in groups:
+        K, V = kv_dequant(kq, bits, True), kv_dequant(vq, bits, False)
+        K, V = K.view(len(idx), -1, *K.shape[1:]), V.view(len(idx), -1, *V.shape[1:])
+        for j, i in enumerate(idx):
+            out[i] = (K[j], V[j])
+    return out
+
+
 class StateCache:
     """Keys and values of request states (the root of a unit cut at the state boundary: template and state), keyed by a
     hash of their token ids, kept on the GPU within a byte budget with least-recently-used eviction. A request whose
@@ -1187,8 +1215,8 @@ class StateCache:
         """Stores a state's keys / values; with its token ids (tokens) it is also found by states that begin with it.
         replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step)."""
         if self.bits != 16:
-            kv = [(kv_quant(k, self.bits, True), kv_quant(v, self.bits, False)) for k, v in kv]
-            size = sum(t.numel() * t.element_size() for e in kv for x in e for t in x[:3])
+            kv = kv_quant_layers(kv, self.bits)
+            size = sum(t.numel() * t.element_size() for _, kq, vq in kv[1] for x in (kq, vq) for t in x[:3])
         else:
             size = sum(k.nbytes + v.nbytes for k, v in kv)  # torch tensors and MLX arrays alike
         if size > self.budget:
@@ -1218,7 +1246,7 @@ class StateCache:
         """A stored entry's keys / values in their dtype (dequantised for 8 / 4 bits)."""
         if self.bits == 16:
             return kv
-        return [(kv_dequant(k, self.bits, True), kv_dequant(v, self.bits, False)) for k, v in kv]
+        return kv_dequant_layers(kv, self.bits)
 
     def stats(self, blocking=True):
         """A CPU-only snapshot; nonblocking readers get None while the cache is busy."""
