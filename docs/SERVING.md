@@ -610,7 +610,7 @@ review = llamaindex_tool("http://127.0.0.1:8000", preset="compliance", lang="en"
   `crewai_tool` a CrewAI `BaseTool` (whose result is the answers as JSON text).
 - Without a preset the tool takes `state` and `questions`: the HTTP API's questions object ([API.md](API.md)); JSON
   text is accepted too. With `preset=` the questions are fixed and the agent passes only the state; `lang="pl"` or
-  `"en"` picks the wording (default: the language of the state).
+  `"en"` picks the wording (default: the `lang` of the `client=` given, else the language of the state).
 - The frameworks are not dependencies of basal: install the one you use (`uv pip install langchain-core`,
   `llama-index-core` or `crewai`). An adapter whose framework is missing says which package to install.
 - MCP hosts need no adapter: `basal-serve --mcp on` serves the same decisions at `/mcp`, and `basal-mcp` is a stdio
@@ -629,8 +629,11 @@ basal-run --list-presets
 basal-run --preset triage --input tickets.jsonl --output out.jsonl     # input lines: {"state": "..."}; --lang pl|en
 ```
 
-In Python: `Basal(url).preset(state, "triage")` (`from basal.client import Basal`). A preset holds plain HTTP-API
-questions, so it is a starting point: copy one and edit it for your own rules.
+In Python: `Basal(url).preset(state, "triage")` (`from basal.client import Basal`). The wording is in the `lang`
+given, else in the client's (`Basal(url, lang="pl")`), else in the language of the state: Polish when it has more
+signs of Polish (diacritics, common words such as `nie`, `jest`, `czy`, also typed without diacritics) than common
+English words. A preset holds plain HTTP-API questions, so it is a starting point: copy one and edit it for your own
+rules.
 
 ### Guardrails and routing (2.5)
 
