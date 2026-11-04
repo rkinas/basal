@@ -474,6 +474,9 @@ def is_cert(group):
 
 def fit_temperature(rows):
     """Temperature minimising the NLL of the gold answers on a log grid over T_GRID."""
+    rows = [r for r in rows if np.isfinite(r["p"]).all()]  # np.clip passes NaN, np.argmin then picks the first NaN: T_GRID[0]
+    if not rows:
+        raise ValueError("no row with finite probabilities to fit a temperature on")
     K = max(len(r["p"]) for r in rows)
     L = np.full((len(rows), K), -np.inf)
     for i, r in enumerate(rows):
