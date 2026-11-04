@@ -23,7 +23,7 @@ from importlib import metadata
 from .router import POLL_S, key_headers
 from .ui import END, FOLD, FONTS, HEADERS, HERE, MEMO_S, RECENT, RING, Hist, _ms, exact, redact
 
-DECISIONS = ("/v1/systemone", "/v1/basal")  # the router's routes whose requests are recorded
+DECISIONS = ("/v1/systemone", "/v1/basal", "/v1/decisions")  # the router's routes whose requests are recorded
 REPLICA_TIMEOUT = 2.0  # seconds a replica's GET /ui/state may take; then the page shows what the router knows
 MEMO_KEYS = 8  # snapshots kept, one per set of key headers (a viewer's key never reads another key's snapshot)
 KEEP = ("now", "started", "ready_at", "uptime", "status", "traffic", "cache", "telemetry")  # of a replica's state

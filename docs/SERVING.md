@@ -281,6 +281,8 @@ benchmarking a GPU.
     few states.
   - **Bounded load:** a replica holding more than 1.25 times the mean in-flight requests passes new ones on along
     the ring (`--load-factor`).
+  - **`POST /v1/decisions`** (OpenAI's Decisions API) goes to a replica routed by its `input`, and its response comes
+    back as the replica gave it (the cascade, blend and fallback apply to `/v1/systemone` and `/v1/basal`).
   - **Requests without a state** go to the less loaded of two random replicas.
   - **Readiness:** a replica gets requests only while its `/health` answers 200.
   - **Deadlines:** `--replica-timeout S` ends a call to a replica that has not answered in S seconds: the client gets

@@ -67,7 +67,7 @@ def ui_router(ready=None, ui=None, asked=None, **kw):
 def test_off_adds_no_route_and_leaves_choose_alone():
     rt = R.Router(NAMES, transport=fleet(set(NAMES), {}))
     a = R.app(rt, poll_s=3600)
-    assert [r.path for r in a.routes] == ["/v1/systemone", "/v1/basal", "/health", "/v1/models", "/metrics"]
+    assert [r.path for r in a.routes] == ["/v1/systemone", "/v1/basal", "/v1/decisions", "/health", "/v1/models", "/metrics"]
     assert rt.choose.__func__ is R.Router.choose                                    # not wrapped
     with TestClient(a) as c:
         asyncio.run(rt.poll())
@@ -91,7 +91,7 @@ def test_main_without_ui_imports_nothing_of_it():
     out = subprocess.run([sys.executable, "-c", MAIN_OFF], capture_output=True, text=True, timeout=120,
                          cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     r = json.loads(out.stdout.strip().splitlines()[-1])
-    assert r == {"routes": ["/v1/systemone", "/v1/basal", "/health", "/v1/models", "/metrics"], "ui": False,
+    assert r == {"routes": ["/v1/systemone", "/v1/basal", "/v1/decisions", "/health", "/v1/models", "/metrics"], "ui": False,
                  "ui_mod": False}
 
 

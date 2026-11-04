@@ -78,6 +78,9 @@ name one request alike.
 API keys: a client's Authorization / X-API-Key header is passed on, as it came, to every replica its request reaches
 (--replicas, --escalate, --blend, --route; never to --fallback), so replicas started with --api-keys (the same key file
 on each) check it as if called directly. The router checks no key itself: its /health and /metrics stay open.
+
+POST /v1/decisions (OpenAI's Decisions API) goes to a replica of --replicas / --gpus routed by its input, and its
+response comes back as the replica gave it: the cascade, blend and fallback apply to /v1/systemone and /v1/basal.
 """
 import argparse
 import asyncio
@@ -104,10 +107,12 @@ SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (sp
 
 
 def state_key(body):
-    """The routing key of a request body: its state with whitespace normalised (None without a state, or for a body
-    that is not JSON or nested too deeply to read: the replica answers that client error)."""
+    """The routing key of a request body: its state (a /v1/decisions request: its input) with whitespace normalised
+    (None without one, or for a body that is not JSON or nested too deeply to read: the replica answers that client
+    error)."""
     try:
-        state = json.loads(body).get("state")
+        d = json.loads(body)
+        state = d.get("state", d.get("input"))
     except (ValueError, AttributeError, RecursionError):
         return None
     if not isinstance(state, str) or not state.strip():
@@ -441,6 +446,8 @@ class Router:
     async def forward(self, path, body, headers):
         """-> (status, content, content type): the request to the replica its pool and state give, then (--escalate)
         its low-confidence questions to the escalation replicas."""
+        if path == "/v1/decisions":  # as it is (OpenAI's shape: the cascade, blend and fallback read basal answers)
+            return await self._send("main", path, body, headers)
         pool = "main"
         if any(name.startswith("script:") for name in self.rings):  # --route
             try:
@@ -796,6 +803,7 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
     from .auth import request_ids
     ids = [Middleware(request_ids)]  # x-request-id on every response, passed on to the replicas
     routes = [Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
+              Route("/v1/decisions", post, methods=["POST"]),
               Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)]
     if ui is None:
         return Starlette(routes=routes, lifespan=lifespan, middleware=ids)
