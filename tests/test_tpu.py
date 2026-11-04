@@ -123,6 +123,23 @@ def test_blocked_attention_equals_full():
         assert np.allclose(np.asarray(attention(q, k, v, end, 0.3, q_block=qb, kv_block=kvb)), full, atol=1e-5)
 
 
+def test_blocked_attention_reads_no_key_block_after_its_last_query():
+    """A query block reads the key blocks up to its last query only: the later ones are masked for all its queries
+    (about half of a long prompt's blocks). Probe: NaN keys / values in the last key block poison only the query block
+    that sees them (2.5.3 multiplied them by zero probabilities in every query block: NaN everywhere)."""
+    rng = np.random.default_rng(2)
+    b, nh, nkv, L, d = 1, 4, 2, 24, 8
+    q, k, v = (rng.standard_normal((b, h, L, d)).astype(np.float32) for h in (nh, nkv, nkv))
+    end = np.arange(1, L + 1, dtype=np.int32)[None]
+    ref = np.asarray(attention(q, k, v, end, 0.3))
+    k[:, :, 16:], v[:, :, 16:] = np.nan, np.nan
+    out = np.asarray(attention(q, k, v, end, 0.3, q_block=8, kv_block=8))
+    assert np.allclose(out[:, :, :16], ref[:, :, :16], atol=1e-5)
+    assert np.isnan(out[:, :, 16:]).all()
+    out = np.asarray(attention(q, k, v, end, 0.3, q_block=12, kv_block=4))  # query block 0..11 reads key blocks 0-2
+    assert np.allclose(out[:, :, :12], ref[:, :, :12], atol=1e-5) and np.isnan(out[:, :, 12:]).all()
+
+
 def test_long_prompt_refused_above_max_len(backend):
     with pytest.raises(ValueError, match="longer than --max-len 64"):
         backend.run_shared([([[1] + [5] * 70], [LETTERS])])
