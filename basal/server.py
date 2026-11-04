@@ -236,6 +236,9 @@ class Overloaded(RuntimeError):
     code = "OVERLOADED"
 
 
+ERROR_CODES = ("INVALID_REQUEST", "OVERLOADED", "TIMEOUT", "OUT_OF_MEMORY", "INTERNAL_ERROR")
+
+
 class TimedOut(RuntimeError):
     """No answer within --request-timeout: HTTP 504; the request's work still queued is dropped."""
     code = "TIMEOUT"
@@ -2858,6 +2861,14 @@ class Starting:
             self.httpd = None
 
 
+def error_code(e):
+    """The code of a failed request's error: INVALID_REQUEST (422), OVERLOADED (503 beyond --max-requests),
+    OUT_OF_MEMORY (503), TIMEOUT (504), INTERNAL_ERROR (500)."""
+    if isinstance(e, (Overloaded, TimedOut)):
+        return e.code
+    return {422: "INVALID_REQUEST", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[http_status(e)]
+
+
 def error_body(e, error_format="basal"):
     """The body and status of a failed request: {"error": message, "code": code} (a 422 adds "detail"); with
     --error-format openai {"error": {"message", "type", "code"}}, the shape of OpenAI-style servers (vLLM's
@@ -2866,8 +2877,7 @@ def error_body(e, error_format="basal"):
     if error_format == "openai":
         kind = "validation_error" if status == 422 else "server_error"
         return {"error": {"message": str(e), "type": kind, "code": status}}, status
-    code = getattr(e, "code", None) if isinstance(e, (Overloaded, TimedOut)) else \
-        {422: "INVALID_REQUEST", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[status]
+    code = error_code(e)
     body = {"error": str(e), "code": code}
     if status == 422:
         body["detail"] = [{"loc": ["body"], "msg": str(e), "type": "value_error"}]
@@ -2889,6 +2899,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     from . import __version__
     from . import decisions as dec
     counts = {"requests": 0, "failed": 0, "seconds": 0.0}  # GET /metrics
+    failures = dict.fromkeys(ERROR_CODES, 0)  # failed requests by error_code (an invalid request, overload, the engine)
     cache_seen = {"stats": None, "at": 0}  # the last state-cache snapshot /metrics read, and its Unix time
 
     def logged(e):
@@ -2924,6 +2935,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                 return JSONResponse(*CLIENT_GONE)
             except Exception as e:  # noqa: BLE001
                 counts["failed"] += 1
+                failures[error_code(e)] += 1
                 return error(e)
             finally:
                 counts["seconds"] += time.perf_counter() - t
@@ -2975,6 +2987,9 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
              ("basal_requests_total", "requests served (POST /v1/systemone, /v1/basal, /v1/decisions)", "counter",
               [({}, counts["requests"])]),
              ("basal_requests_failed_total", "requests answered with an error", "counter", [({}, counts["failed"])]),
+             ("basal_request_errors_total", "those errors by code (INVALID_REQUEST: the client's request; OVERLOADED, "
+              "TIMEOUT: the load; OUT_OF_MEMORY, INTERNAL_ERROR: the server)", "counter",
+              [({"code": c}, n) for c, n in failures.items()]),
              ("basal_request_seconds_total", "time spent on those requests", "counter",
               [({}, round(counts["seconds"], 6))])]
         if hasattr(srv, "liveness"):  # where that time went: waiting for the engine, in its calls (main lane)

@@ -451,7 +451,9 @@ basal-serve exports:
 - `basal_requests_waiting` and `basal_requests_running` (the `queued` and `running` of `/health`), also as
   `vllm:num_requests_waiting` / `vllm:num_requests_running`, which routers such as llm-d read;
 - `basal_requests_total`, `basal_requests_failed_total` and `basal_request_seconds_total` (requests to
-  `/v1/systemone` and `/v1/basal`);
+  `/v1/systemone` and `/v1/basal`), and `basal_request_errors_total{code=...}`, the failed ones by error code
+  (`INVALID_REQUEST`: the client's request; `OVERLOADED`, `TIMEOUT`: the load; `OUT_OF_MEMORY`, `INTERNAL_ERROR`: the
+  server);
 - where that time goes: `basal_queue_wait_seconds_total` (requests waiting for their first engine call),
   `basal_engine_seconds_total` and `basal_engine_calls_total` (engine calls of the main lane), and as gauges
   `basal_engine_call_running_seconds` (the oldest engine call running now; `--stall-s` makes `/health` answer 503

@@ -80,3 +80,25 @@ def test_a_router_sends_nothing_to_a_stalled_replica():
         for i in range(20):
             c.post("/v1/systemone", json=dict(BODY, state=f"document {i}"))
     assert seen == ["http://ok"] * 20
+
+
+def test_metrics_count_the_errors_by_code():
+    eng = Engine()
+    srv = AppServer(eng)
+    srv.max_requests = 1
+
+    async def go(c):
+        await c.post("/v1/systemone", json={"state": "x"})                                   # INVALID_REQUEST
+        await c.post("/v1/decisions", content=b"{not json")                                 # INVALID_REQUEST
+        eng.go.clear()
+        held = asyncio.create_task(c.post("/v1/systemone", json=BODY))
+        while not eng.entered.is_set():
+            await asyncio.sleep(0.01)
+        await c.post("/v1/systemone", json=BODY)                                             # OVERLOADED
+        eng.go.set()
+        await held
+        return (await c.get("/metrics")).text
+    m = asyncio.run(_with_app(srv, go))
+    assert 'basal_request_errors_total{code="INVALID_REQUEST"} 2' in m
+    assert 'basal_request_errors_total{code="OVERLOADED"} 1' in m and 'basal_request_errors_total{code="TIMEOUT"} 0' in m
+    assert "basal_requests_failed_total 3" in m
