@@ -380,6 +380,8 @@ class Router:
             if sc is not None:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
                 pool = f"script:{sc}" if f"script:{sc}" in self.rings else pool
+        if not (self.levels or self.blends or self.fallback):
+            req = None  # (nothing reads it after the replica answers: not held while the request is in flight)
         status, content, ctype = await self._send(pool, path, body, headers, key)
         if req is None:
             return status, content, ctype
