@@ -45,33 +45,35 @@ DUR_WORD = re.compile(r"\b(tydzień|tygodnia|miesiąc|miesiąca|rok|roku)\b")
 YEAR_BEFORE = re.compile(r"\d{4}(?:-\d{2}-\d{2})?\s+$")  # "2025 roku", "2025-03-03 roku": part of a date
 AGO = re.compile(r"\b(\d{1,3}) (dni|dzień) temu\b")
 TODAY = re.compile(r"\b(?:[Dd]ziś|[Dd]zisiaj)(?: jest| mamy|:)? ")
-AMOUNT = re.compile(r"(?<![\d,.])\b(\d{1,3}(?:[  ]\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?) zł\b")
+# every space separator (Unicode Zs: NBSP, en/em/figure/thin/hair spaces, narrow NBSP, ...): a thousands separator or the gap before "zł"
+ZS = r"[ \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]"
+AMOUNT = re.compile(r"(?<![\d,.])\b(\d{1,3}(?:" + ZS + r"\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)" + ZS + r"zł\b")
 VAT = re.compile(r"(?<![\d,.])\b(23|8|5) ?%")
 VAT_CTX = re.compile(r"\bVAT\b|\bpodat\w* od towarów")
 
 # money arithmetic
 MAX_TOTAL, MAX_COMPARE, MAX_PLAIN, MAX_EURO = 12, 6, 3, 3
-AMT = r"\d{1,3}(?:[ \u00a0]\d{3})*(?:,\d{2})?"
-STATED = re.compile(r"(?<![\d,.])\b(\d{1,3}(?:[ \u00a0]\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)"
-                    r"[ \u00a0]?(?:zł|PLN)\b")
-EURO_AMT = r"(?<![\d,])\b(\d{1,3}(?:[ \u00a0]\d{3})*(?:,\d{1,2})?)[ \u00a0]?(?:euro\b|EUR\b|€)"
+AMT = r"\d{1,3}(?:" + ZS + r"\d{3})*(?:,\d{2})?"
+STATED = re.compile(r"(?<![\d,.])\b(\d{1,3}(?:" + ZS + r"\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)"
+                    r"" + ZS + r"?(?:zł|PLN)\b")
+EURO_AMT = r"(?<![\d,])\b(\d{1,3}(?:" + ZS + r"\d{3})*(?:,\d{1,2})?)" + ZS + r"?(?:euro\b|EUR\b|€)"
 EURO = re.compile(EURO_AMT)
-RATE = r"(\d{1,2},\d{2,4})[ \u00a0]?(?:zł|PLN)\b"
+RATE = r"(\d{1,2},\d{2,4})" + ZS + r"?(?:zł|PLN)\b"
 RATE_ANY = re.compile(r"(?<![\d,])\b" + RATE)
-RATE_PER = re.compile(r"(?<![\d,])\b" + RATE + r"[ \u00a0]?(?:za|/)[ \u00a0]?(?:1[ \u00a0])?(?:euro\b|EUR\b|€)")
-RATE_EQ = re.compile(r"\b1[ \u00a0]?(?:euro\b|EUR\b|€)[ \u00a0]?=[ \u00a0]?" + RATE)
-EURO_X_RATE = re.compile(EURO_AMT + r"[ \u00a0]?[×*][ \u00a0]?" + RATE)
+RATE_PER = re.compile(r"(?<![\d,])\b" + RATE + r"" + ZS + r"?(?:za|/)" + ZS + r"?(?:1" + ZS + r")?(?:euro\b|EUR\b|€)")
+RATE_EQ = re.compile(r"\b1" + ZS + r"?(?:euro\b|EUR\b|€)" + ZS + r"?=" + ZS + r"?" + RATE)
+EURO_X_RATE = re.compile(EURO_AMT + r"" + ZS + r"?[×*]" + ZS + r"?" + RATE)
 KURS = re.compile(r"\b[Kk]urs\w*")
 BOUND = re.compile(r"[.;!?](?=\s+[A-ZĄĆĘŁŃÓŚŹŻ„\"(])|\n")
-LABEL = re.compile(r"[ \u00a0]?\(?(netto|brutto)\b")
+LABEL = re.compile(r"" + ZS + r"?\(?(netto|brutto)\b")
 BUDGET = re.compile(r"\b[Bb]udżet\w*")
 USED = re.compile(r"\b(wykorzystano|wydano|wydatkowano|zużyto|zaangażowano|rozdysponowano)\b")
 UNIT = r"(?:szt\.|sztuk[ia]?|usł\.|godz\.|kg|op\.|opak\.|kpl\.|os\.)"
-PRODUCT = re.compile(r"(?<![\d,])(?<!\d[ \u00a0])\b(\d{1,4})[ \u00a0]?(?:" + UNIT + r"[ \u00a0]?)?×[ \u00a0]?(?=\d)")
+PRODUCT = re.compile(r"(?<![\d,])(?<!\d" + ZS + r")\b(\d{1,4})" + ZS + r"?(?:" + UNIT + r"" + ZS + r"?)?×" + ZS + r"?(?=\d)")
 TIER = re.compile(r"(?<![\d,])\b(" + AMT + r") zł(?: netto| brutto)?(?: za (?:sztukę|szt\.))?(?: przy (?:zamówieniu|zakupie))?"
-                  r" (poniżej|do|od|powyżej|co najmniej|min\.) (\d{1,5})(?: do (\d{1,5})|[ \u00a0]?[–-][ \u00a0]?(\d{1,5}))?"
+                  r" (poniżej|do|od|powyżej|co najmniej|min\.) (\d{1,5})(?: do (\d{1,5})|" + ZS + r"?[–-]" + ZS + r"?(\d{1,5}))?"
                   r" (?:szt\.|sztuk)")
-QTY = re.compile(r"(?<![\d,])(?<!\d[ \u00a0])\b(\d{1,5})[ \u00a0](?:szt\.|sztuk[ia]?\b)")
+QTY = re.compile(r"(?<![\d,])(?<!\d" + ZS + r")\b(\d{1,5})" + ZS + r"(?:szt\.|sztuk[ia]?\b)")
 QTY_PRE = ("poniżej ", "od ", "do ", "powyżej ", "najmniej ", "min. ", "–", "-")
 FEE = re.compile(r"\b(?:[Dd]ostawa|[Ww]ysyłka|[Tt]ransport|[Pp]rzesyłka|[Kk]oszty? (?:dostawy|wysyłki|transportu|przesyłki))\b")
 
@@ -177,7 +179,7 @@ def _pl_amount(x):
 
 
 def _dec(raw):
-    return Decimal(raw.replace(" ", "").replace("\u00a0", "").replace(".", "").replace(",", "."))
+    return Decimal(re.sub(ZS, "", raw).replace(".", "").replace(",", "."))
 
 
 def _q(x):
@@ -325,7 +327,7 @@ def _money(text, covered):
     if len(tiers) >= 2:
         spans = [(m.start(), m.end()) for m in tiers]
         qs = {int(m.group(1)) for m in QTY.finditer(text)
-              if not any(s <= m.start() < e for s, e in spans) and not re.match(r"[ \u00a0]?×", text[m.end():])
+              if not any(s <= m.start() < e for s, e in spans) and not re.match(r"" + ZS + r"?×", text[m.end():])
               and not text[:m.start()].endswith(QTY_PRE)}
         if len(qs) == 1:
             q, hits = qs.pop(), []
