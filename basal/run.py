@@ -10,8 +10,8 @@ Two input formats are accepted (they can be mixed):
 Output (one line per input line, same order): {"id", "answers", "latency_ms"} plus, for simple lines, "prediction"
 (index of the chosen option), "confidence" and "correct" when "gold" is given; a line that cannot be sent or read
 back gets "error" instead, and the other lines go on. Lines are read and answers written as they go (at most a few
-times --concurrency lines are held), into <output>.part, renamed to <output> at the end: an interrupted run keeps the
-answers so far, in order, in <output>.part. A summary (accuracy if gold is present, latency) is printed at the end.
+times --concurrency lines are held), into <output>.part, renamed to <output> at the end (an existing <output> is
+replaced then): an interrupted run keeps the answers so far, in order, in <output>.part. A summary (accuracy if gold is present, latency) is printed at the end.
 """
 import argparse
 import asyncio
@@ -165,7 +165,8 @@ async def run(a, transport=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", help="JSONL file")
-    ap.add_argument("--output", help="JSONL file with one answer per input line")
+    ap.add_argument("--output", help="JSONL file with one answer per input line (an existing file is replaced; not the "
+                                     "--input file)")
     ap.add_argument("--preset", default=None, help="ready questions for lines with a state only (--list-presets)")
     ap.add_argument("--lang", choices=["pl", "en"], default=None, help="--preset wording (default: the state's)")
     ap.add_argument("--list-presets", dest="list_presets", action="store_true")
