@@ -235,8 +235,8 @@ benchmarking a GPU.
 
   `basal-fuse-adapter` rewrites the model's safetensors files with the decoder layers' weights merged as `--adapter`
   merges them at load (the same tensor names, dtypes and shards) and copies the other files, except the base model's
-  `CALIBRATION` files, NVFP4 activation scales and checksums, which do not hold for the merged weights. It reads one
-  weights file at a time.
+  `CALIBRATION` files, NVFP4 activation scales, evidence head and checksums, which do not hold for the merged
+  weights. It reads one weights file at a time.
 
   The merge is PEFT's `merge_and_unload` on every framework: `(B @ A) · scale` in float32, added to the weight in
   float32 and rounded once to the weight's dtype. The update is computed once on the CPU for every engine (the graph

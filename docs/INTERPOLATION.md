@@ -38,8 +38,9 @@ The merged model is served with the `--meta-from` tokenizer only. With basal-2.0
 basal-2.0 was fine-tuned with.
 
 **Prompt format.** The non-weight files (`basal.json`, tokenizer, chat template, `CALIBRATION*.json`) come from
-`--meta-from`: `new` (default), `old`, or a path / repository id. The merged model is served in that checkpoint's
-prompt format. For a basal-1.5 / basal-2.0 pair:
+`--meta-from`: `new` (default), `old`, or a path / repository id. Its model card, checksums, evidence head, thinking
+adapter and NVFP4 activation scales are not copied: they describe or were fitted to its own weights. The merged model
+is served in that checkpoint's prompt format. For a basal-1.5 / basal-2.0 pair:
 - `--meta-from old` gives a [format 1](FORMATS.md) model: letters, two option orders averaged.
 - The default gives a [format 2](FORMAT2.md) model: codes, one order.
 

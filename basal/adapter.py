@@ -257,8 +257,9 @@ def _temp_dir():
 
 
 # files of a model directory a fused checkpoint does not take over: the base model's calibration, NVFP4 activation
-# scales and checksums no longer hold for the merged weights (the adapter's calibration is copied, fused_calibration)
-NOT_FUSED = ("CALIBRATION*", "NVFP4_AMAX.json", "SHA256SUMS")
+# scales, evidence head (trained on its hidden states; --adapter refuses evidence for the same reason) and checksums no
+# longer hold for the merged weights (the adapter's calibration is copied, fused_calibration)
+NOT_FUSED = ("CALIBRATION*", "NVFP4_AMAX.json", "SHA256SUMS", "evidence_head.pt")
 
 
 def _weight_names(ad, md):

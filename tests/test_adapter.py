@@ -83,7 +83,7 @@ def test_fuse_checkpoint_writes_the_weights_the_load_time_merge_makes(tmp_path, 
     files = sorted(md.glob("*.safetensors"))
     assert (len(files) > 1) == (shards > 1)
     for name in ("tokenizer_config.json", "basal.json", "CALIBRATION.json", "CALIBRATION.o2.json", "NVFP4_AMAX.json",
-                 "SHA256SUMS"):
+                 "SHA256SUMS", "evidence_head.pt"):
         (md / name).write_text("{}", encoding="utf-8")
     (md / "prepared").mkdir()
     ad = adapter_module.read(write_adapter(tmp_path / "edu", "peft", deltas(), use_rslora=True))
@@ -103,7 +103,8 @@ def test_fuse_checkpoint_writes_the_weights_the_load_time_merge_makes(tmp_path, 
         assert (f.read_bytes() == (out / f.name).read_bytes()) == (not touched)
     kept = sorted(x.name for x in out.iterdir() if x.suffix != ".safetensors")
     assert "basal.json" in kept and "tokenizer_config.json" in kept and "config.json" in kept
-    assert not {"CALIBRATION.json", "CALIBRATION.o2.json", "NVFP4_AMAX.json", "SHA256SUMS", "prepared"} & set(kept)
+    assert not {"CALIBRATION.json", "CALIBRATION.o2.json", "NVFP4_AMAX.json", "SHA256SUMS", "evidence_head.pt",
+                "prepared"} & set(kept)
     assert ("model.safetensors.index.json" in kept) == (shards > 1)
 
 
