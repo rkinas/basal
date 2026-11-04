@@ -52,6 +52,7 @@ from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFB
                      resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
+from .textio import read_text
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
@@ -1035,7 +1036,7 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     its fitted_on.adapter."""
     layout = layout or "canonical"
     cal = calibration_file(md, kind, path, quant, preset, layout, adapter.path if adapter else None)
-    data = {} if off or not cal.exists() else json.loads(cal.read_text(encoding="utf-8"))
+    data = {} if off or not cal.exists() else json.loads(read_text(cal))
     if data and adapter and not path and cal.parent != adapter.path:
         why = f"{cal.name} belongs to the base model, served with --adapter {adapter.name}"
         return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why

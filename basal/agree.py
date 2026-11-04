@@ -39,6 +39,7 @@ from pathlib import Path
 
 from . import synth
 from .prompt import letter_ids, model_format, render
+from .textio import read_text
 
 GATE = 0.99
 OLLAMA_URL, LLAMACPP_URL = "http://127.0.0.1:11434", "http://127.0.0.1:8080"
@@ -280,7 +281,7 @@ def main(argv=None):
             raise SystemExit(f"{spec}: the weights {w} have a different tokenizer from {a.model}")
     qs = []
     if a.questions:
-        qs = [json.loads(x) for x in Path(a.questions).read_text(encoding="utf-8").splitlines() if x.strip()]
+        qs = [json.loads(x) for x in read_text(a.questions).splitlines() if x.strip()]
         qs = [q for q in qs if "options" in q and 2 <= len(q["options"]) <= (255 if fmt == 2 else 10)][: a.n_questions]
     single, multi, long = build(tok, fmt, a.n_single, a.n_multi, a.n_long, a.seed, qs)
     sets = {"single": single, "multi": multi, "long": long}

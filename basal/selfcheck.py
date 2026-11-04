@@ -30,6 +30,7 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__, synth
+from .textio import read_text
 
 TIE = 0.02
 SHAPES = ((12, 200), (6, 800), (2, 1500))  # (requests, state tokens)
@@ -110,7 +111,7 @@ def compare(ref, got):
 
 
 def check(url, reference, gate, note):
-    ref = json.loads(find(reference).read_text(encoding="utf-8"))
+    ref = json.loads(read_text(find(reference)))
     info = server_info(url)
     if info["name"] and ref["model"] and info["name"].removesuffix("-GGUF") != ref["model"].removesuffix("-GGUF"):
         print(f"warning: the server reports model {info['name']!r}, the reference is for {ref['model']!r}", file=sys.stderr)
