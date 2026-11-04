@@ -291,9 +291,12 @@ def test_torch_varlen_needs_the_flash_op_not_the_varlen_attn_wrapper(monkeypatch
     def aten(schema):
         op = type("Op", (), {"default": type("D", (), {"_schema": schema})()})()
         return type("Aten", (), {"_flash_attention_forward": op})()
-    monkeypatch.setattr(E.torch.ops, "aten", aten("aten::_flash_attention_forward(Tensor query, Tensor key, Tensor "
-                                                  "value, ..., *, float? scale=None) -> (Tensor output, ...)"))
-    assert "seqused_k" in E.torch_varlen_available(torch.bfloat16)
+    head = "aten::_flash_attention_forward(Tensor query, Tensor key, Tensor value, ..., *, float? scale=None"
+    window = ", SymInt? window_size_left=None, SymInt? window_size_right=None"
+    for extra, ok in (("", False), (window, False), (", Tensor? seqused_k=None", False),
+                      (window + ", Tensor? seqused_k=None", True)):  # each of the two is needed
+        monkeypatch.setattr(E.torch.ops, "aten", aten(head + extra + ") -> (Tensor output, ...)"))
+        assert (E.torch_varlen_available(torch.bfloat16) is None) == ok, extra
 
 
 def test_pass2_graphs():
