@@ -699,7 +699,9 @@ def spawn(gpus, port0, serve_args):
     host = [] if any(x == "--host" or x.startswith("--host=") for x in serve_args) else ["--host", "127.0.0.1"]
     for i, g in enumerate(gpus):
         port = port0 + i
-        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(g))
+        mask = [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()]
+        dev = mask[int(g)] if mask and str(g).isdigit() and int(g) < len(mask) else str(g)  # --gpus indexes the user's mask
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=dev)
         procs.append(subprocess.Popen([*SERVE, "--port", str(port), *host, *serve_args], env=env,
                                       start_new_session=hasattr(os, "killpg"), preexec_fn=pre))
         urls.append(f"http://127.0.0.1:{port}")
