@@ -18,10 +18,9 @@ Input (JSONL): one /v1/systemone request per line, every question with its corre
           (0 = first level; an integer is always the index), key or text; act: an outcome, as for choice (yes / no for true / false outcomes);
           multi: the list of labels that apply (keys or descriptions; [] = none)
   group   optional, on the line or on a question: decisions of one group (twins, duplicates, one customer) stay on
-          the same side of the FIT / CERT split; default: one group per line (its questions share the state). The
-          bound of a threshold counts every decision as independent: when a type or task has more FIT decisions than
-          groups (several claims or fields of one document, questions about one state), the report warns that errors
-          shared within a group make the bound optimistic
+          the same side of the FIT / CERT split; default: one group per line (its questions share the state). When the
+          errors of a group's decisions go together (claims or fields of one document), the bound counts them as
+          fewer independent decisions (design effect 1 + (m - 1) ICC)
   family  optional, on the line or on a question: the task family of the leave-one-family-out ECE gate (default: the
           question name)
   id      optional, used in messages.
@@ -609,6 +608,53 @@ def levels(cs):
     return out
 
 
+def icc(cs, groups):
+    """The intraclass correlation of the errors of decisions (confidence, correct) within their groups (one-way ANOVA
+    estimator, clipped to [0, 1]): 0 when no group holds two decisions or there is no error to share. When one claim
+    or field of a document is wrong the others are likelier wrong too; the bound then counts fewer independent
+    decisions (design_effect)."""
+    by = defaultdict(list)
+    for (_, ok), g in zip(cs, groups):
+        by[g].append(0.0 if ok else 1.0)
+    N, k = len(cs), len(by)
+    if N == k or k < 2:
+        return 0.0
+    y = sum(sum(v) for v in by.values()) / N
+    ssb = sum(len(v) * (sum(v) / len(v) - y) ** 2 for v in by.values())
+    ssw = sum(sum((x - sum(v) / len(v)) ** 2 for x in v) for v in by.values())
+    msb, msw = ssb / (k - 1), ssw / (N - k)
+    n0 = (N - sum(len(v) ** 2 for v in by.values()) / N) / (k - 1)
+    den = msb + (n0 - 1) * msw
+    return min(1.0, max(0.0, (msb - msw) / den)) if den > 0 else 0.0
+
+
+def design_effect(cs, groups):
+    """(rho, deff) of decisions in groups: rho = icc, deff = 1 + (m - 1) rho with m = the sum of the squared group
+    sizes over the decisions (Kish; the mean group size a decision is in). Every accepted set is discounted by the
+    deff of all the decisions: as if a group's decisions were always accepted together, which overstates it for the
+    most confident levels (where a group has few accepted decisions) and keeps the bound on the safe side when rho is
+    underestimated (rare errors). One decision per group, or rho 0: deff 1."""
+    rho = icc(cs, groups)
+    return rho, design_effect_of(groups, rho)
+
+
+def design_effect_of(groups, rho):
+    """deff of decisions in these groups at a given rho (CERT's group sizes with FIT's rho)."""
+    if not rho or not groups:
+        return 1.0
+    size = defaultdict(int)
+    for g in groups:
+        size[g] += 1
+    return 1 + (sum(v * v for v in size.values()) / len(groups) - 1) * rho
+
+
+def effective(n, e, deff=1.0):
+    """n decisions with e errors -> (n, e) as independent decisions: both divided by deff, n rounded down, e up."""
+    if deff <= 1:
+        return n, e
+    return math.floor(n / deff + 1e-9), math.ceil(e / deff - 1e-9)
+
+
 def within(e, n, risk, alpha=ALPHA):
     """Whether the one-sided Clopper-Pearson upper bound of e errors in n is at most risk: P(X <= e) <= alpha for
     X ~ Binomial(n, risk) (the bound is the p where that probability is alpha, and it falls as p grows), one binomial
@@ -636,12 +682,14 @@ def refutes(e, n, risk, alpha=ALPHA):
     return 1.0 - math.exp(m) * float(np.exp(t - m).sum()) <= alpha
 
 
-def withdrawn(entry, risk):
+def withdrawn(entry, risk, deff=1.0):
     """A per-type or task entry (certified on FIT, measured on CERT) -> the entry, or with its confidence withdrawn
-    (null: basal-serve defers) when CERT refutes it."""
+    (null: basal-serve defers) when CERT refutes it (its decisions counted as the independent ones they are worth, the
+    errors rounded down)."""
     n = entry.get("cert_accepted") or 0
     e = round((entry.get("cert_error") or 0.0) * n)
-    if entry.get("confidence") is None or not refutes(e, n, risk):
+    n_i, e_i = (n, e) if deff <= 1 else (math.ceil(n / deff - 1e-9), math.floor(e / deff + 1e-9))
+    if entry.get("confidence") is None or not refutes(e_i, n_i, risk):
         return entry
     return dict(entry, confidence=None, refuted=entry["confidence"],
                 reason=f"certified on FIT at {entry['confidence']:.4f}, but CERT refutes it: {e} error"
@@ -661,15 +709,16 @@ def start_level(lv, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
     return next((k for k, (_, n, _) in enumerate(lv) if n >= need), None)
 
 
-def threshold(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
+def threshold(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED, deff=1.0):
     """The certified threshold of a fixed-sequence test: the levels are tested from the most confident down, starting
     at start_level (set by the counts alone, before any outcome is read), each at the one-sided bound <= risk, and the
     scan stops at the first level that fails; the threshold is the last level that passed, None when the first one
     fails. Testing in a fixed order and stopping at the first failure keeps the chance of certifying a threshold whose
     accepted decisions are above `risk` at <= alpha; scanning on past failures until one level passes does not. A
     level that adds no error to a passing one passes too (more decisions, the same errors: a lower bound), so the
-    bound is computed only where errors are added."""
-    lv = levels(cs)
+    bound is computed only where errors are added. deff (design_effect, > 1 when errors go together within groups)
+    counts every level's decisions and errors as fewer independent ones."""
+    lv = [(c, *effective(n, e, deff)) for c, n, e in levels(cs)]
     k = start_level(lv, risk, alpha, min_n)
     thr, passed = None, None  # passed: the errors of the last level that passed
     for c, n, e in (lv[k:] if k is not None else ()):
@@ -754,21 +803,27 @@ def cert_notes(report, task_report, targets):
     return [x for x in out if x]
 
 
-def no_threshold_reason(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
+def no_threshold_reason(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED, deff=1.0):
     need = accepted_needed(risk, 0, alpha, min_n)  # accepted decisions without an error
-    if len(cs) < need:
-        return f"a {risk:g} bound needs at least {need} accepted FIT decisions without an error; FIT has {len(cs)}"
-    lv = levels(cs)
+    worth = "" if deff <= 1 else f" (worth {deff:.2f} times fewer independent ones: errors go together within groups)"
+    if effective(len(cs), 0, deff)[0] < need:
+        return (f"a {risk:g} bound needs at least {need} accepted FIT decisions without an error; FIT has {len(cs)}"
+                + worth)
+    lv = [(c, *effective(n, e, deff)) for c, n, e in levels(cs)]
     c, n, e = lv[start_level(lv, risk, alpha, min_n)]
-    return (f"the first level tested (confidence {c:.4f}, the top {n} FIT decisions, {e} error{'' if e == 1 else 's'}) "
-            f"does not meet the bound (upper bound {cp_upper(e, n, alpha):.3f}), and the fixed sequence stops there")
+    what = f"the top {n} FIT decisions" if deff <= 1 else f"FIT decisions worth {n} independent ones"
+    return (f"the first level tested (confidence {c:.4f}, {what}, {e} error{'' if e == 1 else 's'}) does not meet the "
+            f"bound (upper bound {cp_upper(e, n, alpha):.3f}), and the fixed sequence stops there")
 
 
-def gate(cs, thr):
+def gate(cs, thr, deff=1.0):
+    """Coverage, error and upper bound of the decisions a threshold accepts (the bound on as many independent ones as
+    they are worth: effective)."""
     acc = [ok for c, ok in cs if thr is not None and c >= thr]
     e = len(acc) - sum(acc)
+    n_i, e_i = effective(len(acc), e, deff)
     return dict(coverage=len(acc) / len(cs) if cs else None, accepted=len(acc), errors=e,
-                error=e / len(acc) if acc else None, upper95=cp_upper(e, len(acc)) if acc else None)
+                error=e / len(acc) if acc else None, upper95=cp_upper(e_i, n_i) if acc else None)
 
 
 def blend(T_fit, T_old, n, min_per_type):
@@ -907,19 +962,25 @@ def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk):
     temperatures fitted on the same FIT decisions."""
     out = {}
     for t in PRIMS:
-        cf = served([r for r in fit_rows if r["prim"] == t], temps, buckets)
+        rf = [r for r in fit_rows if r["prim"] == t]
+        cf = served(rf, temps, buckets)
         if not cf:
             continue
-        cc = served([r for r in cert_rows if r["prim"] == t], temps, buckets)
-        thr = threshold(cf, risk)
+        rc = [r for r in cert_rows if r["prim"] == t]
+        cc = served(rc, temps, buckets)
+        rho, deff = design_effect(cf, [r["group"] for r in rf])  # FIT's rho, each side's own group sizes
+        deff_c = design_effect_of([r["group"] for r in rc], rho)
+        thr = threshold(cf, risk, deff=deff)
         if thr is None:
-            out[t] = dict(confidence=None, reason=no_threshold_reason(cf, risk))
-            continue
-        g_fit, g_cert = gate(cf, thr), gate(cc, thr)
-        out[t] = withdrawn(dict(confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
-                                fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"],
-                                cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
-                                cert_accepted=g_cert["accepted"]), risk)
+            out[t] = dict(confidence=None, reason=no_threshold_reason(cf, risk, deff=deff))
+        else:
+            g_fit, g_cert = gate(cf, thr, deff), gate(cc, thr, deff_c)
+            out[t] = withdrawn(dict(confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
+                                    fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"],
+                                    cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
+                                    cert_accepted=g_cert["accepted"]), risk, deff_c)
+        if rho:
+            out[t].update(icc=rho, design_effect=deff)
     return out
 
 
@@ -1066,11 +1127,12 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={},
                                   dropped=dropped)
     automated, automated_pooled, automated_error = {}, {}, {}
+    _, deff_pool = design_effect(cs_fit, [r["group"] for r in fit_rows])
     for risk in targets:
-        thr = threshold(cs_fit, risk)
-        g_fit, g_cert = gate(cs_fit, thr), gate(cs_cert, thr)
+        thr = threshold(cs_fit, risk, deff=deff_pool)
+        g_fit, g_cert = gate(cs_fit, thr, deff_pool), gate(cs_cert, thr)
         if thr is None:
-            entry = dict(confidence=None, method=METHOD, reason=no_threshold_reason(cs_fit, risk))
+            entry = dict(confidence=None, method=METHOD, reason=no_threshold_reason(cs_fit, risk, deff=deff_pool))
         else:
             entry = dict(confidence=thr, method=METHOD, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
                          fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"], cert_error=g_cert["error"],
@@ -1102,6 +1164,9 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
         # as served: a choice question of a format-2 file gets its option-count bucket temperature first
         report["types"][t] = dict(n=len(rs), n_fit=len(rs) - len(cert), n_cert=len(cert),
                                   fit_groups=len({r["group"] for r in rs if not is_cert(r["group"])}),
+                                  **dict(zip(("icc", "design_effect"), design_effect(
+                                      served([r for r in rs if not is_cert(r["group"])], temps, buckets),
+                                      [r["group"] for r in rs if not is_cert(r["group"])]))),
                                   accuracy=float(np.mean([ok for _, ok in served(rs, {})])),
                                   T_shipped=shipped_T.get(t), T=temps.get(t), source=source.get(t, "default 1.0"),
                                   ece_shipped=ece(served(cert, shipped_T, shipped_B)),
@@ -1201,23 +1266,25 @@ def fit_tasks(rows, targets, shipped=None):
             continue
         cf = [(r["c"], r["ok"]) for r in rs if not is_cert(r["group"])]
         cc = [(r["c"], r["ok"]) for r in rs if is_cert(r["group"])]
+        rho, deff = design_effect(cf, [r["group"] for r in rs if not is_cert(r["group"])])
+        deff_c = design_effect_of([r["group"] for r in rs if is_cert(r["group"])], rho)
         e = dict(n=len(rs), n_fit=len(cf), n_cert=len(cc), accuracy=float(np.mean([r["ok"] for r in rs])),
-                 fit_groups=len({r["group"] for r in rs if not is_cert(r["group"])}),
+                 fit_groups=len({r["group"] for r in rs if not is_cert(r["group"])}), icc=rho, design_effect=deff,
                  method=METHOD, targets={})
         for risk in targets:
             old = ((shipped or {}).get(t) or {}).get(str(float(risk)))
             if old is not None:
                 e.setdefault("shipped", {})[str(float(risk))] = dict(confidence=old, cert=gate(cc, old))
-            thr = threshold(cf, risk) if cf else None
+            thr = threshold(cf, risk, deff=deff) if cf else None
             if thr is None:
                 e["targets"][str(float(risk))] = dict(
-                    confidence=None, reason=no_threshold_reason(cf, risk) if cf else "no FIT decisions")
+                    confidence=None, reason=no_threshold_reason(cf, risk, deff=deff) if cf else "no FIT decisions")
                 continue
-            g_fit, g_cert = gate(cf, thr), gate(cc, thr)
+            g_fit, g_cert = gate(cf, thr, deff), gate(cc, thr, deff_c)
             e["targets"][str(float(risk))] = x = withdrawn(dict(
                 confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"], fit_upper95=g_fit["upper95"],
                 cert_coverage=g_cert["coverage"], cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
-                cert_accepted=g_cert["accepted"]), risk)
+                cert_accepted=g_cert["accepted"]), risk, deff_c)
             if x["confidence"] is not None:
                 thresholds.setdefault(t, {})[str(float(risk))] = thr
         rs_ = sorted(float(r) for r in targets)  # a looser target never keeps a stricter threshold (floor_thresholds)
@@ -1357,13 +1424,17 @@ def task_table(report):
     return "\n".join(lines)
 
 
-def clustered(name, n_fit, groups):
-    """The warning of a type or task with more FIT decisions than groups (None when each group has one)."""
+def clustered(name, n_fit, groups, rho=None, deff=None):
+    """The note of a type or task with more FIT decisions than groups (None when each group has one): how strongly
+    their errors go together within a group, and so how much the bound discounts them."""
     if not groups or n_fit <= groups:
         return None
-    return (f"{name}: {n_fit} FIT decisions in {groups} groups ({n_fit / groups:.1f} per group): the bound counts every "
-            "decision as independent, so when the decisions of one group share their errors (claims or fields of one "
-            "document, questions about one state) the certified thresholds are optimistic")
+    head = f"{name}: {n_fit} FIT decisions in {groups} groups ({n_fit / groups:.1f} per group)"
+    if not rho:
+        return head + ": their errors do not go together within a group (ICC 0), so the bound counts them as they are"
+    return (head + f": their errors go together within a group (ICC {rho:.2f}), so the bound counts them as "
+            f"{deff:.2f} times fewer independent decisions; certifying a target takes more labelled groups, not more "
+            "decisions per group")
 
 
 def task_warnings(report, dropped=()):
@@ -1371,8 +1442,8 @@ def task_warnings(report, dropped=()):
     for t, e in report.items():
         if e["n"] < RECOMMENDED:
             out.append(f"{t}: only {e['n']} labelled decisions: the bounds are loose")
-        if clustered(t, e["n_fit"], e.get("fit_groups")):
-            out.append(clustered(t, e["n_fit"], e.get("fit_groups")))
+        if clustered(t, e["n_fit"], e.get("fit_groups"), e.get("icc"), e.get("design_effect")):
+            out.append(clustered(t, e["n_fit"], e.get("fit_groups"), e.get("icc"), e.get("design_effect")))
         for risk, x in e["targets"].items():
             if x["confidence"] is None:
                 out.append(f"max_error {float(risk):g}: {t} has no certified threshold; its answers report "
@@ -1395,8 +1466,8 @@ def warnings(report, targets):
     if report.get("dropped"):
         out.append(f"{len(report['dropped'])} row(s) left out of the fit: " + "; ".join(report["dropped"][:3]))
     for t, r in report["types"].items():
-        if clustered(t, r["n_fit"], r.get("fit_groups")):
-            out.append(clustered(t, r["n_fit"], r.get("fit_groups")))
+        if clustered(t, r["n_fit"], r.get("fit_groups"), r.get("icc"), r.get("design_effect")):
+            out.append(clustered(t, r["n_fit"], r.get("fit_groups"), r.get("icc"), r.get("design_effect")))
         if r["source"].startswith("fitted") and any(math.isclose(r["T"], x) for x in T_GRID):
             out.append(f"{t}: the fitted temperature is at the edge of the search ({r['T']:.2f}): too few errors "
                        "or too few decisions to fit it; label more or raise --min-per-type")

@@ -72,7 +72,7 @@ One `/v1/systemone` request per line; every question carries its correct answer 
 | `gold` (score) | the level index (0 = first level), its key, or its text; an integer is always the index, and is refused when a numeric key names another level (`{"1": ..., "2": ..., "3": ...}` with `"gold": 2`: give `"2"`) |
 | `gold` (act) | an outcome, as for choice (`"yes"` / `"no"` for `true` / `false` outcomes); `act` counts as its base type |
 | `gold` (multi) | the list of labels that apply: keys or descriptions, with `[]` for none (see [below](#multi-the-fallback-threshold-of-a-label-set)) |
-| `group` | optional, on the line or on a question: decisions of one group (twins, duplicates, one customer) stay on the same side of the split; default: one group per line, since the questions of a request share its state (`null` counts as not given, as for `id`). The bound of a threshold counts every decision as independent: when a type or task has more FIT decisions than groups (the claims of one document, the fields of one form), errors shared within a group make it optimistic, and the report warns with the decisions per group |
+| `group` | optional, on the line or on a question: decisions of one group (twins, duplicates, one customer) stay on the same side of the split; default: one group per line, since the questions of a request share its state (`null` counts as not given, as for `id`). When the errors of a group's decisions go together (the claims of one document, the fields of one form), the bound counts them as fewer independent decisions (see step 3 below), and the report names the decisions per group, the correlation of their errors and the design effect |
 | `family` | optional, on the line or on a question: the task family of the leave-one-family-out ECE (one kind of decision: a routing question, a document check); default: the question name |
 | `id` | optional, used in messages |
 
@@ -120,6 +120,16 @@ The shipped files were fitted with the same steps:
    The cost is that errors among the very top decisions end the test there (one is allowed at the start when the
    type has enough decisions); label more data, or check the CERT report, when a type you expected to certify does
    not (the reason names the first level and its errors).
+   **Decisions that share a group** (several claims of one document, fields of one form, questions about one state)
+   are not independent when a wrong one makes the others likelier wrong. The bound then counts them as fewer
+   independent decisions: the intraclass correlation *ρ* of their errors within groups is estimated on the type's
+   (or task's) FIT decisions, and every level's accepted decisions and errors are divided by the design effect
+   1 + (*m* − 1) *ρ*, *m* the mean size of the group a FIT decision is in (the same *m* for every level, which keeps the
+   bound on the safe side when *ρ* is underestimated, as it is with rare errors). With one decision per group, or
+   errors that do not go together (*ρ* = 0), nothing changes. In a simulation of 100 documents × 30 claims whose error
+   rate varies by document (mean 1.05%, a 1% target), counting the claims as independent certified the target in 15%
+   of runs; the design effect brings it to 4%. Certifying such a task takes more labelled documents, not more claims
+   per document. The report gives `icc` and `design_effect` per type and task.
    Each certificate is one test of one question type at one target error: its 95% holds for that type and target,
    which is what a request's `max_error` on a question of that type relies on. It is not a joint statement over all
    types and targets at once (with three types and two targets, the chance that at least one of the six is wrong can
