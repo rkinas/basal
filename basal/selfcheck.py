@@ -70,9 +70,18 @@ def call(url, path, body=None, timeout=300):
         raise SystemExit(f"{url}{path}: {e} (is the server running?)") from None
 
 
+def uncalibrated(entry):
+    """Whether a GET /v1/models entry serves raw probabilities: every temperature 1.0, the per-type ones and the
+    per-option-count ones of a format-2 calibration (as basal-calibrate checks a server)."""
+    temps = list((entry.get("temperature_per_prim") or {}).values())
+    for per_bucket in (entry.get("temperature_per_bucket") or {}).values():
+        temps += list((per_bucket or {}).values())
+    return all(float(t) == 1.0 for t in temps)
+
+
 def server_info(url):
     m = call(url, "/v1/models")["models"][0]
-    return {"name": m.get("name"), "mode": m.get("mode"), "uncalibrated": not m.get("temperature_per_prim")}
+    return {"name": m.get("name"), "mode": m.get("mode"), "uncalibrated": uncalibrated(m)}
 
 
 def find(reference):
