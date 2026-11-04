@@ -221,3 +221,71 @@ def test_gdn_reuses_kv_and_recurrent_states(monkeypatch, tmp_path, captured):
     assert max_dp(be.run_shared(gs), reference) < 1e-5
     assert [r[:21].tolist() for ids in seen for r in ids if r[0] != 0] == states
     assert sum(ids.shape[0] for ids in seen) == 3
+
+@pytest.mark.parametrize("backend", ["llama", "gdn"])
+def test_raw_prefill_budget_bounds_interleaved_roots(monkeypatch, tmp_path, backend):
+    if backend == "gdn":
+        from tests.test_recurrent import gdn_backend, tiny_qwen35
+        tiny_qwen35(tmp_path / "tiny")
+        be = gdn_backend(monkeypatch, tmp_path / "tiny", state_cache_gb=0.01)
+    else:
+        be = Stub(tiny())
+    be.state_cache = StateCache(0)
+    rnd = random.Random(42)
+    states = [[1] + [rnd.randrange(3, 50) for _ in range(20)] for _ in range(4)]
+    gs = [requests(rnd, states[i], 1)[0] for i in (0, 1, 2, 3, 0, 1, 2, 3)]
+    expected = be.run_shared(gs)
+    retain = be._retain_prefill
+    seen = []
+
+    def bounded(memo, key, entry):
+        # Fit exactly one full checkpoint, including recurrent states and tails for GDN.
+        be.PREFILL_BYTES = sum(t.nbytes for pair in entry for t in pair)
+        retain(memo, key, entry)
+        used = sum(t.nbytes for e in memo.values() if e is not None for pair in e for t in pair)
+        assert used <= be.PREFILL_BYTES
+        seen.append(used)
+
+    monkeypatch.setattr(be, "_retain_prefill", bounded)
+    assert be.run_shared(gs) == expected
+    assert len(seen) == 8  # eviction forces recomputation, without changing numerical batching
+    monkeypatch.setattr(be, "_retain_prefill", retain)
+    be.PREFILL_BYTES = 0
+    assert be.run_shared(gs) == expected
+    memo = {b"key": None}
+    retain(memo, b"key", [(torch.ones(1), torch.ones(1))])
+    assert memo == {b"key": None}
+
+
+@pytest.mark.parametrize("backend,bits", [("llama", 16), ("llama", 8), ("gdn", 16)])
+def test_unstored_extensions_share_the_existing_hit(monkeypatch, tmp_path, backend, bits):
+    if backend == "gdn":
+        from tests.test_recurrent import gdn_backend, tiny_qwen35
+        tiny_qwen35(tmp_path / "tiny")
+        be = gdn_backend(monkeypatch, tmp_path / "tiny", state_cache_gb=0.01)
+        owner, method = be.net, "forward_continue"
+    else:
+        be = Stub(tiny())
+        owner, method = be, "_continue"
+    be.state_cache = StateCache(1 << 24, bits=bits)
+    be.state_cache.BLOCK = 4
+    rnd = random.Random(42)
+    state = [1] + [rnd.randrange(3, 50) for _ in range(20)]
+    be.run_shared([requests(rnd, state, 1)[0]])
+    be.state_cache.budget = be.state_cache.used
+    extended = state + [rnd.randrange(3, 50) for _ in range(8)]
+    gs = [requests(rnd, extended, 1)[0] for _ in range(3)]
+    units = be._units(gs)
+    keys, hits = be._cache_keys(gs, units)
+    calls = []
+    original = getattr(owner, method)
+
+    def counted(*args, **kw):
+        calls.append(1)
+        return original(*args, **kw)
+
+    monkeypatch.setattr(owner, method, counted)
+    be._extend_states(units, keys, hits)
+    assert len(calls) == 1
+    assert len(hits) == 3 and hits[0] is hits[1] is hits[2]
+    assert not be.state_cache.has(keys[0])

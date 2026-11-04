@@ -1111,9 +1111,13 @@ class GDNGraphBackend(GraphBackend):
         cannot be cut there."""
         if not keys or self.state_cache is None:
             return
+        unstored = {}
         na = len(self.kv_shapes)
         for k, key in enumerate(keys):
             if key is None or k in hits:
+                continue
+            if key in unstored:
+                hits[k] = unstored[key]
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
@@ -1138,6 +1142,8 @@ class GDNGraphBackend(GraphBackend):
                    + [(s[0], c[0]) for s, c in st])
             self.state_cache.put(key, new, tokens=root, replaces=old)
             hits[k] = new
+            if not self.state_cache.has(key):
+                unstored[key] = new  # already owned by hits; no additional checkpoint allocation
 
     @staticmethod
     def _entry(kv, st, r, p):
@@ -1221,8 +1227,7 @@ class GDNGraphBackend(GraphBackend):
                     computed[r] = e
                     if key is not None and self.state_cache is not None:
                         self.state_cache.put(key, e, tokens=roots[r])
-                    if prefills is not None and key in prefills:
-                        prefills[key] = e
+                    self._retain_prefill(prefills, key, e)
             if len(cold) != len(one):
                 # _entry cloned every computed source before _load can overwrite its static root row.
                 self._load(kv, st, [computed[r] if r in computed else hits[r] for r in one], [P[r] for r in one])

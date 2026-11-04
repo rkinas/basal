@@ -2013,8 +2013,12 @@ class GraphBackend(EagerBackend):
         end, and used as a hit."""
         if not keys or self.state_cache is None:
             return
+        unstored = {}
         for k, key in enumerate(keys):
             if key is None or k in hits:
+                continue
+            if key in unstored:
+                hits[k] = unstored[key]
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
@@ -2039,6 +2043,8 @@ class GraphBackend(EagerBackend):
                 new, _ = self._continue(root, prefix, m)
             self.state_cache.put(key, new, tokens=root, replaces=old if m == n else None)
             hits[k] = new
+            if not self.state_cache.has(key):
+                unstored[key] = new  # already owned by hits; no additional checkpoint allocation
 
     @torch.no_grad()
     def _forward_layered(self, ids, kv=None, between=None, step=None):
@@ -2629,8 +2635,7 @@ class GraphBackend(EagerBackend):
                     computed[j] = e
                     if key is not None and self.state_cache is not None:
                         self.state_cache.put(key, e, tokens=packs[idx[r]][0][: P[r]])
-                    if prefills is not None and key in prefills:
-                        prefills[key] = e  # raw checkpoint: followers must not round-trip through an 8-bit cache
+                    self._retain_prefill(prefills, key, e)
             if len(cold) != b:
                 # Snapshot all sources before scattering: these views share the graphs' flat KV buffers.
                 kv = self._kv_views(b, L)
@@ -2921,6 +2926,24 @@ class GraphBackend(EagerBackend):
         (optional) is called for group k as soon as all its units are read out."""
         with torch.cuda.stream(self.stream) if self.stream is not None else nullcontext():
             return self._run_shared(groups, done)
+
+    PREFILL_BYTES = 256 << 20  # bounded raw reuse per call, separate from the persistent (possibly quantised) cache
+
+    def _retain_prefill(self, prefills, key, entry):
+        if prefills is None or key not in prefills:
+            return
+        size = sum(t.nbytes for pair in entry for t in pair)
+        if size > self.PREFILL_BYTES:
+            return
+        prefills[key] = None
+        used = sum(t.nbytes for e in prefills.values() if e is not None for pair in e for t in pair)
+        for other, e in prefills.items():
+            if used + size <= self.PREFILL_BYTES:
+                break
+            if e is not None:
+                used -= sum(t.nbytes for pair in e for t in pair)
+                prefills[other] = None  # retain eligibility and B1 scheduling when a follower must recompute
+        prefills[key] = entry
 
     def _run_shared(self, groups, done):
         units = self._units(groups)
