@@ -35,9 +35,18 @@ def _value_key(value):
 
 
 def _has_image(x):
-    if isinstance(x, dict):
-        return x.get("type") == "input_image" or any(_has_image(v) for v in x.values())
-    return isinstance(x, list) and any(_has_image(v) for v in x)
+    """An input_image part anywhere in x (a walk, not a recursion: an input nested a few hundred levels deep, valid
+    JSON, raised RecursionError, an HTTP 500)."""
+    todo = [x]
+    while todo:
+        x = todo.pop()
+        if isinstance(x, dict):
+            if x.get("type") == "input_image":
+                return True
+            todo += x.values()
+        elif isinstance(x, list):
+            todo += x
+    return False
 
 
 def _parts(x, where):
