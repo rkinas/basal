@@ -394,17 +394,19 @@ def test_warm_warms_each_familys_first_shapes_then_captures_largest_first(prefix
 
 
 def test_a_cold_capture_that_fails_is_warmed_up_and_captured_again(monkeypatch, capsys):
-    """A shape captured without a warm-up call whose capture raises (a compiled forward that would compile again
-    raises there: fail_on_recompile; or anything else a capture cannot do) is warmed up and captured again; a line
-    says so. Shapes that are warmed up never take that path."""
+    """A shape captured without a warm-up call whose forward would compile again raises inside the capture under
+    fail_on_recompile (the stub recompiles only when that stance is off: it records the stance it runs under), is
+    warmed up and captured again, and a line says so; shapes that are warmed up never take that path. Running out of
+    memory, which a warm-up cannot help, is raised as before."""
+    from torch._dynamo import eval_frame
     calls = []
     be = GraphBackend.__new__(GraphBackend)
     be.graphs, be._warmed, be._cold, be._deferred = {}, {}, set(), {}
     be._warm_up = lambda fn, static: calls.append("warm")
 
     def record(key, fn, static):
-        calls.append("capture")
-        if calls.count("capture") == 1:
+        calls.append(eval_frame._stance.stance)
+        if eval_frame._stance.stance == "fail_on_recompile" and "warm" not in calls[2:]:  # its first call: no warm-up
             raise RuntimeError("Detected recompile when torch.compile stance is 'fail_on_recompile'")
         be.graphs[key] = ("graph",)
         return be.graphs[key]
@@ -413,8 +415,16 @@ def test_a_cold_capture_that_fails_is_warmed_up_and_captured_again(monkeypatch, 
         GraphBackend._capture(be, key, None)
     assert be._cold == {("p", 1, 48)} and calls == ["warm", "warm"]
     GraphBackend._record_cold(be, ("p", 1, 48), None, ())
-    assert calls == ["warm", "warm", "capture", "warm", "capture"] and ("p", 1, 48) in be.graphs
+    assert calls == ["warm", "warm", "fail_on_recompile", "warm", "default"] and ("p", 1, 48) in be.graphs
     assert "needed a warm-up call" in capsys.readouterr().out
+
+    def oom(key, fn, static):
+        calls.append("oom")
+        raise torch.OutOfMemoryError("CUDA out of memory")
+    be._record = oom
+    with pytest.raises(torch.OutOfMemoryError):
+        GraphBackend._record_cold(be, ("p", 1, 64), None, ())
+    assert calls[-1] == "oom"  # no warm-up, no second capture
 
 
 @pytest.mark.parametrize("card", [24, 1000])

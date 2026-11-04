@@ -2143,12 +2143,15 @@ class GraphBackend(EagerBackend):
 
     def _record_cold(self, key, fn, static):
         """_record of a shape whose forward has not run before. A compiled forward that would compile again for it
-        raises inside the capture (fail_on_recompile) instead of compiling there, as does anything else a capture cannot
-        do; then the shape is warmed up and captured as before, and a line says so."""
+        raises inside the capture (fail_on_recompile: a RuntimeError) instead of compiling there, as does what else a
+        capture cannot do (CUDA's capture errors); then the shape is warmed up and captured as before, and a line says
+        so. Running out of memory, which a warm-up cannot help, and errors of other kinds are raised as before."""
         try:
             with torch.compiler.set_stance("fail_on_recompile"):
                 return self._record(key, fn, static)
-        except Exception as e:  # noqa: BLE001
+        except torch.OutOfMemoryError:
+            raise
+        except RuntimeError as e:
             self.graphs.pop(key, None)
             print(f"basal: graph {key} needed a warm-up call ({type(e).__name__}: {str(e)[:120]})", flush=True)
             self._warm_up(fn, static)
