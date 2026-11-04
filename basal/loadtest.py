@@ -37,16 +37,33 @@ def body(q, early_exit=None, questions=1):
     return b
 
 
+def request_bodies(a, n):
+    """n request bodies: synthetic items, or the simple items of --questions (a small file reused); SystemExit when
+    there is none (a file of full requests only, or an empty one), which would loop for ever doubling no bodies."""
+    qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else load_questions(a.questions, n)
+    bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
+    if not bodies and n > 0:
+        raise SystemExit(f"basal-loadtest: no simple items in {' '.join(map(str, a.questions))} (lines with \"state\", "
+                         "\"question\" and \"options\"; full requests with \"questions\" are not used)")
+    while len(bodies) < n:  # small question files are reused
+        bodies += bodies
+    return bodies
+
+
+def nonnegative(s):
+    v = int(s)
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"{s}: must be 0 or more")
+    return v
+
+
 async def run(a):
     if a.n_seq < 1:
         raise SystemExit("basal-loadtest: --n-seq must be at least 1")
     # warm-up, sequential and concurrent phases ask different requests (as far as the questions go), so an engine with
     # a prefix cache across requests (vLLM, SGLang, llama.cpp) cannot answer a timed request from an earlier phase
     n = 10 + a.n_seq + a.n_conc
-    qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else load_questions(a.questions, n)
-    bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
-    while len(bodies) < n:  # small question files are reused
-        bodies += bodies
+    bodies = request_bodies(a, n)
     async with httpx.AsyncClient(timeout=300) as c:
         for b in bodies[:10]:  # warm-up
             (await c.post(a.url, json=b)).raise_for_status()
@@ -124,23 +141,17 @@ def main():
     ap.add_argument("--questions-per-request", dest="questions_per_request", type=int, default=1, choices=range(1, 6),
                     help="2-5: that many fixed questions over each item's state in one request (SOAM)")
     ap.add_argument("--n-seq", dest="n_seq", type=int, default=200)
-    ap.add_argument("--n-conc", dest="n_conc", type=int, default=1000)
+    ap.add_argument("--n-conc", dest="n_conc", type=nonnegative, default=1000)
     ap.add_argument("--concurrency", type=int, default=32)
     ap.add_argument("--early-exit", dest="early_exit", default=None)
-    ap.add_argument("--determinism", type=int, default=0,
+    ap.add_argument("--determinism", type=nonnegative, default=0,
                     help="N: compare N answers given alone and under load (instead of the load test)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     if a.concurrency < 1:
         raise SystemExit("basal-loadtest: --concurrency must be at least 1")
     if a.determinism:
-        n = 2 * a.determinism
-        qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic \
-            else load_questions(a.questions, n)
-        bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
-        while len(bodies) < n:
-            bodies += bodies
-        return asyncio.run(determinism(a, bodies))
+        return asyncio.run(determinism(a, request_bodies(a, 2 * a.determinism)))
     asyncio.run(run(a))
 
 
