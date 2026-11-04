@@ -137,3 +137,19 @@ def test_h6b_determinism_warns_when_the_mixed_pass_repeats_the_probe(fake_http, 
 def test_n2_a_question_file_without_a_usable_question_fails_fast(fake_http, monkeypatch):
     monkeypatch.setattr(lt, "load_questions", lambda p, n: [])
     assert within(lambda: asyncio.run(lt.run(ns())))[0] == "exit"
+
+
+def determinism_report(capsys, answers_for):
+    Client.count, Client.hook = 0, staticmethod(answers_for)
+    body = lt.body(dict(state="s", question="q", options=["a", "b"]))
+    asyncio.run(lt.determinism(ns(determinism=4, concurrency=2), [body] * 8))
+    return json.loads(capsys.readouterr().out)["determinism"]
+
+
+def test_d2_an_answer_that_vanishes_under_load_is_not_identical(fake_http, capsys):
+    # the first 4 calls are the sequential "alone" pass, the rest run under load and lose an answer
+    assert determinism_report(capsys, lambda c: Reply(2 if c <= 4 else 1))["identical"] < 4
+
+
+def test_d2_equal_answers_are_identical(fake_http, capsys):
+    assert determinism_report(capsys, lambda c: Reply(2))["identical"] == 4
