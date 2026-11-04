@@ -1176,6 +1176,26 @@ def calibration_mismatch(cal, name, md, adapter=None, kind=None):
     return None
 
 
+def foreign_calibration(cal, name, md):
+    """Why a calibration file shipped in the model's own folder was fitted on another model, None when it was not or
+    the file does not say: one basal-calibrate wrote for another model or revision (calibration_mismatch), or one
+    basal-interpolate copied from its source checkpoints (basal.json "interpolation") that no basal-calibrate run on
+    this model has replaced (its fitted_on names no model)."""
+    why = calibration_mismatch(cal, name, md)
+    if why:
+        return why
+    p = Path(md) / "basal.json"
+    try:
+        interp = json.loads(p.read_text(encoding="utf-8")).get("interpolation") if p.exists() else None
+    except (OSError, ValueError, AttributeError):
+        return None
+    fitted = cal.get("fitted_on")
+    if isinstance(interp, dict) and not (isinstance(fitted, dict) and fitted.get("model")):
+        return (f"basal-interpolate copied it from a source checkpoint of this merge (old {interp.get('old')}, new "
+                f"{interp.get('new')}, alpha {interp.get('alpha')}): it was fitted on that checkpoint's answers")
+    return None
+
+
 # the parts of a file fitted on other option orders, another layout or another model that do not hold for the served
 # ones
 UNVALIDATED_OUT = ("thresholds", "multi", "task_thresholds", "conformal")
@@ -1572,6 +1592,16 @@ class Server:
                                               "the adapter directory)" if base_file else
                                               "fit a file for this serving with basal-calibrate, or serve with the "
                                               "file's orders and layout)"), flush=True)
+        # a file in the model's own folder fitted on another model (copied by basal-interpolate, or by hand): warned,
+        # served as it is (--strict-calibration refuses it)
+        self.cal_foreign = foreign_calibration(self.cal, a.model, md) \
+            if not own and not self.adapter and not a.no_calibration and self.cal else None
+        if self.cal_foreign:
+            if getattr(a, "strict_calibration", False):
+                raise SystemExit(f"{cal}: {self.cal_foreign} (--strict-calibration)")
+            print(f"basal: warning: {cal.name}: {self.cal_foreign}; its temperatures and certified thresholds may not "
+                  "hold for this model: fit its own file with basal-calibrate (--strict-calibration refuses such a "
+                  "file)", flush=True)
         self.temps = self.cal.get("temperature_per_prim", {})
         self.log = open(a.log_decisions, "a", buffering=1, encoding="utf-8") if a.log_decisions else None
         self.letters = {}

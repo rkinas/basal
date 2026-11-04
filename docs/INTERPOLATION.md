@@ -48,7 +48,8 @@ The format can move accuracy as much as the weights do ([#42](https://github.com
 merge in the format it will ship with.
 
 **Calibration.** The copied `CALIBRATION.json` belongs to the source checkpoint. Fit a new one for every merged model
-with `basal-calibrate`.
+with `basal-calibrate`. Until a fitted file replaces it, basal-serve starts a merged model with a warning that its
+calibration was copied from a source checkpoint (`--strict-calibration` refuses to start).
 
 ## Results
 

@@ -164,7 +164,8 @@ def facts(srv, a, mode):
          "none (no file found)"],
         ["calibration fitted on", " @ ".join(str(fitted[k])[:12] if k == "revision" else str(fitted[k])
                                            for k in ("model", "revision") if fitted.get(k)) or None],
-        ["calibration warning", getattr(srv, "cal_mismatch", None) or getattr(srv, "cal_unvalidated", None)],
+        ["calibration warning", getattr(srv, "cal_mismatch", None) or getattr(srv, "cal_unvalidated", None)
+         or getattr(srv, "cal_foreign", None)],
         ["prepared start-up", None if prep is None else
          f"loaded ({prep['inductor']} compiled kernels)" if isinstance(prep.get("inductor"), int) else "loaded"],
         ["engine", f"{type(b).__name__} ({kind})" if kind else type(b).__name__],
