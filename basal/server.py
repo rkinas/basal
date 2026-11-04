@@ -51,8 +51,8 @@ from .signals import exit_on_sigterm
 from .disconnect import CLIENT_GONE, until_disconnect  # (torch-free: basal-router uses it too)
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
-                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
-                     resolve, set_fp8_fast_accum)
+                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, graph_options, recurrent_layers,
+                     recurrent_refused, resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
 from .textio import read_text
@@ -1343,6 +1343,23 @@ def serve_options(a):
     return kind, quant, comp
 
 
+def refuse_graph_options(a, quant, comp, attn, md):
+    """engine.graph_options for the options GraphBackend will get (as Server.__init__ passes them), on model directory
+    md (its metadata is enough) -> SystemExit with the reason instead of the engine's ValueError after the download."""
+    scope = getattr(a, "compile_scope", "model")
+    quant = a.quant or quant
+    try:
+        graph_options(md, a.dtype, quant, "layer" if comp and scope == "layer" else comp, attn,
+                      lean_arg(getattr(a, "lean", "off")), getattr(a, "tree", "dense"), getattr(a, "state_cache_gb", 0),
+                      getattr(a, "prefix_cache", "off") == "on", getattr(a, "batches", "default"),
+                      getattr(a, "readout_layer", "off"), getattr(a, "template_prefix", "off"),
+                      getattr(a, "gemma_attn", "auto"), getattr(a, "fp8_scaling", "auto"),
+                      getattr(a, "fp8_bf16_layers", FP8_BF16_LAYERS), nvfp4_args(a, md, quant).get("nvfp4_amax"),
+                      getattr(a, "quant_load", "gpu"))
+    except ValueError as e:
+        raise SystemExit(f"{a.model}: {e}") from None
+
+
 class Server:
     LONG_BATCH, LONG_BATCH_TOKENS = 4, 32768  # --long-lane: long requests (and their tokens) per long-lane engine call
     SCHED_CALL_TOKENS = 8192  # --scheduler: prompt tokens of long requests per main-lane engine call (at least one)
@@ -1373,6 +1390,7 @@ class Server:
                                  f"{what} (a recurrent state, such as Qwen3.5's Gated DeltaNet); serve it with the default "
                                  "preset (answers can vary run to run on near-ties) or --mode eager (exact)")
         attn = getattr(a, "attn", "auto")
+        what = gdn = None
         if kind in ("graph", "exit"):  # before the weights are downloaded (mps: MPSBackend, when it shares prefixes)
             what = _recurrent(a.model, a.revision)
             gdn = bool(what) and _gdn(a.model, a.revision)
@@ -1395,6 +1413,9 @@ class Server:
                     raise SystemExit(f"{a.model}: {why}")
         if kind in ("graph", "exit") and (a.quant or quant) == "fp8" and fp8_refused():
             raise SystemExit(fp8_refused())
+        if kind == "graph" and not (what and gdn):  # GraphBackend's own option checks (engine.graph_options), on the
+            # model's metadata (config, basal.json, quantisation configs): refused before its weights are downloaded
+            refuse_graph_options(a, quant, comp, attn, resolve(a.model, a.revision, metadata_only=True))
         # GGUF modes: the engine serves the GGUF weights, so only tokenizer, template and calibration are downloaded
         md = resolve(a.model, a.revision, metadata_only=kind in WEIGHTS_ELSEWHERE)
         self.fmt = model_format(md)  # prompt format of the model (basal.json "prompt"; 1 when absent)

@@ -44,3 +44,22 @@ def test_the_defaults_pass_and_name_the_engine(mode):
     a = parser().parse_args(["--mode", mode])
     kind, quant, comp = serve_options(a)
     assert (kind, quant, comp) == S.MODES[mode] and a.lean is not None and a.tree is not None
+
+
+def test_the_graph_engines_own_option_checks_run_before_the_weights_are_downloaded(tmp_path, monkeypatch):
+    """engine.graph_options (GraphBackend's checks) on the model's metadata, before the full download: --compile-scope
+    layer is the bf16 Llama forward's only, which basal-serve's own checks cannot know without the model's config."""
+    import json
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "gemma4", "text_config": {}}), encoding="utf-8")
+    calls = []
+
+    def resolve(name, revision=None, metadata_only=False):
+        calls.append(metadata_only)
+        if not metadata_only:
+            raise AssertionError("the weights were downloaded before the options were checked")
+        return tmp_path
+    monkeypatch.setattr(S, "resolve", resolve)
+    a = parser().parse_args(["--mode", "fast", "--compile-scope", "layer", "--model", "x/gemma"])
+    with pytest.raises(SystemExit, match="not Gemma 4"):
+        S.Server(a)
+    assert calls and all(calls)  # (metadata only)
