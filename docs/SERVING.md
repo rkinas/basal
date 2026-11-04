@@ -452,6 +452,10 @@ basal-serve exports:
   `vllm:num_requests_waiting` / `vllm:num_requests_running`, which routers such as llm-d read;
 - `basal_requests_total`, `basal_requests_failed_total` and `basal_request_seconds_total` (requests to
   `/v1/systemone` and `/v1/basal`);
+- where that time goes: `basal_queue_wait_seconds_total` (requests waiting for their first engine call),
+  `basal_engine_seconds_total` and `basal_engine_calls_total` (engine calls of the main lane), and as gauges
+  `basal_engine_call_running_seconds` (the oldest engine call running now; `--stall-s` makes `/health` answer 503
+  above it) and `basal_queue_oldest_seconds` (the oldest request waiting now);
 - with `--state-cache-gb` or `--prefix-cache on`: `basal_state_cache_bytes`, `_budget_bytes`, `_entries`,
   `_hits_total`, `_misses_total`, `_prefix_hits_total` and `_evictions_total` (all `basal_state_cache_...`). They
   count cache lookups, not client requests.

@@ -1270,6 +1270,9 @@ class Server:
     # call (waiting: future of a queue entry -> [True while its call waits])
     in_flight = queued = 0
     waiting = None
+    queue_seconds = engine_seconds = 0.0  # time requests waited for the engine; time in engine calls (GET /metrics)
+    engine_calls_done = 0
+    calls_running = None  # {call: perf_counter at its start} of the engine calls running now (liveness)
 
     def __init__(self, a):
         validate_quant(a.mode, a.quant)
@@ -1380,6 +1383,7 @@ class Server:
         self.max_branches = getattr(a, "max_branches", MAX_BRANCHES)
         self.max_requests = getattr(a, "max_requests", MAX_REQUESTS)
         self.request_timeout = getattr(a, "request_timeout", None)
+        self.stall_s = getattr(a, "stall_s", None)
         self.max_prompt = int(getattr(a, "max_prompt_mb", MAX_PROMPT_MB) * 2**20)
         self.max_body = int(getattr(a, "max_body_mb", MAX_BODY_BYTES / 2**20) * 2**20)
         self.orders = served_orders(a, self.fmt)
@@ -1756,6 +1760,40 @@ class Server:
             raise RequestError(f"images and audio are read in the canonical layout only (this server: --layout "
                                f"{self.layout})")
 
+    def engine_started(self):
+        """An engine call starts (the main lane or the long lane) -> its token for engine_done."""
+        if self.calls_running is None:
+            self.calls_running = {}
+        token = object()
+        self.calls_running[token] = time.perf_counter()
+        return token
+
+    def engine_done(self, token):
+        t0 = self.calls_running.pop(token, None)
+        if t0 is not None:
+            self.engine_seconds += time.perf_counter() - t0
+            self.engine_calls_done += 1
+
+    def liveness(self):
+        """-> (seconds the oldest engine call now running has run, seconds the oldest request queued now has waited);
+        0 for none."""
+        now = time.perf_counter()
+        call = max((now - t for t in (self.calls_running or {}).values()), default=0.0)
+        waited = max((now - w[1] for w in (self.waiting or {}).values() if w[0]), default=0.0)
+        return call, waited
+
+    def health(self):
+        """GET /health -> (body, status): 200 {"status": "ok", running, queued}; with --stall-s S, 503 {"status":
+        "stalled", ...} while an engine call has run longer than S seconds (a hung GPU call: a router stops sending
+        this replica requests until it answers 200 again)."""
+        body = {"status": "ok", **self.load()}
+        stall = getattr(self, "stall_s", None)
+        if stall is not None:
+            call, _ = self.liveness()
+            if call > stall:
+                return dict(body, status="stalled", engine_call_s=round(call, 3)), 503
+        return body, 200
+
     def load(self):
         """GET /health: "queued" = requests waiting for the engine (every queue entry of their current engine work
         still in the main queue, the --scheduler backlog or the --long-lane queue); "running" = the other requests in
@@ -1769,6 +1807,7 @@ class Server:
             if wait and wait[0]:
                 wait[0] = False
                 self.queued -= 1
+                self.queue_seconds += time.perf_counter() - wait[1]
 
     async def ask(self, branches, pol, cut=None, lane="main"):
         """Position probabilities of every prompt of every branch: [[probs per prompt] per branch]. cut: the number of
@@ -1780,7 +1819,8 @@ class Server:
         # entry, so the engine sees the request's record (its one-way fallback above max_record tokens)
         entries = [branches] if self.soam or lane == "long" or getattr(self, "two_way", None) \
             else [[b] for b in branches]
-        futs, wait = [], [True]  # this call waits (queued) until one of its entries starts an engine call
+        futs, wait = [], [True, time.perf_counter()]  # this call waits (queued) until one of its entries starts an
+        # engine call (and since when)
         if self.waiting is None:
             self.waiting = {}
         self.queued += 1
@@ -2066,7 +2106,11 @@ class Server:
                 for i in ix:  # (prompts, code ids[, state prefix length for the state cache])
                     cut = live[i][4] if len(live[i]) > 4 else None
                     groups.append((live[i][0], live[i][1]) + ((cut,) if cut else ()))
-                out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
+                call = self.engine_started()
+                try:
+                    out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
+                finally:
+                    self.engine_done(call)
                 if len(out) != len(ix):  # a short result must not leave requests waiting (zip would drop them)
                     raise RuntimeError(f"the engine returned {len(out)} results for {len(ix)} groups")
                 for i, o in zip(ix, out):
@@ -2719,6 +2763,10 @@ def parser():
     ap.add_argument("--request-timeout", dest="request_timeout", type=_positive(float), default=None, metavar="S",
                     help="a request not answered in S seconds answers 504 (code TIMEOUT); its work still queued is "
                          "dropped, an engine call already running finishes. Default: none")
+    ap.add_argument("--stall-s", dest="stall_s", type=_positive(float), default=None, metavar="S",
+                    help="GET /health answers 503 {\"status\": \"stalled\"} while an engine call (main lane) has run "
+                         "longer than S seconds, so a router stops sending requests to this server until it answers "
+                         "again. Default: off")
     ap.add_argument("--rank-max-candidates", dest="rank_max_candidates", type=int, default=rank.MAX_CANDIDATES,
                     metavar="N", help="rank questions (experimental): at most N candidates per request, all its rank "
                                       "questions together (HTTP 422 above; every 50 take one engine request through "
@@ -2898,7 +2946,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                                            buckets=srv.cal.get("temperature_per_bucket")))
 
     async def health(_):
-        return JSONResponse({"status": "ok", **srv.load()})
+        body, status = srv.health() if hasattr(srv, "health") else ({"status": "ok", **srv.load()}, 200)
+        return JSONResponse(body, status_code=status)
 
     async def metrics(_):
         """Prometheus metrics (2.5): the engine version and the served model, requests waiting / running (also under
@@ -2917,6 +2966,17 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
              ("basal_requests_failed_total", "requests answered with an error", "counter", [({}, counts["failed"])]),
              ("basal_request_seconds_total", "time spent on those requests", "counter",
               [({}, round(counts["seconds"], 6))])]
+        if hasattr(srv, "liveness"):  # where that time went: waiting for the engine, in its calls (main lane)
+            call, waited = srv.liveness()
+            m += [("basal_queue_wait_seconds_total", "time requests waited for the engine (until their first engine "
+                   "call)", "counter", [({}, round(srv.queue_seconds, 6))]),
+                  ("basal_engine_seconds_total", "time in engine calls (main lane)", "counter",
+                   [({}, round(srv.engine_seconds, 6))]),
+                  ("basal_engine_calls_total", "engine calls (main lane)", "counter", [({}, srv.engine_calls_done)]),
+                  ("basal_engine_call_running_seconds", "how long the oldest engine call running now has run (0: "
+                   "none; --stall-s: GET /health answers 503 above it)", "gauge", [({}, round(call, 3))]),
+                  ("basal_queue_oldest_seconds", "how long the oldest request waiting for the engine has waited",
+                   "gauge", [({}, round(waited, 3))])]
         cache = getattr(srv.backend, "state_cache", None)
         if cache is not None:
             st = cache.stats(blocking=False)

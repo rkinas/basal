@@ -114,7 +114,9 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   answer or error. `queued` counts those waiting for the engine: all their queue entries are still in the server's
   queue (the main queue, the `--scheduler` backlog or the `--long-lane` queue). `running` counts the others: in an
   engine call, or in the server's own work before or after one (a request with a second pass, such as `--orders auto`,
-  can be queued again). `running` and `queued` both 0 means that the server is idle.
+  can be queued again). `running` and `queued` both 0 means that the server is idle. With `basal-serve --stall-s S`
+  it answers 503 `{"status": "stalled", ..., "engine_call_s": T}` while an engine call (main lane) has run longer
+  than S seconds, so a router stops sending it requests until it answers 200 again.
 
 ## Requests from other `/v1/systemone` servers' clients
 
