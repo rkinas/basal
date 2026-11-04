@@ -120,7 +120,7 @@ def check(url, reference, gate, note):
     if not info["uncalibrated"]:
         print("warning: the server applies a calibration; start it with --no-calibration, or the probabilities are "
               "tempered and the |dp| below is not the engine's", file=sys.stderr)
-    rows, cut, errors, times = [], 0, 0, []
+    rows, cut, errors, missing, times = [], 0, 0, 0, []
     for it in ref["items"]:
         t = time.perf_counter()
         try:
@@ -135,6 +135,9 @@ def check(url, reference, gate, note):
             continue
         for name, want in it["answers"].items():
             a = res["answers"].get(name)
+            if not a:
+                missing += 1  # the server left a question unanswered: not a pass
+                continue
             if a:
                 rows.append((it["id"], name, want["type"], *compare(want["probabilities"], a["probabilities"])))
     if not rows:
@@ -148,7 +151,7 @@ def check(url, reference, gate, note):
     print(f"basal-selfcheck {__version__}  reference {ref['model']} ({ref['engine']}, basal {ref['basal']}): {ref['note']}")
     print(f"server       {info['name']} ({info['mode']})" + (f"   {note}" if note else ""))
     print(f"requests     {len(ref['items'])}: {len(ref['items']) - cut - errors} compared, {cut} cut by the context "
-          f"(usage.truncated), {errors} failed")
+          f"(usage.truncated), {errors} failed, {missing} answers missing")
     print(f"readouts     {n}")
     print(f"top-1        {top1:.4f}   outside near ties (top two within {TIE}) {agree:.4f}")
     print(f"|dp|         mean {sum(r[6] for r in rows) / options:.4f}   max {worst[5]:.4f} ({worst[0]} {worst[1]})")
@@ -158,8 +161,8 @@ def check(url, reference, gate, note):
         if sub:
             print(f"  {t:<7}    {len(sub):>4} readouts  top-1 {sum(r[3] for r in sub) / len(sub):.4f}  "
                   f"max |dp| {max(r[5] for r in sub):.4f}")
-    ok = agree >= gate and not errors
-    print(f"{'PASS' if ok else 'FAIL'}  (gate: agreement outside near ties >= {gate}, no failed request)")
+    ok = agree >= gate and not errors and not missing
+    print(f"{'PASS' if ok else 'FAIL'}  (gate: agreement outside near ties >= {gate}, no failed request, no missing answer)")
     return 0 if ok else 1
 
 
