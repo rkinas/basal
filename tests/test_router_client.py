@@ -172,3 +172,16 @@ def test_i13_a_refused_connection_still_takes_the_replica_out():
     r, app = make(down)
     run(call(app, "POST", "/v1/systemone", BODY, JSON))
     assert not r.ready
+
+
+def key(state):
+    return R.state_key(json.dumps({"state": state}))
+
+
+def test_s23_an_object_state_has_an_affinity_key():
+    assert key({"a": 1}) is not None and key({"a": 1}) == key({"a": 1})
+    assert key({"a": 1}) != key({"a": 2})
+
+
+def test_s23_string_and_missing_states_are_unchanged():
+    assert key("a  b") == "a b" and R.state_key(b"{}") is None

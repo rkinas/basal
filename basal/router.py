@@ -94,6 +94,8 @@ def state_key(body):
         state = json.loads(body).get("state")
     except (ValueError, AttributeError):
         return None
+    if isinstance(state, (dict, list)) and state:  # (the server accepts an object state)
+        return json.dumps(state, sort_keys=True, ensure_ascii=False)
     if not isinstance(state, str) or not state.strip():
         return None
     return re.sub(r"\s+", " ", state.strip())
