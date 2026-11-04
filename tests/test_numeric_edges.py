@@ -1,11 +1,14 @@
 """Regression tests for fix/numeric-edges (Z-1089)."""
 import asyncio
 import contextlib
+import json
 import math
 import signal
+import sys
 
 import pytest
 
+from basal import bench
 from basal import calibrate as cal
 
 
@@ -50,3 +53,18 @@ def test_z2_a_level_next_to_one_does_not_walk_from_n_1():
     with within(2):
         n = cal.conformal_needed(level)
     assert math.ceil(round((n + 1) * level, 9)) <= n
+
+
+def questions_file(tmp_path, n):
+    path = tmp_path / "q.jsonl"
+    path.write_text("\n".join(json.dumps({"state": "s", "options": ["a", "b"], "gold": 0}) for _ in range(n)), encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.parametrize("n,lat_n", [(3, 1), (10, 0)])
+def test_z3_too_few_questions_or_lat_n_0_stop_before_the_model(tmp_path, monkeypatch, n, lat_n):
+    argv = ["basal-bench", "--questions", questions_file(tmp_path, n), "--n", str(n), "--lat-n", str(lat_n), "--modes", "eager-fp32"]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(bench, "resolve", lambda *a, **k: object())
+    with pytest.raises(SystemExit, match="at least 6 questions"):
+        bench.main()

@@ -306,6 +306,8 @@ def main():
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)
     check_gold(qs)
+    if a.lat_n < 1 or len(qs) < 6:  # the first 5 timed calls are warm-up and dropped: nothing would be left to take a median of
+        raise SystemExit(f"basal-bench needs --lat-n >= 1 and at least 6 questions (got {len(qs)} questions, --lat-n {a.lat_n})")
     fmt = model_format(md)
     ref, rows = None, []
     for mode in a.modes:
