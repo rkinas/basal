@@ -228,8 +228,7 @@ basal-serve, w sieci wewnętrznej.
 basal-run --preset triage --lang pl --input export.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
 ```
 
-W basalu 2.5.2 `basal-run --preset` kończy każdą linię błędem `KeyError: 'q'`; poprawka to jedna linia w
-`basal/run.py`. `basal-run --preset` wysyła preset bez `RULES`. Z własnymi regułami zapisz linie żądań (robi to `run.py
+`basal-run --preset` wymaga basala 2.5.3 lub nowszego (w 2.5.2 kończy każdą linię błędem `KeyError: 'q'`). Wysyła preset bez `RULES`. Z własnymi regułami zapisz linie żądań (robi to `run.py
 --calibration-input`; usuń `gold`) albo użyj `run.py --input export.jsonl --output answers.jsonl`.
 
 **Agenci (LangChain, LlamaIndex, CrewAI, MCP)**:
@@ -467,8 +466,10 @@ zbierz wszystkie prawdziwe groźne zgłoszenia, jakie masz, zmierz na nich czuł
 
 ## Ograniczenia
 
-- **Dla polskich zgłoszeń podawaj `--lang pl`.** Bez tej opcji język pytań dopasowuje się do zgłoszenia.
-  `presets.lang_of` uznaje t33, „Aplikacja na iPhone wylogowuje mnie co kilka minut.”, za angielskie: nie ma polskich
-  znaków i jest tylko jedno popularne polskie słowo.
+- **Dla polskich zgłoszeń podawaj `--lang pl`.** Bez tej opcji język pytań dopasowuje się do zgłoszenia
+  (`presets.lang_of`). Od basala 2.5.3 krótki polski tekst bez polskich znaków jest rozpoznawany jako polski, ale linia
+  bez żadnego popularnego polskiego słowa nadal dostaje angielskie pytania: 4 z 437 zgłoszeń w tym przykładzie, np. h033,
+  „Ile kosztuje USG jamy brzusznej bez skierowania?”. W 2.5.2 mylił się dużo częściej (t33, „Aplikacja na iPhone
+  wylogowuje mnie co kilka minut.”).
 - **Zgłoszenia napisano na potrzeby przykładu.** Prawdziwe są dłuższe i bardziej chaotyczne. Mierz na własnych.
 - **`needs_human` zależy od Twojej polityki.** Opisy w `RULES` zapisują politykę jednego helpdesku. Napisz własne.

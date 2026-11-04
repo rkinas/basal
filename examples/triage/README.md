@@ -228,8 +228,7 @@ basal-serve, on the internal network.
 basal-run --preset triage --lang pl --input export.jsonl --output answers.jsonl --url http://127.0.0.1:8000/v1/systemone
 ```
 
-In basal 2.5.2, `basal-run --preset` fails on every line with `KeyError: 'q'`; the fix is a one-line change in
-`basal/run.py`. `basal-run --preset` sends the preset without `RULES`. For your own rules, write request lines (`run.py
+`basal-run --preset` needs basal 2.5.3 or later (in 2.5.2 it fails on every line with `KeyError: 'q'`). It sends the preset without `RULES`. For your own rules, write request lines (`run.py
 --calibration-input` writes them; drop `gold`), or use `run.py --input export.jsonl --output answers.jsonl`.
 
 **Agents (LangChain, LlamaIndex, CrewAI, MCP)**:
@@ -458,8 +457,9 @@ real risky ticket you have, measure the recall on them, and keep a person on the
 
 ## Limits
 
-- **Pass `--lang pl` for Polish tickets.** Without it, the wording follows each ticket. `presets.lang_of` reads t33,
-  "Aplikacja na iPhone wylogowuje mnie co kilka minut.", as English: it has no diacritics and only one common Polish
-  word.
+- **Pass `--lang pl` for Polish tickets.** Without it, the wording follows each ticket (`presets.lang_of`). Since
+  basal 2.5.3 it reads short Polish text without diacritics as Polish, but a line with no common Polish word still
+  gets the English wording: 4 of the 437 tickets here, e.g. h033, "Ile kosztuje USG jamy brzusznej bez skierowania?".
+  In 2.5.2 it was wrong much more often (t33, "Aplikacja na iPhone wylogowuje mnie co kilka minut.").
 - **The tickets are written for this example.** Real tickets are longer and messier. Measure on your own.
 - **`needs_human` depends on your policy.** The descriptions in `RULES` encode one helpdesk's policy. Write yours.
