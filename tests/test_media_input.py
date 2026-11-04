@@ -68,3 +68,34 @@ def test_i07_black_on_a_transparent_grey_png_stays_visible():
 def test_i07_opaque_pixels_are_unchanged():
     assert media._image(png(Image.new("RGB", (8, 8), (10, 200, 30))), 0).getpixel((3, 3)) == (10, 200, 30)
     assert media._image(png(Image.new("RGBA", (8, 8), (0, 0, 0, 255))), 0).getpixel((3, 3)) == (0, 0, 0)
+
+
+def jpeg(size, orientation=None):
+    im = Image.new("RGB", size, (255, 255, 255))
+    im.paste((255, 0, 0), (0, 0, size[0] // 4, size[1] // 2))  # red block at the top left of the STORED pixels
+    b = io.BytesIO()
+    exif = im.getexif()
+    if orientation:
+        exif[0x0112] = orientation
+    im.save(b, "JPEG", quality=95, exif=exif.tobytes() if orientation else b"")
+    return b.getvalue()
+
+
+def red(px):
+    return px[0] > 200 and px[1] < 80
+
+
+def test_i16_exif_rotation_is_applied():
+    out = media._image(jpeg((40, 20), 6), 0)
+    assert out.size == (20, 40) and red(out.getpixel((out.size[0] - 2, 2)))
+
+
+def test_i16_exif_upside_down_is_applied():
+    out = media._image(jpeg((40, 20), 3), 0)
+    assert red(out.getpixel((out.size[0] - 2, out.size[1] - 2)))
+
+
+@pytest.mark.parametrize("orientation", [None, 1])
+def test_i16_no_exif_or_normal_orientation_is_unchanged(orientation):
+    out = media._image(jpeg((40, 20), orientation), 0)
+    assert out.size == (40, 20) and red(out.getpixel((2, 2)))
