@@ -38,19 +38,27 @@ def test_keys_per_channel_keep_small_channels():
 
 @pytest.mark.parametrize("bits", [8, 4])
 @pytest.mark.parametrize("T", [37, 300])
-def test_an_entry_comes_back_as_each_layer_quantised_alone(bits, T):
-    """The cache quantises the layers of one shape together (one call per shape, not 16-18 kernels per tensor and
-    layer); every layer it gives back equals that layer's own kv_quant / kv_dequant round trip, with layers of two
-    shapes (Gemma 4's layer types) interleaved."""
+@pytest.mark.parametrize("chunk", [None, 1])
+def test_an_entry_comes_back_as_each_layer_quantised_alone(bits, T, chunk, monkeypatch):
+    """The cache quantises the layers of one shape together (one call per KV_STACK_BYTES, not 16-18 kernels per
+    tensor and layer); every layer it gives back, all of them, equals that layer's own kv_quant / kv_dequant round
+    trip, with layers of two shapes (Gemma 4's layer types) interleaved, in one chunk per shape or (chunk 1: a limit
+    of one layer and a half) in several."""
+    import basal.engine as E
     torch.manual_seed(0)
     shapes = [(2, T, 128), (1, T // 2 + 1, 64)] * 3
     kv = [((torch.randn(s) * (i + 1)).bfloat16(), torch.randn(s).bfloat16()) for i, s in enumerate(shapes)]
+    if chunk:
+        monkeypatch.setattr(E, "KV_STACK_BYTES", kv[0][0].numel() * 3)  # 1.5 layers of the larger shape (bf16)
     c = StateCache(1 << 30, bits=bits)
     c.put(b"k", kv)
     got = c.get(b"k")
+    assert len(got) == len(kv)
     for (k, v), (gk, gv) in zip(kv, got):
         assert torch.equal(gk, kv_dequant(kv_quant(k, bits, True), bits, True))
         assert torch.equal(gv, kv_dequant(kv_quant(v, bits, False), bits, False))
+    if chunk:
+        assert len(c.entries[b"k"][0][1]) > 2  # more chunks than shapes
 
 
 def test_low_bit_entries_take_less_of_the_budget():
