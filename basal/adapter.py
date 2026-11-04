@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import derive
 from .textio import read_text
 
 MLX_WEIGHTS, PEFT_WEIGHTS, CONFIG = "adapters.safetensors", "adapter_model.safetensors", "adapter_config.json"
@@ -258,12 +259,6 @@ def _temp_dir():
     return out
 
 
-# files of a model directory a fused checkpoint does not take over: the base model's calibration, NVFP4 activation
-# scales, evidence head (trained on its hidden states; --adapter refuses evidence for the same reason) and checksums no
-# longer hold for the merged weights (the adapter's calibration is copied, fused_calibration)
-NOT_FUSED = ("CALIBRATION*", "NVFP4_AMAX.json", "SHA256SUMS", "evidence_head.pt")
-
-
 def _weight_names(ad, md):
     """{canonical key: (safetensors file, tensor name)} of the adapter's modules in checkpoint md; refused when a module
     is missing or found twice."""
@@ -293,8 +288,10 @@ def fuse_checkpoint(md, ad, out):
     """Write checkpoint md with the adapter merged into `out` (a new or empty directory): every safetensors file again,
     with the same tensor names, dtypes and metadata, its decoder layers' weights merged as merge_torch merges them
     (merged()), so a server of `out` loads the weights --adapter merges at load bit for bit; every other file is copied
-    as it is (config.json, the index, tokenizer, template, basal.json), but not NOT_FUSED nor subdirectories -> the
-    number of merged modules. FP8 weights cannot take a merge (refused)."""
+    as it is (config.json, the index, tokenizer, template, basal.json), but not subdirectories nor what does not hold
+    for other weights (derive.stale: the base model's calibrations, NVFP4 activation scales, evidence head, card,
+    manifest and checksums; the adapter's calibration is copied, fused_calibration) -> the number of merged modules.
+    FP8 and integer weights cannot take a merge (refused)."""
     import torch
     from safetensors import safe_open
     from safetensors.torch import save_file
@@ -324,7 +321,7 @@ def fuse_checkpoint(md, ad, out):
         save_file(tensors, str(out / f.name), metadata=meta)
         del tensors
     for f in sorted(md.iterdir()):
-        if f.is_file() and f.suffix != ".safetensors" and not any(f.match(s) for s in NOT_FUSED):
+        if f.is_file() and f.suffix != ".safetensors" and not derive.stale(f.name):
             shutil.copy2(f, out / f.name)
     return len(names)
 

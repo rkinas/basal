@@ -28,12 +28,12 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from . import __version__
+from . import __version__, derive
 from .calibrate import InputError, load
 from .engine import default_device, resolve
 from .facts import inject as inject_facts
 from .jsonl import read_lines
-from .prompt import letter_ids, max_options, model_format, model_layout, model_option_isolation, model_two_way, render
+from .prompt import letter_ids, max_options, model_format, model_layout, render
 from .server import to_items
 
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".gguf")
@@ -100,13 +100,11 @@ def example(tok, body, d, fmt, layout, max_len):
 
 def refused(src):
     """Why basal-finetune cannot train model src, or None: it trains and scores with the plain causal forward, and a
-    model the engine reads another way (basal.json "two_way", "option_isolation") would be trained under masks it is
-    not served with (and the merged model, keeping its basal.json, served two-way)."""
-    for key, read in (("two_way", model_two_way), ("option_isolation", model_option_isolation)):
-        if read(src):
-            return (f"{src}: basal.json \"{key}\": basal-finetune trains with the plain causal forward only; this model "
-                    "is served with other attention masks")
-    return None
+    model the engine reads another way (derive.reading_refused) would be trained under masks it is not served with
+    (and the merged model, keeping its basal.json, served that way)."""
+    why = derive.reading_refused(src)
+    return why and (f"{src}: {why}: basal-finetune trains with the plain causal forward only; this model is served "
+                    "with other attention masks")
 
 
 def lora_targets(model):
@@ -118,13 +116,11 @@ def lora_targets(model):
 
 def copy_side_files(src, out):
     """The base model's files the merged model keeps (tokenizer, chat template, processor ...): not the weights, the
-    index, basal.json (written anew), the card, nor what belongs to the base weights only (adapter.NOT_FUSED: its
-    calibration files and NVFP4 activation scales)."""
-    from .adapter import NOT_FUSED
+    index, basal.json (written anew), .gitattributes, nor what does not hold for other weights (derive.stale: its
+    calibrations, NVFP4 activation scales, evidence head, card, manifest and checksums; no subdirectory)."""
     for f in sorted(Path(src).iterdir()):
         if f.is_file() and not f.name.endswith(WEIGHT_SUFFIXES) and not f.name.endswith(".index.json") \
-                and f.name not in ("basal.json", "README.md", "MANIFEST.md", "SHA256SUMS", ".gitattributes") \
-                and not any(f.match(s) for s in NOT_FUSED):
+                and f.name not in ("basal.json", ".gitattributes") and not derive.stale(f.name):
             shutil.copy2(f, Path(out) / f.name)
 
 

@@ -33,10 +33,12 @@ import json
 import shutil
 from pathlib import Path
 
-# not copied from --meta-from: the model card and checksums describe the source checkpoint, the evidence head and
-# the thinking adapter were trained on its weights, and its NVFP4 activation scales (--mode nvfp4) were calibrated on
-# them (the merged model's activations differ: values above a stale scale are clipped)
-SKIP = {".gitattributes", "README.md", "SHA256SUMS", "evidence_head.pt", "NVFP4_AMAX.json"}
+from . import derive
+
+# not copied from --meta-from: .gitattributes, and what does not hold for the merged weights (derive.stale: the model
+# card, manifest and checksums describe the source checkpoint; its NVFP4 activation scales, evidence head, early-exit
+# heads and thinking adapter were measured or trained on its weights). Its calibrations are copied (derive.CALIBRATIONS)
+SKIP = {".gitattributes"}
 # weight files of any format, and their indexes: the merged weights are the only ones in the output
 WEIGHT_SUFFIXES = {".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".h5", ".msgpack", ".onnx"}
 WEIGHT_PREFIXES = ("model.safetensors.index", "pytorch_model", "tf_model", "flax_model", "model.onnx")
@@ -260,7 +262,8 @@ def interpolate(old, new, alpha, out, meta_from=None, allow_tokenizer_difference
 
         for f in meta_from.rglob("*"):
             rel = f.relative_to(meta_from)
-            if not f.is_file() or rel.name in SKIP or rel.parts[0] == "think" or rel.parts[0].startswith("."):
+            if not f.is_file() or rel.name in SKIP or derive.stale(rel, calibrations=False) \
+                    or rel.parts[0].startswith("."):
                 continue
             if f.suffix in WEIGHT_SUFFIXES or rel.name.startswith(WEIGHT_PREFIXES):
                 continue

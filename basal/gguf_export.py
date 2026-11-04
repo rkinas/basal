@@ -291,10 +291,10 @@ def systemone_metadata(model_dir, calibration=None):
     file used). The model must be prompt format 2 in the canonical layout, read one way, without isolated options."""
     from transformers import AutoTokenizer
 
-    from .prompt import model_format, model_layout, model_option_isolation, model_two_way
+    from .derive import reading_refused
+    from .prompt import model_format, model_layout
 
-    if model_format(model_dir) != 2 or model_layout(model_dir) != "canonical" or model_two_way(model_dir) \
-            or model_option_isolation(model_dir):
+    if model_format(model_dir) != 2 or model_layout(model_dir) != "canonical" or reading_refused(model_dir):
         raise ValueError("--systemone needs a prompt-format-2 model in the canonical layout, read one way, without "
                          "isolated options (its basal.json)")
     tok = AutoTokenizer.from_pretrained(model_dir)
