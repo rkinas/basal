@@ -1,0 +1,43 @@
+name: Nightly (floating dependencies)
+
+# The CI gate (ci.yml) tests uv.lock's versions; this run takes the newest versions pyproject.toml allows, so a new
+# release of a dependency that breaks basal shows here before uv.lock moves to it.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv venv
+      - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: uv pip install -e ".[test]"
+      - run: uv run --no-sync pytest -q -n 2 --dist loadfile
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          python-version: "3.13"
+      - run: uv venv
+      - run: uv pip install -e ".[test]"
+      - run: uv run --no-sync pytest -q -n 2 --dist loadfile

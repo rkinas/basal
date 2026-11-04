@@ -38,10 +38,13 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
           python-version: ${{ matrix.python }}
-      # CPU torch: uv.lock on Linux pulls ~86 nvidia CUDA wheels (several GB) that no CPU test needs
+      # the gate runs uv.lock's versions (floating ones run nightly: nightly.yml), with the CPU build of uv.lock's torch:
+      # on Linux uv.lock pulls ~86 nvidia CUDA wheels (several GB) that no CPU test needs
       - run: uv venv
-      - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: uv pip install -e ".[test]"
+      - run: uv export --frozen --extra test --no-emit-project --no-hashes -o locked.txt
+      - run: uv pip install "$(grep -E '^torch==' locked.txt | cut -d' ' -f1)" --index-url https://download.pytorch.org/whl/cpu
+      - run: grep -v -E '^(nvidia-|cuda-|triton==|torch==)' locked.txt > deps.txt && uv pip install -r deps.txt
+      - run: uv pip install --no-deps -e .
       - run: uv run --no-sync pytest -q -n 2 --dist loadfile  # whole files per worker: module fixtures load once
 
   test-macos:
@@ -68,9 +71,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: "22"  # npm test passes a glob to node --test (Node 21+); the package itself needs 18.17
+      # the gate runs uv.lock's versions (floating ones run nightly: nightly.yml), with the CPU build of uv.lock's torch:
+      # on Linux uv.lock pulls ~86 nvidia CUDA wheels (several GB) that no CPU test needs
       - run: uv venv
-      - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: uv pip install -e ".[test]"
+      - run: uv export --frozen --extra test --no-emit-project --no-hashes -o locked.txt
+      - run: uv pip install "$(grep -E '^torch==' locked.txt | cut -d' ' -f1)" --index-url https://download.pytorch.org/whl/cpu
+      - run: grep -v -E '^(nvidia-|cuda-|triton==|torch==)' locked.txt > deps.txt && uv pip install -r deps.txt
+      - run: uv pip install --no-deps -e .
       - run: npm ci --ignore-scripts
         working-directory: clients/typescript
       - run: npm test
