@@ -71,6 +71,11 @@ def _audio(raw, n, max_seconds):
     import numpy as np
     import soundfile as sf
     try:
+        if max_seconds:  # the header first: a few kB of FLAC can decode to hours of float32
+            info = sf.info(io.BytesIO(raw))
+            if info.samplerate and info.frames / info.samplerate > max_seconds + 1e-6:
+                raise ValueError(f"media {n}: {info.frames / info.samplerate:.1f} s of audio, more than the model's "
+                                 f"{max_seconds:g} s")
         x, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=True)
     except (RuntimeError, TypeError) as e:  # soundfile's LibsndfileError is a RuntimeError
         raise ValueError(f"media {n}: not readable audio (WAV, FLAC, OGG or MP3; {type(e).__name__})") from None
