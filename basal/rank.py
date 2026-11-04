@@ -26,6 +26,7 @@ question of the request is answered as usual over the request's state.
 """
 import asyncio
 import json
+import math
 import time
 
 from .prompt import RequestError, lang_of
@@ -54,6 +55,17 @@ def _int(name, q, k, default, lo, hi):
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
         raise RequestError(f"question {name!r}: {k} must be an integer from {lo} to {hi}")
     return v
+
+
+def _weight(v):
+    """A prior weight: a finite number >= 0 (an infinite one, 1e999 in JSON or an integer beyond the largest float, made
+    the scores inf or NaN and the answer no JSON: HTTP 500)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(v) and v >= 0
+    except OverflowError:
+        return False
 
 
 def parse(name, q, max_options, lang, max_candidates=MAX_CANDIDATES):
@@ -97,9 +109,8 @@ def parse(name, q, max_options, lang, max_candidates=MAX_CANDIDATES):
     if order not in ORDERS:
         raise RequestError(f"question {name!r}: order must be one of {', '.join(ORDERS)}")
     prior = q.get("prior") or {}
-    if not isinstance(prior, dict) or not all(
-            not isinstance(v, bool) and isinstance(v, (int, float)) and v >= 0 for v in prior.values()):
-        raise RequestError(f"question {name!r}: prior must be an object {{key: weight >= 0}}")
+    if not isinstance(prior, dict) or not all(_weight(v) for v in prior.values()):
+        raise RequestError(f"question {name!r}: prior must be an object {{key: finite weight >= 0}}")
     unknown = set(map(str, prior)) - set(keys)
     if unknown:
         raise RequestError(f"question {name!r}: prior names unknown candidates: {sorted(unknown)[:5]}")
