@@ -1588,7 +1588,8 @@ def refit(a, targets, reference, reference_name):
         Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None))
     baseline = json.loads(read_text(base_file)) if base_file is not None and base_file.exists() else {}
     why = validate_baseline(baseline, base_file.name, head.get("orders"), head.get("layout"),
-                            (head.get("model"), head.get("revision"), head.get("adapter"), None, head.get("kind"),
+                            (head.get("model") if head.get("model") not in (None, "None") else None,
+                             head.get("revision"), head.get("adapter"), None, head.get("kind"),
                              head.get("model_files"))) if baseline else None
     if why:  # basal-serve's rule, for the model, orders and layout the rows were read with
         print(f"warning: {why} (the rows): its thresholds are not compared or kept (as in basal-serve)",
