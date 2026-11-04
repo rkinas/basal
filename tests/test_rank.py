@@ -169,8 +169,8 @@ def test_rank_in_flight_counts_its_requests():
     ({"candidates": ["a", "b"], "order": "last"}, "order must be"),
     ({"candidates": ["a", "b"], "prior": {"7": 1}}, "unknown candidates"),
     ({"candidates": ["a", "b"], "prior": {"0": -1}}, "prior must be"),
-    ({"candidates": ["a", "b"], "prior": {"0": float("inf")}}, "prior must be"),
-    ({"candidates": ["a", "b"], "prior": {"0": float("nan")}}, "prior must be"),
+    ({"candidates": ["a", "b"], "prior": {"0": float("inf")}}, "not a finite number"),  # (the request's check)
+    ({"candidates": ["a", "b"], "prior": {"0": float("nan")}}, "not a finite number"),
     ({"candidates": ["a", "b"], "prior": {"0": 10**400}}, "prior must be"),
     ({"candidates": [{"key": "a", "text": "x"}, {"key": "a", "text": "y"}]}, "unique"),
     ({"candidates": [{"key": "a"}]}, "has no text"),

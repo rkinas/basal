@@ -140,12 +140,15 @@ def test_the_openai_sdk_reads_the_answer():
 
 
 def test_a_deeply_nested_input_is_no_server_error():
-    """Valid JSON nested 900 levels (under the parser's limit): the image check walked it recursively and failed with
-    a 500; it is decided (the state is the input's JSON), and an image part at the bottom is still found."""
-    deep = b'{"a":' * 900 + b"1" + b"}" * 900
+    """Valid JSON nested 200 levels: the image check walked it recursively (a 500 near 1,000 levels); it is decided
+    (the state is the input's JSON), and an image part at the bottom is still found. Deeper than the request check's
+    limit (256 levels) it is a client error, 400, not a 500."""
+    deep = b'{"a":' * 200 + b"1" + b"}" * 200
     q = b', "questions": [{"type": "predicate", "instructions": "Paid?"}]}'
     ok = post_decisions(AppServer(Weights()), content=b'{"input": [' + deep + b"]" + q)
     assert ok.status_code == 200 and len(ok.json()["answers"]) == 1
     image = b'{"type": "input_image", "image_url": "data:image/png;base64,AA"}'
-    bad = post_decisions(AppServer(Weights()), content=b'{"input": [' + b"[" * 900 + image + b"]" * 900 + b"]" + q)
+    bad = post_decisions(AppServer(Weights()), content=b'{"input": [' + b"[" * 200 + image + b"]" * 200 + b"]" + q)
     assert bad.status_code == 400 and "images" in bad.json()["error"]["message"]
+    deeper = post_decisions(AppServer(Weights()), content=b'{"input": [' + b'{"a":' * 900 + b"1" + b"}" * 900 + b"]" + q)
+    assert deeper.status_code == 400 and "levels deep" in deeper.json()["error"]["message"]
