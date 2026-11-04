@@ -1,6 +1,9 @@
 """Regression tests for fix/server-calibration-queue (Z-1082)."""
+import sys
+
 import pytest
 
+from basal import server as S
 from basal.server import check_calibration
 
 
@@ -22,3 +25,15 @@ def test_i09_a_temperature_that_is_not_a_finite_number_above_zero_is_refused_at_
                                  {"temperature_per_bucket": {"choice": {"2-10": 2.0}}}, {}])
 def test_i09_a_valid_calibration_is_accepted(cal):
     assert not refused({"prompt": 1, **cal})
+
+
+def test_p6_a_missing_api_keys_file_is_warned_about_at_start_up(monkeypatch, tmp_path, capsys):
+    def stop(*args):
+        raise SystemExit("stop after the warning")
+    monkeypatch.setattr(S, "refuse_lean_flex", stop)
+    monkeypatch.setattr(sys, "argv", ["basal-serve", "--api-keys", str(tmp_path / "keys.json")])
+    try:
+        S.main()
+    except SystemExit:
+        pass
+    assert "no such file" in capsys.readouterr().err

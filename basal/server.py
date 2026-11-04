@@ -2570,6 +2570,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
 
 def main():
     a = parser().parse_args()
+    if a.api_keys and not Path(a.api_keys).is_file():  # the file is re-read while running, so only a warning
+        print(f"warning: --api-keys {a.api_keys}: no such file; every request gets 401 until it exists", file=sys.stderr)
     refuse_lean_flex(a.lean, a.tree)  # before default_mode, which resolves the model on CUDA GPUs without FA3
     a.mode = a.mode or default_mode(a.model, a.revision)
     validate_quant(a.mode, a.quant)
