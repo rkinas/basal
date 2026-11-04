@@ -135,3 +135,9 @@ def test_i18_a_decoded_image_is_at_most_4096_a_side(w, h):
 def test_i18_a_small_image_keeps_its_size():
     (im,), _, _ = media.decode([{"type": "image", "data": b64_png(640, 480)}], ("image",))
     assert im.size == (640, 480)
+
+
+def test_s19_decoding_does_not_overwrite_the_global_pil_pixel_limit(monkeypatch):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 123456789)
+    media._image(png(Image.new("RGB", (8, 8))), 0)
+    assert Image.MAX_IMAGE_PIXELS == 123456789

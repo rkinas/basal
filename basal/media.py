@@ -56,7 +56,6 @@ def _raw(data, n):
 
 def _image(raw, n):
     from PIL import Image, ImageOps, UnidentifiedImageError
-    Image.MAX_IMAGE_PIXELS = MAX_PIXELS
     try:
         im = Image.open(io.BytesIO(raw))
         w, h = im.size
