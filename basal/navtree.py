@@ -171,13 +171,17 @@ def passages(blocks, max_chars=2000, min_chars=0):
     return out
 
 
-def documents(inputs):
-    """(id, title, group, kind, text) of every document under the inputs (folders: in sorted order)."""
+def documents(inputs, skip=()):
+    """(id, title, group, kind, text) of every document under the inputs (folders: in sorted order); skip: files to
+    leave out (the tree being written, which a second build in the same folder would read as documents)."""
+    skip = {Path(x).resolve() for x in skip}
     for inp in inputs:
         root = Path(inp)
         files = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUFFIXES) \
             if root.is_dir() else [root]
         for f in files:
+            if skip and f.resolve() in skip:
+                continue
             kind = SUFFIXES.get(f.suffix.lower())
             if kind is None:
                 raise ValueError(f"{f}: unknown document type (one of {', '.join(SUFFIXES)})")
@@ -205,23 +209,45 @@ def page_description(title, blocks):
     return s if len(s) <= PAGE_CHARS else s[: PAGE_CHARS - 1].rstrip() + "…"
 
 
+def _prefix(inp):
+    """The id prefix of an input's documents when two inputs give the same id: the folder as given, or a file's
+    folder (so docs/a.md and docs/ give the same ids)."""
+    p = Path(inp)
+    return (p if p.is_dir() else p.parent).as_posix()
+
+
 def build(inputs, split_long=0, group_dirs=False, clusters=0, max_children=0, max_chars=2000, min_chars=0, lang=None,
-          embed=None, seed=0):
+          embed=None, seed=0, skip=()):
     """The nodes of a tree (dicts for basal.navigate.Tree) from documents: [topics ->] pages [-> sections] ->
     passages. split_long: a section level under pages with more than this many passages; group_dirs: folders (or
-    JSONL "group") as topics; clusters: k-means topics (cluster(); embed: your embedding function)."""
+    JSONL "group") as topics; clusters: k-means topics (cluster(); embed: your embedding function); skip: files under
+    the inputs to leave out (the output). Page ids are paths relative to their input; when two inputs give the same id
+    (docs1/index.md and docs2/index.md), every page id gets its input's folder in front (docs1/index, docs2/index)."""
     if group_dirs and clusters:
         raise ValueError("give group_dirs or clusters, not both")
     pages, nodes = [], []
     parse = {"markdown": parse_markdown, "html": parse_html, "text": parse_text}
-    for doc_id, title, group, kind, text in documents(inputs):
-        t, blocks = parse[kind](text, title is not None)
-        title = _clean(title or t or doc_id.rsplit("/", 1)[-1])
-        ps = passages(blocks, max_chars, min_chars)
-        if ps:
-            pages.append(dict(id=doc_id, title=title, group=group, passages=ps, text=page_description(title, blocks)))
+    for k, inp in enumerate(inputs):
+        for doc_id, title, group, kind, text in documents([inp], skip):
+            t, blocks = parse[kind](text, title is not None)
+            title = _clean(title or t or doc_id.rsplit("/", 1)[-1])
+            ps = passages(blocks, max_chars, min_chars)
+            if ps:
+                pages.append(dict(id=doc_id, title=title, group=group, passages=ps, text=page_description(title, blocks),
+                                  input=k))
     if not pages:
         raise ValueError("no passages found in the inputs")
+    first = {}
+    if any(first.setdefault(p["id"], p["input"]) != p["input"] for p in pages):  # the same id from two inputs
+        for p in pages:
+            p["id"] = f"{_prefix(inputs[p['input']])}/{p['id']}"
+    seen = {}
+    for p in pages:
+        if p["id"] in seen:
+            where = sorted({str(inputs[seen[p["id"]]]), str(inputs[p["input"]])})
+            raise ValueError(f"two documents give the page id {p['id']!r} ({' and '.join(where)}): x.md and x.txt in "
+                             "one folder, a JSONL id used twice, or one input given twice")
+        seen[p["id"]] = p["input"]
     lang = lang or _majority_lang(p["title"] for p in pages)
     parent = {}
     if group_dirs:
@@ -278,7 +304,7 @@ def cluster(texts, k, embed=None, max_children=0, lang="en", seed=0, titles=None
         raise SystemExit("topics by k-means need scikit-learn: pip install 'basal[navigate]'") from e
     titles = titles or texts
     tfidf = TfidfVectorizer(sublinear_tf=True, max_df=0.5, min_df=1, max_features=1 << 18,
-                            token_pattern=r"(?u)\b\w\w+\b", stop_words="english" if lang == "en" else STOP_PL)
+                            token_pattern=r"(?u)\b\w\w+\b", stop_words="english" if lang == "en" else list(STOP_PL))
     T = tfidf.fit_transform(texts)
     vocab = tfidf.get_feature_names_out()
     if embed is not None:
