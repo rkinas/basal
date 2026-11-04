@@ -53,3 +53,12 @@ def run_check(monkeypatch, tmp_path, answers_for, n_items=40, gate=0.98):
 def test_sc2_questions_the_server_left_unanswered_are_not_a_pass(monkeypatch, tmp_path):
     assert run_check(monkeypatch, tmp_path, lambda b: {"answers": {k: GOOD for k in NAMES}, "usage": {}}) == 0
     assert run_check(monkeypatch, tmp_path, lambda b: {"answers": {"u": GOOD}, "usage": {}}) != 0
+
+
+def test_sc3_a_run_where_almost_every_request_was_cut_by_the_context_is_not_a_pass(monkeypatch, tmp_path):
+    n = {"n": 0}
+
+    def cut_most(body):
+        n["n"] += 1
+        return {"answers": {k: GOOD for k in NAMES}, "usage": {"truncated": n["n"] > 1}}
+    assert run_check(monkeypatch, tmp_path, cut_most) != 0

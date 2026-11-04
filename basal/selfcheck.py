@@ -161,8 +161,9 @@ def check(url, reference, gate, note):
         if sub:
             print(f"  {t:<7}    {len(sub):>4} readouts  top-1 {sum(r[3] for r in sub) / len(sub):.4f}  "
                   f"max |dp| {max(r[5] for r in sub):.4f}")
-    ok = agree >= gate and not errors and not missing
-    print(f"{'PASS' if ok else 'FAIL'}  (gate: agreement outside near ties >= {gate}, no failed request, no missing answer)")
+    ok = agree >= gate and not errors and not missing and len(ref["items"]) - cut - errors >= len(ref["items"]) / 2
+    print(f"{'PASS' if ok else 'FAIL'}  (gate: agreement outside near ties >= {gate}, no failed request, no missing answer, "
+          "at least half of the requests compared)")
     return 0 if ok else 1
 
 
