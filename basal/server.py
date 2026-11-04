@@ -2480,12 +2480,14 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         return JSONResponse(body, status_code=status)
 
     async def systemone(request):
+        t = time.perf_counter()
+        counts["requests"] += 1  # (a body that is not JSON counts too, as on /v1/decisions)
         try:
             body = await request.json()
         except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
+            counts["failed"] += 1
+            counts["seconds"] += time.perf_counter() - t
             return failed(RequestError(f"the request body is not valid JSON: {e}"))
-        t = time.perf_counter()
-        counts["requests"] += 1
         try:
             return JSONResponse(await srv.serve(body))
         except Exception as e:  # noqa: BLE001

@@ -140,7 +140,7 @@ def test_counters_start_at_zero_and_record_metadata_only():
     assert first["status"]["state"] == "ready" and first["status"]["auth"] is False
     s = r.json()
     t = s["traffic"]
-    assert t["requests"] == 6 and t["failed"] == 1  # as GET /metrics counts (a body that is not JSON is not counted)
+    assert t["requests"] == 7 and t["failed"] == 2  # as GET /metrics counts (a body that is not JSON too)
     assert t["seen"] == 7 and t["codes"] == {"200": 5, "422": 2}
     assert {e["endpoint"]: (e["requests"], e["failed"]) for e in t["endpoints"]} == {
         "/v1/basal": (1, 0), "/v1/decisions": (1, 0), "/v1/systemone": (5, 2)}

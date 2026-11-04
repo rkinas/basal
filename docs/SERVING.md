@@ -554,6 +554,9 @@ reaches (`--replicas`, `--escalate`, `--blend`, `--route`; never to the `--fallb
 `BASAL_FALLBACK_API_KEY` if set). Give every replica the same `--api-keys` file (with `--gpus`, after `--`). The router
 checks no key itself: its `GET /health` and `/metrics` stay open (replica URLs and counters, no answers), and the key
 goes to the replicas over plain HTTP unless their URLs are HTTPS, so keep them on loopback or a private network.
+The router also passes the request's `X-Request-Id` (the client's, or a `req_<hex>` it makes) to every replica the
+request reaches and answers with it as `x-request-id`, so one request has one id in the client's and the replicas'
+logs.
 
 ## Inference on a JSONL file
 
