@@ -1014,6 +1014,30 @@ def test_key_headers_are_the_last_authorization_and_x_api_key():
            (b"content-type", b"text/plain")]
     assert R.key_headers(raw) == {"authorization": b"Bearer a", "x-api-key": b"k2"}
     assert R.key_headers([(b"content-type", b"application/json")]) == {}
+    # a value with surrounding whitespace ("Bearer " with no token) is no valid HTTP header to send on: the router
+    # answered 502 instead of the replica's 401
+    assert R.key_headers([(b"authorization", b"Bearer "), (b"x-api-key", b" k\t")]) == {"authorization": b"Bearer",
+                                                                                         "x-api-key": b"k"}
+
+
+def test_router_passes_client_errors_on_to_the_replica():
+    """A state with a lone surrogate and a body nested too deeply for the parser are the replica's client errors to
+    answer; the router failed on them with 500 (hashing the routing key, reading the state)."""
+    seen = []
+
+    def handler(req):
+        if req.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        seen.append(len(req.content))
+        return httpx.Response(422, json={"error": "client error", "code": "INVALID_REQUEST"})
+    rt = R.Router(["http://r0"], transport=httpx.MockTransport(handler))
+    with TestClient(R.app(rt, poll_s=0.05)) as c:
+        asyncio.run(rt.poll())
+        deep = b'{"state": ' + b"[" * 100_000 + b"]" * 100_000 + b"}"
+        for body in (b'{"state": "a \\ud800 b", "questions": {}}', deep):
+            r = c.post("/v1/systemone", content=body, headers={"content-type": "application/json"})
+            assert r.status_code == 422 and r.json()["code"] == "INVALID_REQUEST"
+    assert len(seen) == 2
 
 
 def test_router_passes_api_keys_on_to_replicas_with_api_keys(tmp_path):
