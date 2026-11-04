@@ -27,7 +27,8 @@ def to_request(item, early_exit=None, preset=None, lang=None):
         from .presets import questions
         item = dict(item, questions=questions(preset, lang, item["state"]))
     if "questions" in item:
-        body = {k: item[k] for k in ("state", "questions", "early_exit") if k in item}
+        body = {k: item[k] for k in ("state", "questions", "early_exit", "lang", "facts", "think", "media", "detail")
+                if k in item}
     else:
         t, opts = item.get("type", "choice"), item["options"]
         if t == "noul":
