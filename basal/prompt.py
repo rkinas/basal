@@ -11,6 +11,7 @@ prefilled with `{"answer": "` and the decision is the softmax over the next-toke
 import functools
 import json
 import re
+import unicodedata
 import weakref
 from pathlib import Path
 
@@ -326,9 +327,19 @@ def option_text(o, tok=None):
     return _LINE_BREAK.sub("\n   ", defang(tok, o))
 
 
+# the Polish letters, and the marks (acute, dot above, ogonek) that spell them in NFD, as macOS writes file names and text
+_PL_OR_MARK = re.compile("[" + "".join(sorted(PL_CHARS)) + "\u0301\u0307\u0328]")
+
+
 def lang_of(text):
-    """Polish if the text contains Polish diacritics, otherwise English (selects the prompt template)."""
-    return "pl" if any(c in PL_CHARS for c in text) else "en"
+    """Polish if the text contains Polish diacritics, otherwise English (selects the prompt template). One scan of the
+    text; only a text with a combining mark is normalized to NFC (a + U+0328 is "ą") and looked at again."""
+    m = _PL_OR_MARK.search(text)
+    if m is None:
+        return "en"
+    if m.group() in PL_CHARS:
+        return "pl"
+    return "pl" if any(c in PL_CHARS for c in unicodedata.normalize("NFC", text)) else "en"
 
 
 def render(tok, state, question, options, lang=None, fmt=1, layout="canonical"):

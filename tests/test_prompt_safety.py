@@ -2,6 +2,7 @@
 is a real byte-level BPE (tokenizers) with ChatML special tokens."""
 import re
 import time
+import unicodedata
 
 import pytest
 from tokenizers import AddedToken, Tokenizer, decoders, models, pre_tokenizers
@@ -118,3 +119,12 @@ def test_a_legitimate_multiline_option_keeps_its_text():
     coded, text = coded_lines(["zwrot pieniędzy\nlub naprawa\n(zob. regulamin)", "inne"])
     assert len(coded) == 2 and "zwrot pieniędzy" in text and "(zob. regulamin)" in text
     assert coded_lines(["tak", "nie", "może"])[0] == ["A.", "B.", "C."]
+
+
+def test_nfd_polish_text_is_polish():
+    pl = "Czy żądanie Pani Józefy jest zasadne? Prosimy o gwarancję i zwrot pieniędzy."
+    nfd = unicodedata.normalize("NFD", pl)
+    assert nfd != pl and P.lang_of(pl) == "pl" and P.lang_of(nfd) == "pl"
+    assert P.lang_of(unicodedata.normalize("NFD", "Zażółć")) == "pl"
+    assert P.lang_of("Ala ma kota.") == "en" and P.lang_of("café") == "en" and P.lang_of("") == "en"
+    assert P.lang_of("Łódź") == "pl" and P.lang_of("Gdańsk is a city") == "pl"  # one diacritic stays Polish, as before
