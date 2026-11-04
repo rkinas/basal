@@ -255,8 +255,9 @@ def _varlen_sdpa(q, k, v, cu, scale, layer=0, impl=None):
 # fla's Triton kernels pick their launch config by timing the candidates at the first launch of every shape key
 # (triton.autotune), so two starts of the server could pick different configs, round differently and give different
 # probabilities (and a new shape stalled a request while it was timed). FLA_CONFIGS holds the configs an H100 picked for
-# the keys basal's pass shapes use (fla_record): with it every fla kernel takes the recorded config of its key, and
-# its most common one for any other key, without timing. Only on the GPU and fla version it was recorded with.
+# the keys basal's pass shapes use (fla_record): with it every recorded fla kernel takes the recorded config of its
+# key, and its most common one for any other key, without timing (a kernel not in the table autotunes as before). Only
+# on the GPU and fla version it was recorded with.
 FLA_CONFIGS = Path(__file__).parent / "fla_configs.json"
 
 
@@ -319,7 +320,9 @@ class _PinnedCache(dict):
 def fla_pin(path=None):
     """Give fla's autotuners the recorded configs (see FLA_CONFIGS; a prepared start-up's own table replaces it,
     prepared.load) -> the number of kernels pinned, 0 when the table is for another GPU or fla version (they autotune
-    as before), or missing. BASAL_FLA_PIN=0 turns it off."""
+    as before), or missing. Only the kernels in the table are pinned: a kernel the recording never launched has no
+    measured config (its first candidate may not even fit the GPU), so it autotunes as without a table.
+    BASAL_FLA_PIN=0 turns it off."""
     path = path or FLA_CONFIGS
     if os.environ.get("BASAL_FLA_PIN", "1") != "1" or not Path(path).exists() or not torch.cuda.is_available():
         return 0
@@ -329,15 +332,14 @@ def fla_pin(path=None):
     if table.get("gpu") != torch.cuda.get_device_name() or table.get("fla") != fla.__version__:
         return 0
     n = 0
+    def cfg(d):
+        return Config(d["kwargs"], num_warps=d["num_warps"], num_stages=d["num_stages"], num_ctas=d["num_ctas"],
+                      maxnreg=d["maxnreg"])
     for name, t in _fla_autotuners().items():
         e = table["kernels"].get(name)
         if e is not None:
-            cfg = lambda d: Config(d["kwargs"], num_warps=d["num_warps"], num_stages=d["num_stages"],  # noqa: E731
-                                   num_ctas=d["num_ctas"], maxnreg=d["maxnreg"])
             t.cache = _PinnedCache({tuple(k): cfg(c) for k, c in e["keys"]}, cfg(e["default"]))
-        else:  # a kernel basal's passes never launched: its first candidate, so it is not timed either
-            t.cache = _PinnedCache({}, t.configs[0])
-        n += 1
+            n += 1
     return n
 
 
