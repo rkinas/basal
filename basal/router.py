@@ -84,6 +84,7 @@ from .metrics import prometheus
 LOAD_FACTOR = 1.25
 VNODES = 64
 POLL_S = 2.0
+REPLICA_TIMEOUT_S = 600.0  # a replica that takes longer than this on one request is answered 504 (a hung GPU no longer holds the client forever)
 SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (spawn)
 
 
@@ -325,7 +326,7 @@ class Router:
         self.factor = factor
         self.rng = random.Random(seed)
         self.dead = False
-        self.client = httpx.AsyncClient(timeout=None, transport=transport,
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(REPLICA_TIMEOUT_S, connect=10.0), transport=transport,
                                         limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
     def choose(self, key, pool="main"):
@@ -534,8 +535,12 @@ class Router:
                 self.failed[r] += 1
             return resp.status_code, resp.content, resp.headers.get("content-type", "application/json")
         except Exception as e:  # noqa: BLE001
+            import httpx
             self.failed[r] += 1
-            self.ready.discard(r)
+            if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):  # down; poll() brings it back. A reset or a
+                self.ready.discard(r)  # timeout on one request does not take a healthy replica out of the pool
+            if isinstance(e, httpx.TimeoutException):
+                return 504, json.dumps({"error": f"replica {r}: {type(e).__name__}"}).encode(), "application/json"
             return 502, json.dumps({"error": f"replica {r}: {type(e).__name__}"}).encode(), "application/json"
         finally:
             self.load[r] -= 1
@@ -575,8 +580,11 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
 
     async def post(request):
         headers = {"content-type": "application/json", **key_headers(request.headers.raw)}
+        if request.scope.get("basal.request_id"):  # the client's id (or one made here): the same in router and replica logs
+            headers["x-request-id"] = request.scope["basal.request_id"]
         status, content, ctype = await router.forward(request.url.path, await request.body(), headers)
-        return Response(content, status_code=status, media_type=ctype)
+        extra = {"retry-after": str(math.ceil(POLL_S))} if status == 503 else {}  # no replica ready: the next poll may find one
+        return Response(content, status_code=status, media_type=ctype, headers=extra)
 
     async def health(_):
         body = {"status": "ok" if router.ready else "starting", "ready": len(router.ready),
@@ -615,9 +623,13 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
 
     routes = [Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
               Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)]
+    from starlette.middleware import Middleware
+
+    from .auth import request_ids
+    ids = [Middleware(request_ids)]  # inside Starlette, so app() still returns a Starlette (a.routes)
     if ui is None:
-        return Starlette(routes=routes, lifespan=lifespan)
-    return ui.page(Starlette(routes=ui.routes(routes), lifespan=lifespan))
+        return Starlette(routes=routes, lifespan=lifespan, middleware=ids)
+    return ui.page(Starlette(routes=ui.routes(routes), lifespan=lifespan, middleware=ids))
 
 
 class Replicas:

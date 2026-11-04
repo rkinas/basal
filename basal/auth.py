@@ -161,6 +161,7 @@ def request_ids(app):
             return
         supplied = dict(scope.get("headers", ())).get(b"x-request-id", b"").decode("latin1")
         request_id = supplied if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied) else f"req_{uuid.uuid4().hex}"
+        scope["basal.request_id"] = request_id  # basal-router passes it on to the replica
 
         async def send_with_id(message):
             if message["type"] == "http.response.start":
