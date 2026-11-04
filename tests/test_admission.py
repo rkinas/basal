@@ -61,6 +61,8 @@ BAD = [
      "lone surrogate"),
     (raw('{"state": "x", "questions": {"q": {"type": "choice", "criteria": ["ok", Infinity]}}}'), "not a finite"),
     (raw('{"state": "x", "questions": {"q": {"type": "choice", "criteria": {"a": "A", "b": NaN}}}}'), "not a finite"),
+    (raw('{"state": "x", "questions": {"best": {"type": "rank", "instructions": "Does {candidate} fit?", '
+         '"candidates": ["a", "b"], "prior": {"a": 1e999}}}}'), "not a finite"),
     (raw('{"state": ' + "[" * (MAX_DEPTH + 1) + "]" * (MAX_DEPTH + 1) + ', "questions": {"q": ' + CHOICE + '}}'),
      "nests"),
 ]

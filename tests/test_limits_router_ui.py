@@ -58,3 +58,16 @@ def test_ui_full_keeps_the_newest_requests_within_its_byte_budget(monkeypatch):
     assert u.request_json(1) is None and json.loads(u.request_json(3))["request"]["state"] == "c" * 700
     asyncio.run(send("d" * 5000))  # larger than the budget: kept alone
     assert [b[0] for b in u.bodies] == [4]
+
+
+def test_ui_full_shows_a_kept_request_that_held_a_lone_surrogate():
+    from test_ui import on
+    srv, u, app = app_of(full=True)
+
+    async def go(c):
+        r = await c.post("/v1/systemone", content=b'{"state": "x\\udead", "questions": {"q": {"type": "noul"}}}',
+                         headers={"content-type": "application/json"})
+        return r, await c.get("/ui/request/1")
+    r, kept = asyncio.run(on(srv, app, go))
+    assert r.status_code == 422 and kept.status_code == 200
+    assert kept.json()["request"]["state"] == "x\udead" and kept.json()["status"] == 422  # (escaped as \udead in JSON)
