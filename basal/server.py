@@ -1518,6 +1518,8 @@ class Server:
         finally:
             for fut in futs:
                 self.waiting.pop(fut, None)
+                if not fut.done():  # cancelled, or another entry failed: its queued work is dropped (forward)
+                    fut.cancel()
             if wait[0]:
                 self.queued -= 1
         return outs
@@ -1665,6 +1667,10 @@ class Server:
             self.long_ready.set()
         while True:
             await self.long_ready.wait()
+            self.long_entries[:] = [e for e in self.long_entries if not e[2].done()]  # (cancelled: dropped)
+            if not self.long_entries:
+                self.long_ready.clear()
+                continue
             now, rate = time.perf_counter(), self.long_rate
             order = sorted(self.long_entries, key=lambda e: ((now - e[5]) / (e[6] * rate) + 1, -e[6]), reverse=True)
             batch, total = [], 0  # the highest response ratios first, up to LONG_BATCH requests / LONG_BATCH_TOKENS
@@ -1710,31 +1716,32 @@ class Server:
             slots.release()
             return
         self.started(batch)
+        live = [b for b in batch if not b[2].done()]  # (a cancelled request's entries cost the engine nothing)
         lanes = getattr(self, "lanes", None)
         backend = self.free_lanes.pop() if lanes else self.backend  # (slots: never more calls than lanes)
         try:
-            for pol in {b[3] for b in batch}:  # requests with the same early-exit policy run together
-                ix = [i for i, b in enumerate(batch) if b[3] == pol]
+            for pol in {b[3] for b in live}:  # requests with the same early-exit policy run together
+                ix = [i for i, b in enumerate(live) if b[3] == pol]
                 kw = {}
                 if getattr(backend, "streams", False):
-                    kw["done"] = lambda j, res, ix=ix: loop.call_soon_threadsafe(_answer, batch[ix[j]][2], res)
+                    kw["done"] = lambda j, res, ix=ix: loop.call_soon_threadsafe(_answer, live[ix[j]][2], res)
                 groups = []
                 for i in ix:  # (prompts, code ids[, state prefix length for the state cache])
-                    cut = batch[i][4] if len(batch[i]) > 4 else None
-                    groups.append((batch[i][0], batch[i][1]) + ((cut,) if cut else ()))
+                    cut = live[i][4] if len(live[i]) > 4 else None
+                    groups.append((live[i][0], live[i][1]) + ((cut,) if cut else ()))
                 out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
                 for i, o in zip(ix, out):
-                    _answer(batch[i][2], o)
+                    _answer(live[i][2], o)
         except Exception as e:  # noqa: BLE001
-            _fail([b[2] for b in batch], e)
+            _fail([b[2] for b in live], e)
         finally:
             if lanes:
                 self.free_lanes.append(backend)
             slots.release()
             if getattr(self, "gate", None) is not None:
                 self.gate.main_done(len(batch), time.perf_counter() - t_call)
-            if getattr(self, "backlog", None) is not None:  # seconds per prompt token, for the HRRN ratios
-                tokens = sum(max(map(len, b[0]), default=0) for b in batch)
+            if getattr(self, "backlog", None) is not None and live:  # seconds per prompt token, for the HRRN ratios
+                tokens = sum(max(map(len, b[0]), default=0) for b in live)
                 self.sched_rate = 0.8 * self.sched_rate + 0.2 * (time.perf_counter() - t_call) / max(tokens, 1)
 
     @staticmethod
