@@ -59,7 +59,7 @@ from .textio import read_text
 from .facts import MAX_CHARS as FACTS_MAX_CHARS, inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
-from .request import check_json
+from .request import check_json, named_options, request_json, text_of
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, defang, lang_of, letter_ids,
                      max_options, media_messages, model_format, model_layout, model_option_isolation, model_two_way,
                      once_ids, option_tokens, reads_request, render, tokens_once)
@@ -205,27 +205,7 @@ def validate_quant(mode, quant):
                      "(q8 only for mlx; fp8, nvfp4 and int8 only for the CUDA graph modes)")
 
 
-def _text(x):
-    """Strings as they are; structured values (objects, lists, numbers) as compact JSON."""
-    return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
-
-
-def named_options(crit, option_keys="show"):
-    """{key: description} -> option texts shown to the model.
-
-    option_keys="show" (default): every described option is shown as "key: description", because only the caller knows
-    whether a key is meaningful (a service code "B", a decision name "approve"); the server never guesses. A key without
-    a description is shown by itself.
-    option_keys="hide": the caller states that the keys are placeholders and the descriptions alone define the options
-    (the format of the training data and of our PL/EN evaluation clients); descriptions that are not unique within the
-    question still get their key, otherwise the options could not be told apart."""
-    if option_keys not in ("show", "hide"):
-        raise RequestError(f'option_keys must be "show" or "hide", got {option_keys!r}')
-    texts = [str(k) if v is None else _text(v) for k, v in crit.items()]
-    dup = {t for t in texts if texts.count(t) > 1}
-    shown = [t if v is None or (option_keys == "hide" and t not in dup) else f"{k}: {t}"
-             for (k, v), t in zip(crit.items(), texts)]
-    return list(crit), shown
+_text = text_of  # (basal/request.py: the helpers basal-serve and basal-router share)
 
 
 MULTI_Q = {"pl": "{q}\nCzy dotyczy: „{label}”?", "en": "{q}\nDoes this apply: \"{label}\"?"}
@@ -2795,7 +2775,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     counts = {"requests": 0, "failed": 0, "seconds": 0.0}  # GET /metrics
     cache_seen = {"stats": None, "at": 0}  # the last state-cache snapshot /metrics read, and its Unix time
 
-    def report(e):
+    def logged(e):
         """The failed request on stderr: one line, plus the traceback for a server error (HTTP 500), whose cause is
         in the server (the line alone hid a TypeError deep in the engine). The reply never carries the traceback."""
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
@@ -2804,60 +2784,45 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             sys.stderr.flush()
         if isinstance(e, torch.OutOfMemoryError):  # the failed forward's blocks back to the GPU: kept by the
             torch.cuda.empty_cache()  # allocator, they failed the next requests too (ultra, 20 Oct)
+        return e
 
     def failed(e):
-        report(e)
-        body, status = error_body(e, error_format)
+        body, status = error_body(logged(e), error_format)
         return JSONResponse(body, status_code=status)
 
-    async def systemone(request):
-        t = time.perf_counter()
-        counts["requests"] += 1  # (a body that is not JSON counts too, as on /v1/decisions)
-        try:
-            body = await request.json()
-        except ClientDisconnect:  # the client left while sending the body: as when it leaves later (not a 500)
-            counts["seconds"] += time.perf_counter() - t
-            return JSONResponse(*CLIENT_GONE)
-        except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
-            counts["failed"] += 1
-            counts["seconds"] += time.perf_counter() - t
-            return failed(RequestError(f"the request body is not valid JSON: {e}"))
-        try:
-            out = await until_disconnect(request, srv.serve(body))
-            if out is None:  # the client is gone: its queued work was dropped, no one reads an answer
-                return JSONResponse(*CLIENT_GONE)
-            return JSONResponse(out)
-        except Exception as e:  # noqa: BLE001
-            counts["failed"] += 1
-            return failed(e)
-        finally:
-            counts["seconds"] += time.perf_counter() - t
-
-    async def decisions(request):
-        """POST /v1/decisions (OpenAI's Decisions API, basal/decisions.py): the System One request it stands for,
-        decided as POST /v1/systemone; errors in OpenAI's shape (400 for an invalid request)."""
-        t = time.perf_counter()
-        counts["requests"] += 1
-        try:
+    def route(answer, error):
+        """A decision route: the body read once (request_json), answer(body) -> its JSON response, error(e) -> the
+        response of a failure; every request counted for /metrics (a body that is not JSON too). A client that
+        disconnects, while it sends the body or while its request is served (until_disconnect: its queued work is
+        dropped), gets the 499 that nobody reads; that is no failure."""
+        async def handle(request):
+            t = time.perf_counter()
+            counts["requests"] += 1
             try:
-                body = await request.json()
-            except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
-                raise RequestError(f"the request body is not valid JSON: {e}") from None
-            check_json(body, finite=())  # (to_systemone reads it recursively)
-            s1, specs = dec.to_systemone(body)
-            out = await until_disconnect(request, srv.serve(s1))
-            if out is None:  # the client is gone (as on /v1/systemone)
+                out = await until_disconnect(request, answer(await request_json(request)))
+                return JSONResponse(*CLIENT_GONE) if out is None else JSONResponse(out)
+            except ClientDisconnect:  # the client left while sending the body: as when it leaves later (not a 500)
                 return JSONResponse(*CLIENT_GONE)
-            return JSONResponse(dec.to_decision(out, specs))
-        except ClientDisconnect:  # the client left while sending the body (as on /v1/systemone)
-            return JSONResponse(*CLIENT_GONE)
-        except Exception as e:  # noqa: BLE001
-            counts["failed"] += 1
-            report(e)
-            status = 400 if isinstance(e, RequestError) else http_status(e)
-            return JSONResponse(dec.error_body(e, status), status_code=status)
-        finally:
-            counts["seconds"] += time.perf_counter() - t
+            except Exception as e:  # noqa: BLE001
+                counts["failed"] += 1
+                return error(e)
+            finally:
+                counts["seconds"] += time.perf_counter() - t
+        return handle
+
+    async def as_decision(body):
+        """POST /v1/decisions (OpenAI's Decisions API, basal/decisions.py): the System One request it stands for,
+        decided as POST /v1/systemone."""
+        check_json(body, finite=())  # (to_systemone reads it recursively)
+        s1, specs = dec.to_systemone(body)
+        return dec.to_decision(await srv.serve(s1), specs)
+
+    def decision_failed(e):
+        """An error of /v1/decisions in OpenAI's shape (400 for an invalid request)."""
+        status = 400 if isinstance(logged(e), RequestError) else http_status(e)
+        return JSONResponse(dec.error_body(e, status), status_code=status)
+
+    systemone, decisions = route(lambda body: srv.serve(body), failed), route(as_decision, decision_failed)
 
     async def models(_):
         return JSONResponse(models_payload(srv.name, mode, getattr(srv.backend, "policies", {}), srv.temps,

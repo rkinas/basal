@@ -86,6 +86,8 @@ import argparse
 import asyncio
 import atexit
 import bisect
+import collections
+import functools
 import hashlib
 import json
 import math
@@ -98,6 +100,7 @@ import sys
 import time
 
 from .metrics import prometheus
+from .request import named_options, parse_body, text_of
 
 LOAD_FACTOR = 1.25
 VNODES = 64
@@ -107,14 +110,10 @@ SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (sp
 
 
 def state_key(body):
-    """The routing key of a request body: its state (a /v1/decisions request: its input) with whitespace normalised
-    (None without one, or for a body that is not JSON or nested too deeply to read: the replica answers that client
-    error)."""
-    try:
-        d = json.loads(body)
-        state = d.get("state", d.get("input"))
-    except (ValueError, AttributeError, RecursionError):
-        return None
+    """The routing key of a request (its body, or the body as parse_body read it): its state (a /v1/decisions request:
+    its input) with whitespace normalised (None without one, or for a body that is not a JSON object)."""
+    d = parse_body(body) if isinstance(body, (bytes, str)) else body
+    state = d.get("state", d.get("input")) if isinstance(d, dict) else None
     if not isinstance(state, str) or not state.strip():
         return None
     return re.sub(r"\s+", " ", state.strip())
@@ -126,18 +125,22 @@ SCRIPTS = ("latin", "cyrillic", "greek", "arabic", "hebrew", "cjk")
 def script_of(text):
     """The script most of the letters of text are in (SCRIPTS, or "other"; None without letters). A state that is not a
     string is read as its JSON text, as basal-serve shows it to the model (keys too)."""
-    import unicodedata
     if text is not None and not isinstance(text, str):
-        text = _text(text)
+        text = text_of(text)
     count = {}
-    for ch in text or "":
+    for ch, n in collections.Counter(text or "").items():  # (each distinct character named once, in text order)
         if ch.isalpha():
-            name = unicodedata.name(ch, "")
-            sc = next((x for x in SCRIPTS[:5] if name.startswith(x.upper())), None)
-            if sc is None:
-                sc = "cjk" if name.startswith(("CJK", "HIRAGANA", "KATAKANA", "HANGUL")) else "other"
-            count[sc] = count.get(sc, 0) + 1
+            sc = _script(ch)
+            count[sc] = count.get(sc, 0) + n
     return max(count, key=count.get) if count else None
+
+
+@functools.lru_cache(maxsize=65536)
+def _script(ch):
+    import unicodedata
+    name = unicodedata.name(ch, "")
+    sc = next((x for x in SCRIPTS[:5] if name.startswith(x.upper())), None)
+    return sc or ("cjk" if name.startswith(("CJK", "HIRAGANA", "KATAKANA", "HANGUL")) else "other")
 
 
 def top_probability(answer):
@@ -250,10 +253,6 @@ FALLBACK_SYSTEM = ("You answer a question about a document. Read the document, t
                    'the question. Reply with JSON only: {"answer": "<the letter of the option>"}.')
 
 
-def _text(x):
-    return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
-
-
 def fallback_options(question, answer):
     """[(key, text)] of a plain choice question in the answer's order, the texts as basal-serve shows them to the model
     (option_keys); None when the question does not go to the fallback (another type, limits, evidence, multi, keys
@@ -267,18 +266,15 @@ def fallback_options(question, answer):
         crit = {k: None for k in crit}
     if not isinstance(crit, dict) or [str(k) for k in crit] != list(answer["probabilities"]) or not 2 <= len(crit) <= 26:
         return None
-    texts = [str(k) if v is None else _text(v) for k, v in crit.items()]
-    dup = {t for t in texts if texts.count(t) > 1}
-    hide = question.get("option_keys") == "hide"
-    return [(str(k), t if v is None or (hide and t not in dup) else f"{k}: {t}")
-            for (k, v), t in zip(crit.items(), texts)]
+    keys, texts = named_options(crit, "hide" if question.get("option_keys") == "hide" else "show")
+    return [(str(k), t) for k, t in zip(keys, texts)]
 
 
 def fallback_messages(state, question, options):
     """The chat messages for the fallback: the document, the question and the options as lettered lines."""
     q = question.get("instructions")
     lines = "\n".join(f"{LETTERS[i]}. {t}" for i, (_, t) in enumerate(options))
-    user = (f"Document:\n{_text(state)}\n\nQuestion:\n{_text(q) if q else 'Which option fits the document?'}\n\n"
+    user = (f"Document:\n{text_of(state)}\n\nQuestion:\n{text_of(q) if q else 'Which option fits the document?'}\n\n"
             f"Options:\n{lines}")
     return [{"role": "system", "content": FALLBACK_SYSTEM}, {"role": "user", "content": user}]
 
@@ -446,42 +442,42 @@ class Router:
     async def forward(self, path, body, headers):
         """-> (status, content, content type): the request to the replica its pool and state give, then (--escalate)
         its low-confidence questions to the escalation replicas."""
+        req = parse_body(body)  # read once (None: not a request the replicas take; the replica answers it)
+        key = state_key(req)  # (every call of the request goes by its state: the sub-requests keep it)
         if path == "/v1/decisions":  # as it is (OpenAI's shape: the cascade, blend and fallback read basal answers)
-            return await self._send("main", path, body, headers)
+            return await self._send("main", path, body, headers, key)
         pool = "main"
         if any(name.startswith("script:") for name in self.rings):  # --route
-            try:
-                sc = script_of(json.loads(body).get("state"))
-            except (ValueError, AttributeError, TypeError):  # (not JSON, not an object: the replica refuses it)
-                sc = None
+            sc = script_of(req.get("state")) if req is not None else None
             if sc is not None:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
                 pool = f"script:{sc}" if f"script:{sc}" in self.rings else pool
-        status, content, ctype = await self._send(pool, path, body, headers)
-        if status == 200 and (self.levels or self.blends or self.fallback):
-            content = await self._stages(path, body, content, headers)
+        status, content, ctype = await self._send(pool, path, body, headers, key)
+        if status == 200 and req is not None and (self.levels or self.blends or self.fallback):
+            content = await self._stages(path, req, content, headers, key)
             if b'"ask_if"' in body:
-                content = await self._gates(pool, path, body, content, headers)
+                content = await self._gates(pool, path, req, content, headers, key)
         return status, content, ctype
 
-    async def _stages(self, path, body, content, headers):
-        """The first replica's response (content) through the cascade, the blend and the fallback."""
+    async def _stages(self, path, req, content, headers, key):
+        """The first replica's response (content) to the request req (parse_body) through the cascade, the blend and
+        the fallback."""
         level = {}
         if self.levels:
-            content = await self._cascade(path, body, content, headers, level)
+            content = await self._cascade(path, req, content, headers, key, level)
         if self.blends:
-            content = await self._blend(path, body, content, headers)
+            content = await self._blend(path, req, content, headers, key)
         if self.fallback:
-            content = await self._fallback(body, content, level if self.levels else None)
+            content = await self._fallback(req, content, level if self.levels else None)
         return content
 
-    async def _gates(self, pool, path, body, content, headers):
+    async def _gates(self, pool, path, req, content, headers, key):
         """ask_if over the final answers: the replica skipped questions by its own answers, which a cascade level, a
         blend or the fallback may have replaced. In the gates' order, a question whose gate now fails is null; the ones
         it now passes that were skipped are asked (without their gates, through the same stages), and the questions
         gated on them are decided after their answers. usage.skipped names the null ones."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             qs, answers = req["questions"], resp["answers"]
             order = gate_order(qs)
         except (ValueError, KeyError, TypeError, AttributeError):
@@ -502,12 +498,12 @@ class Router:
             if not todo:
                 break
             tried.update(todo)
-            sub = json.dumps(dict(req, questions=ungated(qs, todo))).encode()
-            st, c2, _ = await self._send(pool, path, sub, headers)
+            sub = dict(req, questions=ungated(qs, todo))
+            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers, key)
             if st != 200:
                 continue  # (they stay null; the next round decides the questions gated on them)
             try:
-                r2 = json.loads(await self._stages(path, sub, c2, headers))
+                r2 = json.loads(await self._stages(path, sub, c2, headers, key))
             except ValueError:
                 continue
             for q in todo:
@@ -528,11 +524,11 @@ class Router:
                 usage.pop("skipped", None)
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _fallback(self, body, content, level=None):
+    async def _fallback(self, req, content, level=None):
         """The answers of the last level (level: the cascade's level of each question; None: one model) whose top
         probability is under --fallback-below asked of the LLM, concurrently; its answer replaces the basal one."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
             if req.get("media") is not None or req.get("images") is not None:  # (images: the alias of media)
@@ -599,10 +595,10 @@ class Router:
         i, probs, result = fallback_parse(data, len(options))
         return i, probs, result, (data.get("model") if isinstance(data, dict) else None) or f["model"]
 
-    async def _blend(self, path, body, content, headers):
+    async def _blend(self, path, req, content, headers, key):
         """The first replica's answers, the blendable ones mixed with the --blend pools' (asked at once, concurrently)."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
             want = [q for q, a in answers.items() if q in qs and blendable(qs[q], a)]
@@ -611,7 +607,7 @@ class Router:
         if not want:
             return content
         sub = json.dumps(dict(req, questions=ungated(qs, want))).encode()
-        outs = await asyncio.gather(*(self._send(pool, path, sub, headers) for pool, _ in self.blends))
+        outs = await asyncio.gather(*(self._send(pool, path, sub, headers, key) for pool, _ in self.blends))
         others = []
         for (_, w), (st, c, _) in zip(self.blends, outs):
             try:
@@ -634,12 +630,12 @@ class Router:
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _cascade(self, path, body, content, headers, level_out=None):
+    async def _cascade(self, path, req, content, headers, key, level_out=None):
         """The answers of the first replica (level 1), with those under level k's threshold asked again of level k + 1,
         level by level. A level that is down or does not answer 200 leaves the previous answers (and ends the chain).
         With one level the response is as before; with more, every answer also gives its level and model."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
         except (ValueError, KeyError, TypeError):
             return content
@@ -658,7 +654,7 @@ class Router:
             if not low:
                 break
             sub = dict(req, questions=ungated(req["questions"], low))
-            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers)
+            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers, key)
             if st != 200:
                 break
             r2 = json.loads(c2)
@@ -679,8 +675,9 @@ class Router:
         resp["cascade"] = {"below": below, "escalated": done}
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _send(self, pool, path, body, headers):
-        r, how = self.choose(state_key(body), pool)
+    async def _send(self, pool, path, body, headers, key=None):
+        """One call of a replica of the pool, chosen by key (state_key of the request: None, by load)."""
+        r, how = self.choose(key, pool)
         if r is None:
             return 503, b'{"error": "no basal replica is ready"}', "application/json"
         self.load[r] += 1

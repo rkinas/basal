@@ -33,6 +33,7 @@ def srv_with(**kw):
 
 
 async def _post(srv, path, content):
+    srv.queue = asyncio.Queue()  # (a queue is bound to the event loop it first waits in, and each post runs its own)
     worker = asyncio.get_running_loop().create_task(srv.worker())
     try:
         transport = httpx.ASGITransport(app=http_app(srv, "fast"))

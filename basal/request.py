@@ -4,7 +4,11 @@
 A body is JSON that a client may have built by hand: it can nest deeper than the code that reads it recurses, carry an
 escape such as "\\udead" (a lone surrogate: not Unicode text, which the tokenizer and the UTF-8 response refuse) or,
 in a question, a NaN or an infinity (Python's json reads them, and an answer keyed or computed by one cannot be
-written). Each is the request's fault, answered 422 (400 on /v1/decisions) before anything is rendered or run."""
+written). Each is the request's fault, answered 422 (400 on /v1/decisions) before anything is rendered or run.
+
+Also the request helpers both read alike: a value as text (text_of), the options as the model sees them
+(named_options) and a body read once (read_json for basal-serve, parse_body for the router)."""
+import json
 import math
 
 from .prompt import RequestError
@@ -46,3 +50,58 @@ def check_json(body, max_depth=MAX_DEPTH, finite=("questions",)):
                                   fin or depth == 1 and k in finite))
             else:
                 stack.extend((v, depth + 1, f"{where}[{i}]", fin) for i, v in enumerate(x))
+
+
+def read_json(raw):
+    """A request body (bytes) -> its JSON value; RequestError for one that is not JSON, not UTF-8 or nested beyond what
+    the parser reads (RecursionError)."""
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError) as e:  # (UnicodeDecodeError is a ValueError)
+        raise RequestError(f"the request body is not valid JSON: {e}") from None
+
+
+async def request_json(request):
+    """A Starlette request's body as read_json reads it, kept on the request as request.json() keeps it (--ui reads
+    it there)."""
+    try:
+        return await request.json()
+    except (ValueError, RecursionError) as e:
+        raise RequestError(f"the request body is not valid JSON: {e}") from None
+
+
+def parse_body(raw):
+    """A request body read once for basal-router (routing, the cascade, the blend, the fallback): the JSON object, or
+    None when it is not one basal-serve would take (not JSON, not an object, nested too deeply, a lone surrogate); the
+    replica it goes to then answers it with its own error."""
+    try:
+        body = read_json(raw)
+        if not isinstance(body, dict):
+            return None
+        check_json(body, finite=())
+    except RequestError:
+        return None
+    return body
+
+
+def text_of(x):
+    """Strings as they are; structured values (objects, lists, numbers) as compact JSON, as the model sees them."""
+    return x if isinstance(x, str) else json.dumps(x, ensure_ascii=False)
+
+
+def named_options(crit, option_keys="show"):
+    """{key: description} -> (keys, option texts shown to the model).
+
+    option_keys="show" (default): every described option is shown as "key: description", because only the caller knows
+    whether a key is meaningful (a service code "B", a decision name "approve"); the server never guesses. A key without
+    a description is shown by itself.
+    option_keys="hide": the caller states that the keys are placeholders and the descriptions alone define the options
+    (the format of the training data and of our PL/EN evaluation clients); descriptions that are not unique within the
+    question still get their key, otherwise the options could not be told apart."""
+    if option_keys not in ("show", "hide"):
+        raise RequestError(f'option_keys must be "show" or "hide", got {option_keys!r}')
+    texts = [str(k) if v is None else text_of(v) for k, v in crit.items()]
+    dup = {t for t in texts if texts.count(t) > 1}
+    shown = [t if v is None or (option_keys == "hide" and t not in dup) else f"{k}: {t}"
+             for (k, v), t in zip(crit.items(), texts)]
+    return list(crit), shown
