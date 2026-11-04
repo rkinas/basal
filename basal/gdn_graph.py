@@ -21,7 +21,7 @@ readout, and changes three things:
 
 The layers are transformers' own modules (projections, norms, MLP, rotary embedding); the Gated DeltaNet kernel is fla's
 (flash-linear-attention), as in the eager reference. Not here (refused before loading, with what to use instead): fp8 /
-nvfp4, compact rows, the prefix cache, template prefixes, --readout-layer on, --lean, the long lane.
+nvfp4.
 - **State cache** (--state-cache-gb, 2.5): a request cut at its state boundary keeps its root as a full-state checkpoint:
   the attention layers' keys and values of the state and, per Gated DeltaNet layer, the recurrent state and convolution
   tail after its last token. A later request with the same state copies them where pass 1 would have written them and
@@ -84,7 +84,9 @@ def fla_rule():
 def refused(quant=None, state_cache_gb=0, prefix=False, batches="default", lean=False, tree="dense",
             readout_layer="off", template="off", device=True):
     """Why GDNGraphBackend cannot serve a Qwen3.5 model with these settings (None: it can), before anything is loaded.
-    device: also check for a CUDA GPU and fla (the server checks the settings before the download, the engine both).
+    Only quantisation is refused: the state cache, the prefix cache, compact rows, template prefixes and the long lane
+    run since 2.5 (their arguments stay for the callers). device: also check for a CUDA GPU and fla (the server checks
+    the settings before the download, the engine both).
     --lean / --tree flex change nothing here, as for basal-omni's Gemma 4 forward: Qwen35Graph is lean already (one
     compiled function per layer kind, called with each layer's weights), and its pass 2 has no trie mask (one row per
     leaf)."""
