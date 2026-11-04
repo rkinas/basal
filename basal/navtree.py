@@ -195,6 +195,8 @@ def documents(inputs, skip=()):
                         k = next((x for x in ("markdown", "html", "text") if isinstance(d.get(x), str)), None)
                         if k is None:
                             raise ValueError(f"{f}:{n + 1}: a document needs text, markdown or html")
+                        if d.get("title") is not None and not isinstance(d["title"], str):
+                            raise ValueError(f"{f}:{n + 1}: title must be a string, got {type(d['title']).__name__}")
                         yield str(d.get("id", f"{rel.with_suffix('').as_posix()}:{n + 1}")), d.get("title"), \
                             d.get("group"), k, d[k]
             else:
