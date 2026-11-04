@@ -316,16 +316,23 @@ class EagerBackend:
         return self._codes(self._head_in[:, -1, :].float(), ids_list)
 
     def _codes(self, h, ids_list):
-        out = []
-        for b, lid in enumerate(ids_list):  # softmax over the code rows = softmax over the codes of the full log-softmax
-            sel = torch.tensor(lid, device=h.device)
-            z = h[b] @ self.head.weight.index_select(0, sel).float().T
+        """Hidden states [B, D] (fp32) -> the probabilities over each prompt's codes (softmax over the code rows =
+        softmax over the codes of the full log-softmax). Prompts with the same codes share one product, and all are read
+        back in one copy (2.5.3: one device sync per prompt)."""
+        K, groups = max(map(len, ids_list)), {}
+        for b, lid in enumerate(ids_list):
+            groups.setdefault(tuple(lid), []).append(b)
+        z = torch.full((len(ids_list), K), float("-inf"), dtype=torch.float32, device=h.device)
+        for lid, rows in groups.items():
+            sel, r = torch.tensor(lid, device=h.device), torch.tensor(rows, device=h.device)
+            zz = h[r] @ self.head.weight.index_select(0, sel).float().T
             if self.head.bias is not None:
-                z = z + self.head.bias.index_select(0, sel).float()
+                zz = zz + self.head.bias.index_select(0, sel).float()
             if self.softcap:
-                z = torch.tanh(z / self.softcap) * self.softcap
-            out.append(torch.softmax(z, -1).tolist())
-        return out
+                zz = torch.tanh(zz / self.softcap) * self.softcap
+            z[r, : len(lid)] = zz
+        p = torch.softmax(z, -1).tolist()
+        return [row[: len(lid)] for row, lid in zip(p, ids_list)]
 
     def run_shared(self, groups, policy=None):
         if self.g4 is not None:  # Gemma 4: the shared prefix of each group once (SOAM)

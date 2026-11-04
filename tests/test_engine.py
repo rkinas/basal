@@ -356,3 +356,25 @@ def test_mps_backend_gemma4_reads_the_sliding_window():
     for (toks, lids), res in zip([g1, g2], out):
         for r, e in zip(res, separate(m, toks, lids)):
             assert torch.allclose(torch.tensor(r), e.float(), atol=1e-5)
+
+
+def test_eager_codes_read_back_once():
+    """The eager readout reads all prompts' code probabilities back at once (one softmax, one copy to the host), with
+    the values of a prompt read alone; prompts with other code sets and counts in one call."""
+    import basal.engine as eng
+    m = tiny()
+    be = eng.EagerBackend.__new__(eng.EagerBackend)
+    be.head, be.softcap = m.lm_head, None
+    g = torch.Generator().manual_seed(0)
+    h = torch.randn(5, m.config.hidden_size, generator=g)
+    ids = [[3, 4], [3, 4], [5, 6, 7], [3, 4], [9, 10, 11, 12]]
+    calls, real = [], torch.softmax
+    try:
+        torch.softmax = lambda *a, **k: calls.append(1) or real(*a, **k)
+        got = be._codes(h, ids)
+    finally:
+        torch.softmax = real
+    assert len(calls) == 1
+    for b, lid in enumerate(ids):
+        want = real(h[b] @ m.lm_head.weight[lid].float().T, -1)
+        assert torch.allclose(torch.tensor(got[b]), want, atol=1e-6) and len(got[b]) == len(lid)
