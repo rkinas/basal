@@ -356,12 +356,18 @@ def act_spec(name, q, outcomes):
         C = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
         if "defer" in costs:
             C["defer"] = {z: float(costs["defer"]) for z in outcomes}
-        return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=max_error)
+        defer = "defer" if "defer" in costs else None
+        if q.get("defer_action") is not None and q["defer_action"] != defer:  # the short form has one defer action: "defer"
+            raise RequestError(f"question {name!r}: defer_action {q['defer_action']!r} must be 'defer' and costs must give "
+                               f"'defer' (the short form {{\"wrong\": W, \"defer\": D}} has no other action)")
+        return dict(costs=C, defer=defer, max_error=max_error)
     for a, row in costs.items():
         if not isinstance(row, dict) or set(row) != set(outcomes):
             raise RequestError(f"question {name!r}: costs[{a!r}] must give a cost for every outcome {outcomes}")
     C = {a: {z: float(v) for z, v in row.items()} for a, row in costs.items()}
     defer = q.get("defer_action") or next((a for a in ("defer", "human") if a in C), None)
+    if defer is not None and defer not in C:
+        raise RequestError(f"question {name!r}: defer_action {defer!r} is not one of the costs actions {sorted(C)}")
     return dict(costs=C, defer=defer, max_error=max_error)
 
 
