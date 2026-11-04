@@ -2193,16 +2193,17 @@ class Server:
                     out["usage"][k] = out["usage"].get(k, 0) + out2["usage"].get(k, 0)
             out = tasks.finish(out, orig, plans, self.cal, a2)
             out["usage"]["latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)
-        out = await self.second_readout(orig, out)
+        out = await self.second_readout(orig, out, qs)
         if gates:  # (after a second readout: the gates read the answers the request gets)
             skipped = skip_answers(out["answers"], gates, qs)
             if skipped:
                 out["usage"]["skipped"] = skipped
         return out
 
-    async def second_readout(self, body, out):
+    async def second_readout(self, body, out, qs):
         """The answers of a request after its readout, before ask_if decides which are skipped: as they are here; the
-        think server (basal/think.py) reads its routed questions again."""
+        think server (basal/think.py) reads its routed questions again. qs: the questions as the readout read them
+        (to_items over the state it saw: facts appended, task questions expanded)."""
         return out
 
     @reads_request

@@ -37,11 +37,10 @@ import torch
 from . import rank, server, tasks
 from .cli import positive
 from .engine import resolve
-from .facts import inject as inject_facts
 from .jsonl import read_lines
 from .prompt import PREFILL, RequestError, render
 from .server import (Server, act_answer, certified, check_calibration, plain_limits, refuse_lean_flex, temper,
-                     temperature, to_items)
+                     temperature)
 from .textio import read_text
 from .tools import answer as tool_answer
 
@@ -221,7 +220,7 @@ class ThinkServer(Server):
             raise RequestError('think must be "off", "auto" or "force"')
         return super().admit(body)
 
-    async def second_readout(self, body, out):
+    async def second_readout(self, body, out, qs):
         if self.think == "off":
             return out
         mode = body.get("think", self.think)
@@ -230,16 +229,12 @@ class ThinkServer(Server):
         # (a request with images or audio: readout 2 would read its text only)
         media = body.get("media") is not None or body.get("images") is not None
         if mode != "off" and not out["usage"].get("truncated") and not media:
-            state = body["state"]
-            if body.get("facts") == "auto":  # the state readout 1 saw (off the event loop, as basal-serve reads it)
-                text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
-                state = await asyncio.to_thread(inject_facts, text)
-            # the plain questions answered (not tasks or rank, which are answered from several decisions, nor a
-            # question ask_if skipped: null)
-            plain = {n: q for n, q in body["questions"].items()
+            # the plain questions answered, as readout 1 read them (the state it saw, facts appended): not tasks or
+            # rank, which are answered from several decisions, nor a question ask_if skipped (null)
+            plain = {n for n, q in body["questions"].items()
                      if isinstance(q, dict) and not tasks.is_task(q) and not rank.is_rank(q)}
-            todo = [q for q in to_items(state, plain, self.max_options, force_lang=body.get("lang"))
-                    if out["answers"].get(q["name"]) is not None and self.routed(q, out["answers"][q["name"]], mode)]
+            todo = [q for q in qs if q["name"] in plain and out["answers"].get(q["name"]) is not None
+                    and self.routed(q, out["answers"][q["name"]], mode)]
         n_think = 0
         for q, (res, why) in zip(todo, await asyncio.gather(*(self.think_one(q) for q in todo))):
             old = out["answers"][q["name"]]
