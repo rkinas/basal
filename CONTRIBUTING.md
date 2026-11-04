@@ -166,14 +166,21 @@ Thank you to the people whose work is in this repository, by pull request:
   macOS for every pull request ([#53](https://github.com/rkinas/basal/pull/53)); a Python client for every question
   type, with `AsyncBasal` ([#58](https://github.com/rkinas/basal/pull/58)); a question named `<task>::<part>` in a
   request with task questions refused instead of misread ([#59](https://github.com/rkinas/basal/pull/59));
-  `basal-interpolate` ([#60](https://github.com/rkinas/basal/pull/60)); and changelog fragments in `docs/changes`
-  ([#55](https://github.com/rkinas/basal/pull/55)).
+  `basal-interpolate` ([#60](https://github.com/rkinas/basal/pull/60)); changelog fragments in `docs/changes`
+  ([#55](https://github.com/rkinas/basal/pull/55)); and in 2.5.3 `basal-run --preset` fixed
+  ([#91](https://github.com/rkinas/basal/pull/91)), batch flags measured on the DGX Spark
+  ([#94](https://github.com/rkinas/basal/pull/94)), tests independent of their order, GPU, torch version and runner
+  speed ([#86](https://github.com/rkinas/basal/pull/86), [#87](https://github.com/rkinas/basal/pull/87),
+  [#88](https://github.com/rkinas/basal/pull/88)) and the CI on two workers
+  ([#89](https://github.com/rkinas/basal/pull/89)).
 - Rafal Wiktorowicz ([@onlypositivetravelvibes-dotcom](https://github.com/onlypositivetravelvibes-dotcom)): the 2.5.2
   fixes: the start-up 503 for every HTTP method ([#80](https://github.com/rkinas/basal/pull/80)), config probes that
   say why they fell back ([#81](https://github.com/rkinas/basal/pull/81)), `basal-serve` on native Windows and
   `--quant int8` ([#82](https://github.com/rkinas/basal/pull/82)), the provenance and flags of calibration files
   ([#83](https://github.com/rkinas/basal/pull/83)) and HTTP 422 for an unknown question type
-  ([#84](https://github.com/rkinas/basal/pull/84)).
+  ([#84](https://github.com/rkinas/basal/pull/84)); in 2.5.3 Windows paths and `basal-attach` without symlink rights
+  ([#85](https://github.com/rkinas/basal/pull/85)) and `basal-bench` timing HTTP engines on prompts their cache has
+  not seen ([#90](https://github.com/rkinas/basal/pull/90)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),
