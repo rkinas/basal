@@ -159,3 +159,27 @@ def test_answers_are_the_same_prepared_on_the_loop_or_off_it(monkeypatch):
     inline = answers()
     monkeypatch.setattr(S, "PREP_INLINE", 0)
     assert answers() == inline
+
+
+def test_a_request_beyond_max_requests_is_refused_before_its_body_is_read():
+    eng = Counting()
+    srv = AppServer(eng)
+    srv.max_requests = 1
+    sent = []
+
+    async def chunks():
+        for part in (b'{"state": "x", ', b'"questions": {"q": {"type": "noul"}}}'):
+            sent.append(part)
+            yield part
+
+    async def go(c):
+        eng.go.clear()
+        first = asyncio.create_task(c.post("/v1/systemone", json=BODY))
+        while not eng.entered.is_set():
+            await asyncio.sleep(0.01)
+        r = await c.post("/v1/systemone", content=chunks(), headers={"content-type": "application/json"})
+        eng.go.set()
+        await first
+        return r
+    r = asyncio.run(_with_app(srv, go))
+    assert r.status_code == 503 and r.json()["code"] == "OVERLOADED" and sent == [] and srv.reading == 0

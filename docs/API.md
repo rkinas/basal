@@ -92,7 +92,8 @@ one shared state (SOAM); asking them in one request is faster than separate requ
     is about 214 MB in base64), refused before it is read whole (`code` `PAYLOAD_TOO_LARGE`);
   - **503**: the GPU ran out of memory (CUDA, MPS or Metal). The server frees the failed request's memory, so a retry,
     later or on another server, may succeed. Also, with `code` `OVERLOADED` and `Retry-After: 1`, a request beyond
-    `--max-requests` in flight (1,024 by default), refused before any work;
+    `--max-requests` in flight (1,024 by default; those whose body is being read count too), refused before its body is
+    read;
   - **504**: no answer within `--request-timeout` seconds (off by default; `code` `TIMEOUT`): the request's work
     still queued is dropped, an engine call already running finishes;
   - **500**: any other server error;

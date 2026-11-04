@@ -1678,10 +1678,7 @@ class Server:
         it first. Counted as in flight from here to its answer or error (GET /health); beyond --max-requests in flight
         it is refused at once (Overloaded), and past --request-timeout it ends (TimedOut: its queued work is dropped,
         an engine call already running finishes)."""
-        cap = getattr(self, "max_requests", MAX_REQUESTS)
-        if self.in_flight >= cap:
-            raise Overloaded(f"this server has {self.in_flight} requests in flight, the most it takes at once "
-                             f"(--max-requests {cap}); retry later")
+        self.overloaded()
         self.in_flight += 1
         try:
             timeout = getattr(self, "request_timeout", None)
@@ -1693,6 +1690,17 @@ class Server:
                 raise TimedOut(f"no answer within this server's --request-timeout of {timeout:g} s") from None
         finally:
             self.in_flight -= 1
+
+    reading = 0  # requests whose body the HTTP routes are reading (not yet in flight)
+
+    def overloaded(self, reading=0):
+        """--max-requests: Overloaded when the requests in flight and those whose body is being read (less `reading`,
+        the caller's own) are at the cap."""
+        cap = getattr(self, "max_requests", MAX_REQUESTS)
+        n = self.in_flight + self.reading - reading
+        if n >= cap:
+            raise Overloaded(f"this server has {n} requests in flight, the most it takes at once (--max-requests "
+                             f"{cap}); retry later")
 
     def prep_pool(self):
         """The thread that renders and tokenizes the prompts of long requests (and reads them against the context), so
@@ -2789,8 +2797,9 @@ def parser():
                     help="a request with more than N branches (a question counts 1, a multi question or a tool set "
                          "one per label) answers 422 before it is rendered. Default %(default)s")
     ap.add_argument("--max-requests", dest="max_requests", type=_positive(int), default=MAX_REQUESTS, metavar="N",
-                    help="at most N requests in flight at once (queued, prepared or in the engine); one beyond them "
-                         "answers 503 (code OVERLOADED, Retry-After: 1) before any work. Default %(default)s")
+                    help="at most N requests in flight at once (their bodies being read, queued, prepared or in the "
+                         "engine); one beyond them answers 503 (code OVERLOADED, Retry-After: 1) before its body is "
+                         "read. Default %(default)s")
     ap.add_argument("--max-prompt-mb", dest="max_prompt_mb", type=_positive(float), default=MAX_PROMPT_MB,
                     metavar="MB", help="a request whose prompts would hold more than MB MiB of text (each prompt holds "
                                        "the state, its question and options; counted in characters before anything is "
@@ -2941,16 +2950,28 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         body, status = error_body(logged(e), error_format)
         return JSONResponse(body, status_code=status, headers=retry(e))
 
+    async def read(request):
+        """The body of a decision request, read (request_json) only within --max-requests: a request beyond them is
+        refused before its body is read (it counts as in flight while it is read)."""
+        if not hasattr(srv, "overloaded"):  # (a server stand-in without the cap)
+            return await request_json(request)
+        srv.overloaded()
+        srv.reading += 1
+        try:
+            return await request_json(request)
+        finally:
+            srv.reading -= 1
+
     def route(answer, error):
-        """A decision route: the body read once (request_json), answer(body) -> its JSON response, error(e) -> the
-        response of a failure; every request counted for /metrics (a body that is not JSON too). A client that
+        """A decision route: the body read once (read), answer(body) -> its JSON response, error(e) -> the response
+        of a failure; every request counted for /metrics (a body that is not JSON too). A client that
         disconnects, while it sends the body or while its request is served (until_disconnect: its queued work is
         dropped), gets the 499 that nobody reads; that is no failure."""
         async def handle(request):
             t = time.perf_counter()
             counts["requests"] += 1
             try:
-                out = await until_disconnect(request, answer(await request_json(request)))
+                out = await until_disconnect(request, answer(await read(request)))
                 return JSONResponse(*CLIENT_GONE) if out is None else JSONResponse(out)
             except ClientDisconnect:  # the client left while sending the body: as when it leaves later (not a 500)
                 return JSONResponse(*CLIENT_GONE)
