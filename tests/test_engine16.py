@@ -553,8 +553,8 @@ def test_code_logits_in_fp32():
     be.model = be.model.to(torch.bfloat16)
     h = (torch.randn(3, be.model.config.hidden_size) * 4).to(torch.bfloat16)
     lids = [[10, 11], [12, 13, 14], [10, 11]]
-    W, _, _ = be._rows(lids)
-    assert W.dtype == torch.float32
+    (W, b), _, _ = be._rows(lids)
+    assert W.dtype == torch.float32 and b is None  # (the head has no bias)
     got = be._readout(h, lids)
     full = h.float() @ be.model.lm_head.weight.float().T
     for row, ids in zip(range(3), lids):

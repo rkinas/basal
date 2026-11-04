@@ -46,6 +46,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from . import adapter as adapter_module
 from .prompt import (PREFILL, RequestError, check_option_tokenizer, model_option_isolation, model_two_way,
                      shared_length)
+from .readout import WROWS_BYTES, CodeReadout, code_rows  # noqa: F401  (the one code readout; re-exported)
 
 
 METADATA_FILES = ["*.json", "*.jinja", "*.model", "*.txt", "*.md", "Modelfile*"]  # tokenizer, template, calibration
@@ -315,24 +316,13 @@ class EagerBackend:
         self._forward(input_ids=ids, attention_mask=att, position_ids=pos, logits_to_keep=1)
         return self._codes(self._head_in[:, -1, :].float(), ids_list)
 
+    def _code_readout(self):
+        """The code readout of the output head (basal/readout.py), its fp32 rows cached on the backend."""
+        return CodeReadout(self.head, self.softcap, self.__dict__.setdefault("_wrows", {}))
+
     def _codes(self, h, ids_list):
-        """Hidden states [B, D] (fp32) -> the probabilities over each prompt's codes (softmax over the code rows =
-        softmax over the codes of the full log-softmax). Prompts with the same codes share one product, and all are read
-        back in one copy (2.5.3: one device sync per prompt)."""
-        K, groups = max(map(len, ids_list)), {}
-        for b, lid in enumerate(ids_list):
-            groups.setdefault(tuple(lid), []).append(b)
-        z = torch.full((len(ids_list), K), float("-inf"), dtype=torch.float32, device=h.device)
-        for lid, rows in groups.items():
-            sel, r = torch.tensor(lid, device=h.device), torch.tensor(rows, device=h.device)
-            zz = h[r] @ self.head.weight.index_select(0, sel).float().T
-            if self.head.bias is not None:
-                zz = zz + self.head.bias.index_select(0, sel).float()
-            if self.softcap:
-                zz = torch.tanh(zz / self.softcap) * self.softcap
-            z[r, : len(lid)] = zz
-        p = torch.softmax(z, -1).tolist()
-        return [row[: len(lid)] for row, lid in zip(p, ids_list)]
+        """Hidden states [B, D] -> the probabilities over each prompt's codes, read back in one copy."""
+        return self._code_readout().probs(h, ids_list)
 
     def run_shared(self, groups, policy=None):
         if self.g4 is not None:  # Gemma 4: the shared prefix of each group once (SOAM)
@@ -1083,26 +1073,6 @@ def kv_dequant(e, bits, keys):
         return x.view(H, Tp, D)[:, :T].to(dtype).contiguous()
     G = KV_GROUP_D if D % KV_GROUP_D == 0 else D
     return (q.view(H, T, D // G, G).float() * step.float() + lo.float()).view(H, T, D).to(dtype)
-
-
-WROWS_BYTES = 64 << 20  # the fp32 code rows an engine keeps (one entry per option-code set, least recently used out)
-
-
-def code_rows(cache, key, make):
-    """cache[key], made by make() when missing: the fp32 output-head rows of one set of option codes. The cache keeps
-    the most recently used sets within WROWS_BYTES (every option count and code set was kept for good: up to ~0.7 GB);
-    an entry is the same rows whenever it is made again."""
-    w = cache.pop(key, None)
-    if w is None:
-        w = make()
-    cache[key] = w  # (most recently used last)
-    size = lambda x: 0 if x is None else int(x.nbytes)  # noqa: E731  (torch and MLX arrays)
-    total = sum(size(x) for x in cache.values())
-    for old in list(cache):
-        if total <= WROWS_BYTES or old == key:
-            break
-        total -= size(cache.pop(old))
-    return w
 
 
 class StateCache:
@@ -2460,32 +2430,25 @@ class GraphBackend(EagerBackend):
             build(ms, 0, -1)
         return ids, pos, seg, last, parent
 
+    def _code_readout(self):
+        return CodeReadout(self.model.lm_head, self.softcap, self._wrows, self._to_dev)
+
     def _rows(self, lids):
-        """Answer-row slice of the LM head for the letters in lids, and each readout's column indices (padded, masked).
-        softmax over the letters of the full log-softmax equals softmax over these rows' logits (row-only readout). The
-        rows are kept in fp32: the code logits are computed in fp32 from the hidden state (bf16 logits of magnitude
-        16-32 have steps of 0.125, which clumps the probabilities)."""
-        key = tuple(sorted({i for ids in lids for i in ids}))
-        W = code_rows(self._wrows, key, lambda: self.model.lm_head.weight.index_select(
-            0, self._to_dev(torch.tensor(key))).float())
-        col = {t: j for j, t in enumerate(key)}
-        K = max(map(len, lids))
-        idx = self._to_dev(torch.tensor([[col[i] for i in ids] + [0] * (K - len(ids)) for ids in lids]))
-        pad = self._to_dev(torch.tensor([[False] * len(ids) + [True] * (K - len(ids)) for ids in lids]))
-        return W, idx, pad
+        """The fp32 code rows (and bias) of the LM head for the codes in lids, each readout's columns into them and their
+        padding (basal/readout.py: the softmax over these rows' logits equals the softmax over the codes of the full
+        log-softmax)."""
+        return self._code_readout().rows(lids)
 
     def _letters(self, z, idx, pad, lids):
-        p = torch.softmax(z.float().gather(1, idx).masked_fill(pad, float("-inf")), -1).tolist()  # one device sync
+        p = CodeReadout.probs_of(z, idx, pad).tolist()  # one device sync
         return [row[: len(ids)] for row, ids in zip(p, lids)]
 
     def _code_logits(self, h, W):
-        """fp32 logits of the code rows W from normalised hidden states h, with the model's final softcap (Gemma)."""
-        z = h.float() @ W.T
-        return torch.tanh(z / self.softcap) * self.softcap if self.softcap else z
+        """fp32 logits of the code rows W (_rows) from normalised hidden states h, the model's final softcap once."""
+        return self._code_readout().logits(h, W)
 
     def _readout(self, h, lids):
-        W, idx, pad = self._rows(lids)
-        return self._letters(self._code_logits(h, W), idx, pad, lids)  # last_hidden_state is already normalised
+        return self._code_readout().probs(h, lids)  # last_hidden_state is already normalised
 
     def _host_rows(self, packs, idx, b, L):
         """Packed rows -> padded host arrays ids / positions / block ids [b, L], readout rows and columns, and the
@@ -2993,7 +2956,7 @@ class GraphBackend(EagerBackend):
                 else:
                     h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx])
                 W, cols, pad = self._rows([x for k in idx for x in units[k][1]])
-                p = torch.softmax(self._code_logits(h, W).gather(1, cols).masked_fill(pad, float("-inf")), -1)
+                p = CodeReadout.probs_of(self._code_logits(h, W), cols, pad)
                 if cuda:
                     host = torch.empty(p.shape, dtype=p.dtype, pin_memory=True)
                     host.copy_(p, non_blocking=True)
@@ -3199,13 +3162,13 @@ class ExitGraphBackend(GraphBackend):
                 g.replay()
                 if s < len(self.exits) and self.exits[s] in taus:
                     Lx = self.exits[s]
-                    z = self.heads[str(Lx)](outs[s][ri, ci]).to(W.dtype) @ W.T
+                    z = self._code_logits(self.heads[str(Lx)](outs[s][ri, ci]), W)
                     p = torch.softmax(z.float().gather(1, cols).masked_fill(pad, float("-inf")), -1)
                     if float(p.max(-1).values.min()) >= taus[Lx]:
                         probs, depth = [row[: len(x)] for row, x in zip(p.tolist(), lids)], Lx
                         break
             if probs is None:
-                probs = self._letters(outs[-1][ri, ci].float() @ W.T, cols, pad, lids)
+                probs = self._letters(self._code_logits(outs[-1][ri, ci], W), cols, pad, lids)
             key = (policy or self.default_policy, depth)
             self.stats[key] = self.stats.get(key, 0) + len(idx)
             j = 0

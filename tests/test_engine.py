@@ -304,26 +304,6 @@ def test_graph_engine_keeps_the_compile_cache_across_reboots_unless_set(monkeypa
         assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == tmp_default
 
 
-def test_code_rows_kept_within_their_budget(monkeypatch):
-    """The fp32 code rows of each option-code set are cached in least-recently-used order within WROWS_BYTES (every set
-    was kept for good), and the readouts are the same with a cache too small for one set."""
-    import basal.engine as eng
-    m = tiny()
-    be = Stub(m)
-    be.tok = type("Tok", (), {"pad_token_id": 0})()
-    sets = [list(range(3, 3 + k)) for k in range(2, 12)]
-    full = [be._readout(torch.randn(1, m.config.hidden_size, generator=torch.Generator().manual_seed(k)), [ids])
-            for k, ids in enumerate(sets)]
-    assert len(be._wrows) == len(sets)  # the default budget holds them all here
-    monkeypatch.setattr(eng, "WROWS_BYTES", 4 * m.config.hidden_size * 6)  # room for a set of at most 6 rows
-    be._wrows.clear()
-    for k, ids in enumerate(sets):
-        got = be._readout(torch.randn(1, m.config.hidden_size, generator=torch.Generator().manual_seed(k)), [ids])
-        assert got == full[k]
-        assert sum(int(w.nbytes) for w in be._wrows.values()) <= max(eng.WROWS_BYTES, 4 * m.config.hidden_size * len(ids))
-    assert list(be._wrows) == [tuple(sets[-1])]  # the latest set; the older ones made room
-
-
 def test_backends_split_flat_readouts_with_one_helper():
     """Every backend that reads groups as one flat list splits it with engine._split (one implementation), and the
     engine keeps no test-only reference path."""
@@ -356,6 +336,26 @@ def test_mps_backend_gemma4_reads_the_sliding_window():
     for (toks, lids), res in zip([g1, g2], out):
         for r, e in zip(res, separate(m, toks, lids)):
             assert torch.allclose(torch.tensor(r), e.float(), atol=1e-5)
+
+
+def test_code_rows_kept_within_their_budget(monkeypatch):
+    """The fp32 code rows of each option-code set are cached in least-recently-used order within WROWS_BYTES (every set
+    was kept for good), and the readouts are the same with a cache too small for one set."""
+    import basal.readout as eng
+    m = tiny()
+    be = Stub(m)
+    be.tok = type("Tok", (), {"pad_token_id": 0})()
+    sets = [list(range(3, 3 + k)) for k in range(2, 12)]
+    full = [be._readout(torch.randn(1, m.config.hidden_size, generator=torch.Generator().manual_seed(k)), [ids])
+            for k, ids in enumerate(sets)]
+    assert len(be._wrows) == len(sets)  # the default budget holds them all here
+    monkeypatch.setattr(eng, "WROWS_BYTES", 4 * m.config.hidden_size * 6)  # room for a set of at most 6 rows
+    be._wrows.clear()
+    for k, ids in enumerate(sets):
+        got = be._readout(torch.randn(1, m.config.hidden_size, generator=torch.Generator().manual_seed(k)), [ids])
+        assert got == full[k]
+        assert sum(int(w[0].nbytes) for w in be._wrows.values()) <= max(eng.WROWS_BYTES, 4 * m.config.hidden_size * len(ids))
+    assert list(be._wrows) == [tuple(sets[-1])]  # the latest set; the older ones made room
 
 
 def test_eager_codes_read_back_once():

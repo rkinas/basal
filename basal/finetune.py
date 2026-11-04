@@ -129,10 +129,12 @@ def copy_side_files(src, out):
 
 
 def code_logits(model, ids, codes, softcap, device):
-    """The logits of the option codes at the answer position as basal-serve reads them: the output head's input (the
-    final norm's output at the last position) times the code rows in fp32, then the model's final logit soft cap once.
-    (The model's own logits are capped already: a Gemma forward applies final_logit_softcapping itself.) In fp32 also
-    under the training steps' autocast, which would take the product in bf16 / fp16."""
+    """The logits of the option codes at the answer position as basal-serve reads them (basal/readout.py, the one code
+    readout of every engine): the output head's input (the final norm's output at the last position) times the code
+    rows in fp32, the head's bias and the model's final logit soft cap once. (The model's own logits are capped already:
+    a Gemma forward applies final_logit_softcapping itself.) In fp32 also under the training steps' autocast, which
+    would take the product in bf16 / fp16."""
+    from .readout import CodeReadout
     head = model.get_output_embeddings()
     got = {}
     hook = head.register_forward_pre_hook(lambda mod, args: got.__setitem__("h", args[0]))
@@ -140,12 +142,10 @@ def code_logits(model, ids, codes, softcap, device):
         model(input_ids=torch.tensor([ids], device=device), logits_to_keep=1)
     finally:
         hook.remove()
-    sel = torch.tensor(codes, device=device)
+    rd = CodeReadout(head, softcap)
+    rows, idx, _ = rd.rows([codes])
     with torch.autocast(torch.device(device).type, enabled=False):  # fp32 under the training steps' autocast too
-        z = got["h"][0, -1].float() @ head.weight.index_select(0, sel).float().T
-        if head.bias is not None:
-            z = z + head.bias.index_select(0, sel).float()
-        return torch.tanh(z / softcap) * softcap if softcap else z
+        return rd.logits(got["h"][:, -1], rows)[0].index_select(0, idx[0])
 
 
 def accuracy(model, examples, softcap, device):
