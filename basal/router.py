@@ -93,10 +93,11 @@ SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (sp
 
 
 def state_key(body):
-    """The routing key of a request body: its state with whitespace normalised (None without a state)."""
+    """The routing key of a request body: its state with whitespace normalised (None without a state, or for a body
+    that is not JSON or nested too deeply to read: the replica answers that client error)."""
     try:
         state = json.loads(body).get("state")
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, RecursionError):
         return None
     if not isinstance(state, str) or not state.strip():
         return None
@@ -270,11 +271,12 @@ KEY_HEADERS = ("authorization", "x-api-key")  # a client's API key, as basal-ser
 def key_headers(raw):
     """The client's API key headers among raw ASGI headers, values as bytes, the last of each name (as basal-serve
     reads them): passed on to the replicas, never to the --fallback LLM. {} without them."""
-    return {k: v for k, v in ((n.decode("latin1").lower(), v) for n, v in raw) if k in KEY_HEADERS}
+    return {k: v.strip() for k, v in ((n.decode("latin1").lower(), v) for n, v in raw) if k in KEY_HEADERS}
 
 
 def _h(text):
-    return int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+    # (surrogatepass: a state with a lone surrogate, "\ud800" in its JSON, still has a key; the replica refuses it)
+    return int.from_bytes(hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest()[:8], "big")
 
 
 class Ring:
