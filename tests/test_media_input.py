@@ -109,7 +109,7 @@ def frames(fmt, n):
     return b.getvalue()
 
 
-@pytest.mark.parametrize("fmt", ["GIF", "TIFF"])
+@pytest.mark.parametrize("fmt", ["GIF", "TIFF", "PNG", "WEBP"])
 def test_i17_animated_or_multi_page_image_is_refused(fmt):
     with pytest.raises(ValueError, match="frame"):
         media._image(frames(fmt, 3), 0)
@@ -118,6 +118,16 @@ def test_i17_animated_or_multi_page_image_is_refused(fmt):
 @pytest.mark.parametrize("fmt", ["GIF", "TIFF", "PNG"])
 def test_i17_single_frame_image_is_accepted(fmt):
     assert media._image(frames(fmt, 1), 0).size == (16, 16)
+
+
+def test_i17_a_phone_photo_stored_as_mpo_is_accepted_as_its_first_frame():
+    """MPO (Ultra HDR gain map, depth map, burst) keeps several frames in one JPEG file; frame 0 is the photo."""
+    a, b = Image.new("RGB", (16, 16), (200, 0, 0)), Image.new("RGB", (8, 8), (0, 0, 200))
+    buf = io.BytesIO()
+    a.save(buf, "MPO", save_all=True, append_images=[b])
+    assert Image.open(io.BytesIO(buf.getvalue())).n_frames == 2  # the file really has two frames
+    im = media._image(buf.getvalue(), 0)
+    assert im.size == (16, 16) and im.getpixel((0, 0))[0] > 150
 
 
 def b64_png(w, h):

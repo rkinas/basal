@@ -55,6 +55,9 @@ def _raw(data, n):
         raise ValueError(f"media {n}: data is not valid base64") from None
 
 
+ANIMATED = {"GIF", "PNG", "WEBP", "TIFF"}  # formats whose n_frames > 1 means an animation or several pages
+
+
 def _image(raw, n):
     from PIL import Image, ImageOps, UnidentifiedImageError
     try:
@@ -62,7 +65,7 @@ def _image(raw, n):
         w, h = im.size
         if w * h > MAX_PIXELS:
             raise ValueError(f"media {n}: {w}x{h} pixels, more than {MAX_PIXELS:,}")
-        if getattr(im, "n_frames", 1) > 1:
+        if im.format in ANIMATED and getattr(im, "n_frames", 1) > 1:  # not MPO: a phone photo (Ultra HDR, depth) is one picture
             raise ValueError(f"media {n}: {im.n_frames} frames (animated or multi-page); send a single frame")
         im.load()
         im = ImageOps.exif_transpose(im)  # a phone photo is stored sideways with an Orientation tag
