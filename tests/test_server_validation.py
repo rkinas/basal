@@ -6,7 +6,7 @@ import pytest
 from starlette.testclient import TestClient
 from test_server import FakeServer
 
-from basal.server import http_app, to_items
+from basal.server import check_body, http_app, to_items
 
 
 class AppServer(FakeServer):
@@ -66,3 +66,38 @@ def test_multi_threshold_that_is_not_finite_is_refused_before_the_engine(client,
 def test_multi_threshold_that_is_a_number_is_accepted(threshold):
     q = {"type": "multi", "instructions": "Which apply?", "criteria": {"a": "A", "b": "B"}, "threshold": threshold}
     assert len(to_items("s", {"q": q})) == 1
+
+
+@pytest.mark.parametrize("threshold", [10**400, -10**400, 2 * 10**308], ids=["1e400", "-1e400", "2e308"])
+def test_multi_threshold_integer_beyond_the_largest_float_is_refused_before_the_engine(client, threshold):
+    q = {"type": "multi", "instructions": "Which?", "criteria": {"a": "A", "b": "B"}, "threshold": threshold}
+    r = post(client, "/v1/systemone", one(q))
+    assert r.status_code == 422 and "finite" in r.json()["error"]
+
+
+def test_multi_threshold_big_but_representable_integer_and_text_behave_as_before(client):
+    q = {"type": "multi", "instructions": "Which?", "criteria": {"a": "A", "b": "B"}}
+    assert post(client, "/v1/systemone", one(dict(q, threshold=10**300))).status_code == 200
+    assert post(client, "/v1/systemone", one(dict(q, threshold="banana"))).status_code == 422
+
+
+class CheckedServer(FakeServer):
+    """serve() as Server.serve is: the shape of the body is checked before decide."""
+
+    async def serve(self, body):
+        check_body(body)
+        return await self._run(body)
+
+
+@pytest.mark.parametrize("questions", [[], [1], [{"type": "noul"}], "x", 5, None, True, {}, 1.5, [[[]]], {"q": 1},
+                                       {"q": [1]}])
+def test_questions_that_are_not_an_object_of_question_objects_are_a_request_error(questions):
+    c = TestClient(http_app(CheckedServer([0.5, 0.5]), "fast"), raise_server_exceptions=False)
+    r = post(c, "/v1/systemone", {"state": "s", "questions": questions})
+    assert r.status_code == 422 and "questions" in r.json()["error"]
+
+
+def test_questions_nested_too_deeply_are_a_request_error():
+    c = TestClient(http_app(CheckedServer([0.5, 0.5]), "fast"), raise_server_exceptions=False)
+    deep = b'{"state": "s", "questions": ' + b"[" * 9000 + b"]" * 9000 + b"}"
+    assert post(c, "/v1/systemone", deep).status_code == 422

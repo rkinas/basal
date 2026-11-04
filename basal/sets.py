@@ -179,7 +179,9 @@ def validate(name, objective, keys, threshold=None, min=None, max=None, exclusiv
         if threshold is not None:
             try:
                 finite = math.isfinite(float(threshold))  # the legacy coercion ("0.25") stays; NaN and inf are refused
-            except (TypeError, ValueError, OverflowError):
+            except OverflowError:
+                finite = False  # an integer beyond the largest float (10**400) is as infinite as inf
+            except (TypeError, ValueError):
                 finite = True  # not a number at all: refused below with "could not convert", as before
             if not finite:
                 raise ValueError(f"question {name!r}: threshold must be a finite number, got {threshold!r}")
