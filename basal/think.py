@@ -220,8 +220,9 @@ class ThinkServer(Server):
         todo = []
         if mode != "off" and not out["usage"].get("truncated"):
             state = body["state"]
-            if body.get("facts") == "auto":  # the state readout 1 saw
-                state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+            if body.get("facts") == "auto":  # the state readout 1 saw (off the event loop, as basal-serve reads it)
+                text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+                state = await asyncio.to_thread(inject_facts, text)
             # the plain questions answered (not tasks or rank, which are answered from several decisions, nor a
             # question ask_if skipped: null)
             plain = {n: q for n, q in body["questions"].items()
