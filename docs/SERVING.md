@@ -90,8 +90,9 @@ benchmarking a GPU.
   default) loads such a directory before compiling when its key matches: the GPU, the torch / triton / fla / CUDA and
   basal versions (a basal patch release that changes no compiled code keeps the key: 2.5.1 loads 2.5.0's directories),
   the model's architecture (config.json; fine-tunes of one architecture share it), the mode, dtype and attention. The
-  other engine flags are not in the key: a start with flags the directory was not prepared with loads it and compiles
-  what it lacks. A model may ship its own under `prepared/<key>/`. Then the server compiles nothing it has not seen
+  other engine flags are not in the key: preparing again with other flags adds their kernels to the same directory
+  (one `inductor*.bin` per flag set, all loaded), and a start with flags it was not prepared with compiles what it
+  lacks. A model may ship its own under `prepared/<key>/`. Then the server compiles nothing it has not seen
   and picks the same kernels in every start; CUDA graphs are still captured. `--prepared off` compiles as before;
   `--prepared <dir>` loads that directory or refuses to start.
 - **Batching**: concurrent requests are batched into the same forward passes and every request is answered as soon as
