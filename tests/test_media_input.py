@@ -142,6 +142,25 @@ def test_i18_a_decoded_image_is_at_most_4096_a_side(w, h):
     assert max(im.size) == 4096 and abs(im.size[0] / im.size[1] / (w / h) - 1) < 0.05
 
 
+def test_i18_a_transparent_image_is_shrunk_before_it_is_composited(monkeypatch):
+    """The peak is the large copies: alpha_composite must see the 4096 px image, not the 6000 px one."""
+    sizes = []
+    real = Image.alpha_composite
+    monkeypatch.setattr(Image, "alpha_composite", lambda a, b: sizes.append(a.size) or real(a, b))
+    buf = io.BytesIO()
+    Image.new("RGBA", (6000, 300), (255, 0, 0, 128)).save(buf, "PNG")
+    im = media._image(buf.getvalue(), 0)
+    assert sizes and max(max(s) for s in sizes) <= 4096 and im.size[0] == 4096 and im.mode == "RGB"
+
+
+def test_i18_a_palette_image_with_transparency_still_lands_on_white():
+    p = Image.new("P", (8, 8), 0)
+    p.putpalette([0, 0, 0] + [0] * 765)
+    buf = io.BytesIO()
+    p.save(buf, "PNG", transparency=0)
+    assert media._image(buf.getvalue(), 0).getpixel((0, 0)) == (255, 255, 255)
+
+
 def test_i18_a_small_image_keeps_its_size():
     (im,), _, _ = media.decode([{"type": "image", "data": b64_png(640, 480)}], ("image",))
     assert im.size == (640, 480)

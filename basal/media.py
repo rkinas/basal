@@ -67,13 +67,15 @@ def _image(raw, n):
             raise ValueError(f"media {n}: {w}x{h} pixels, more than {MAX_PIXELS:,}")
         if im.format in ANIMATED and getattr(im, "n_frames", 1) > 1:  # not MPO: a phone photo (Ultra HDR, depth) is one picture
             raise ValueError(f"media {n}: {im.n_frames} frames (animated or multi-page); send a single frame")
-        im.load()
+        alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+        if alpha or im.mode == "P":  # a palette image is resized by nearest neighbour; do it in colour
+            to = "RGBA" if alpha else "RGB"
+            im = im if im.mode == to else im.convert(to)  # (convert copies, even to the same mode)
+        im.thumbnail((MAX_SIDE, MAX_SIDE))  # first, while the image is large: 8 x 50 MP held 1.1 GB RGB per request
         im = ImageOps.exif_transpose(im)  # a phone photo is stored sideways with an Orientation tag
-        if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:  # onto white, not onto black
-            rgba = im.convert("RGBA")
-            im = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
+        if alpha:  # onto white, not onto black
+            im = Image.alpha_composite(Image.new("RGBA", im.size, (255, 255, 255, 255)), im.convert("RGBA"))
         im = im.convert("RGB")
-        im.thumbnail((MAX_SIDE, MAX_SIDE))  # 8 x 50 MP held 1.1 GB RGB per request
         return im
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError) as e:
         raise ValueError(f"media {n}: not a readable image ({type(e).__name__})") from None
