@@ -279,6 +279,23 @@ def test_cli_meta_from_old(pair, tmp_path):
     assert (tmp_path / "m-a1" / "model.safetensors").exists()
 
 
+def test_meta_from_another_checkpoint_must_match(pair, tmp_path):
+    """--meta-from a third checkpoint: its config.json and tokenizer.json become the merged model's, so another
+    architecture or vocabulary is refused before anything is written; the same ones (another calibration, another
+    basal.json) are taken."""
+    old, new, _, _ = pair
+    same = make_ckpt(tmp_path / "same", 3, prompt=1)[0]
+    out = interpolate(old, new, 0.5, tmp_path / "o1", meta_from=same)
+    assert json.loads((out / "basal.json").read_text())["name"] == "m3-interp-a0.5"
+    vocab = {**VOCAB, "c": 8}
+    for kw in (dict(tokenizer=tokenizer_json(vocab=vocab)),
+               dict(config={"architectures": ["LlamaForCausalLM"], "hidden_size": 16})):
+        other = make_ckpt(tmp_path / f"other{len(kw['tokenizer']) if 'tokenizer' in kw else 0}", 4, **kw)[0]
+        with pytest.raises(SystemExit, match="--meta-from"):
+            interpolate(old, new, 0.5, tmp_path / "o2", meta_from=other)
+        assert not (tmp_path / "o2").exists()
+
+
 @pytest.mark.parametrize("alphas", [["1.5"], ["0.1", "0.1000001"]])
 def test_cli_alpha_refused(pair, tmp_path, alphas):
     old, new, _, _ = pair

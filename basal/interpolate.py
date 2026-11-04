@@ -20,7 +20,7 @@ model is served with the --meta-from tokenizer only. The refusal shows a probe t
 one does.
 
 The non-weight files (basal.json, tokenizer, chat template, config, CALIBRATION*.json) come from --meta-from (default:
-the new checkpoint), so the merged model is served in that checkpoint's prompt format: merging basal-1.5 and basal-2.0
+the new checkpoint; another checkpoint must have their config.json architecture and tokenizer.json vocabulary), so the merged model is served in that checkpoint's prompt format: merging basal-1.5 and basal-2.0
 weights with --meta-from old gives a format 1 model, otherwise format 2. The prompt format moves accuracy as much as
 the weights do (docs/INTERPOLATION.md), so evaluate a merge together with the format it ships with. The shipped
 calibration is only a starting point: fit one per merged model with basal-calibrate.
@@ -181,6 +181,19 @@ def check_pair(old, new, allow_tokenizer_difference=False):
     return a, b, specs
 
 
+def check_meta(new, meta):
+    """--meta-from a checkpoint other than the two: its config.json and tokenizer.json become the merged model's, so
+    they must describe the checkpoints' architecture and vocabulary (SystemExit otherwise, before anything is
+    written)."""
+    for name, key, what in (("config.json", config_key, "architecture"), ("tokenizer.json", tokenizer_key, "vocabulary")):
+        p, q = Path(meta) / name, Path(new) / name
+        if not p.is_file():
+            raise SystemExit(f"--meta-from {meta}: no {name}; the merged model takes its {name} from there")
+        if p.read_bytes() != q.read_bytes() and key(p) != key(q):
+            raise SystemExit(f"--meta-from {meta}: its {name} differs from the checkpoints' (another {what}); the "
+                             f"merged model would be served with it")
+
+
 def save_streamed(path, specs, produce, metadata):
     """Writes a safetensors file tensor by tensor: specs is name -> (safetensors dtype, shape), produce(name) returns
     the tensor. The layout is that of safetensors.torch.save_file (tensors ordered by dtype, then name; header padded to
@@ -222,6 +235,8 @@ def interpolate(old, new, alpha, out, meta_from=None, allow_tokenizer_difference
     if out.exists() and (not out.is_dir() or any(out.iterdir())):
         raise SystemExit(f"{out} exists and is not empty; remove it or choose another --out")
     a, b, specs = check_pair(old, new, allow_tokenizer_difference)
+    if meta_from.resolve() not in (old.resolve(), new.resolve()):
+        check_meta(new, meta_from)
     tmp = out.parent / f".{out.name}.partial"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
