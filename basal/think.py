@@ -38,6 +38,7 @@ from .facts import inject as inject_facts
 from .prompt import PREFILL, RequestError, render
 from .server import (Server, act_answer, certified, check_calibration, refuse_lean_flex, temper, temperature,
                      to_items)
+from .textio import read_text
 from .tools import answer as tool_answer
 
 TYPES = ("choice", "noul", "score", "act", "tool")  # single-readout types
@@ -309,7 +310,7 @@ def rows_main(argv):
     ap.add_argument("--concurrency", type=int, default=32)
     a = ap.parse_args(argv)
     bodies, decisions = load(a.data)
-    lines = Path(a.data).read_text(encoding="utf-8").splitlines()
+    lines = read_text(a.data).splitlines()
     for b in bodies:
         b["think"] = a.think
         if a.text:

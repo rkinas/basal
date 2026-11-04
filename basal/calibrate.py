@@ -294,7 +294,7 @@ def read(path):
     """Labelled JSONL -> (decision requests, decisions, task requests, labelled task decisions). Raises InputError
     listing every problem with its line."""
     errors, bodies, decisions, task_bodies, units = [], [], [], [], []
-    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+    for n, line in enumerate(read_text(path).splitlines(), 1):
         if not line.strip():
             continue
         try:
@@ -1343,7 +1343,7 @@ def refit(a, targets, reference, reference_name):
     """--from-rows: the fit on the probabilities a --save-rows run recorded (no engine). The baseline is --calibration,
     else the file that run compared with."""
     try:
-        lines = Path(a.input).read_text(encoding="utf-8").splitlines()
+        lines = read_text(a.input).splitlines()
     except (OSError, UnicodeDecodeError) as e:  # a binary file, a directory
         raise SystemExit(f"{a.input}: not a file written by basal-calibrate --save-rows ({type(e).__name__})") from None
     try:

@@ -45,7 +45,7 @@ def test_z3_navigate_tree_file(tmp_path, enc):
         assert "BOM" not in str(e) and "decode" not in str(e) and "Expecting value" not in str(e)
 
 
-@pytest.mark.parametrize("module", ["agree", "identity", "gguf_export", "run", "finetune", "navigate", "selfcheck"])
+@pytest.mark.parametrize("module", ["agree", "identity", "gguf_export", "run", "finetune", "navigate", "selfcheck", "calibrate"])
 def test_z3_user_file_readers_go_through_textio(module):
     """The readers deep inside a command (they need a model): checked in the source, no plain utf-8 read of a user file."""
     import ast
