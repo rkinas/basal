@@ -1042,7 +1042,7 @@ def test_router_passes_api_keys_on_to_replicas_with_api_keys(tmp_path):
             name, value = next(iter(headers.items()))
             assert [h[name.lower()] for h in (seen["small"][-1], seen["big"][-1])] == [value, value]
         assert c.get("/v1/models").status_code == 401
-        assert c.get("/v1/models", headers={"X-API-Key": KEY}).json() == {"object": "list", "data": [{"id": "big"}]}
+        assert c.get("/v1/models", headers={"X-API-Key": KEY}).json() == {"object": "list", "data": [{"id": "small"}]}
     assert len(seen["llm"]) == 2 and not any({"authorization", "x-api-key"} & set(h) for h in seen["llm"])
     assert keys.usage()[0]["last_used"] is not None
 

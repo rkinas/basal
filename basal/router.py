@@ -55,9 +55,10 @@ Off by default (the replicas' answers then pass through untouched):
                --escalate http://127.0.0.1:8003 --escalate-below 0.9   (pico on 8001, mini on 8002, ultra on 8003)
   basal-router --replicas http://127.0.0.1:8003 --blend http://127.0.0.1:8002 --blend http://127.0.0.1:8001 \
                --blend-weights 0.6 0.2 0.2   (ultra first: answers that are not blended are its own)
-GET /health: 200 when at least one replica is ready, else 503; /metrics: per replica in flight, requests routed by
+GET /health: 200 when a replica of --replicas / --gpus (the pool of ordinary requests) is ready, else 503 (the ready
+replicas of every pool in its "pools"); /metrics: per replica in flight, requests routed by
 state / by load, failures, readiness, answers per cascade level, blended answers, fallback calls by result
-(Prometheus); /v1/models: the first ready replica's. --ui on: GET /ui, one live page of the router and every replica
+(Prometheus); /v1/models: the first ready replica's of that pool. --ui on: GET /ui, one live page of the router and every replica
 (each replica's own panels when it runs with --ui on); GET /ui/state, its JSON.
 
 API keys: a client's Authorization / X-API-Key header is passed on, as it came, to every replica its request reaches
@@ -581,13 +582,19 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
         status, content, ctype = await router.forward(request.url.path, await request.body(), headers)
         return Response(content, status_code=status, media_type=ctype)
 
+    def main_ready():
+        """The ready replicas of the pool of ordinary requests: an escalation or blend pool alone serves none."""
+        return sorted(r for r in router.pools["main"] if r in router.ready)
+
     async def health(_):
-        body = {"status": "ok" if router.ready else "starting", "ready": len(router.ready),
-                "replicas": len(router.replicas), "in_flight": sum(router.load.values())}
-        return JSONResponse(body, status_code=200 if router.ready else 503)
+        up = bool(main_ready())
+        body = {"status": "ok" if up else "starting", "ready": len(router.ready),
+                "replicas": len(router.replicas), "in_flight": sum(router.load.values()),
+                "pools": {name: sum(r in router.ready for r in urls) for name, urls in router.pools.items()}}
+        return JSONResponse(body, status_code=200 if up else 503)
 
     async def models(request):
-        for r in sorted(router.ready):
+        for r in main_ready():
             try:
                 resp = await router.client.get(r + "/v1/models", timeout=10, headers=key_headers(request.headers.raw))
                 return Response(resp.content, status_code=resp.status_code, media_type="application/json")
