@@ -142,7 +142,7 @@ def test_end_to_end_writes_file_2_and_the_server_applies_the_buckets(tmp_path, e
     assert cal["prompt"] == 2 and cal["engine"] == "eager" and cal["fitted_on"]["orders"] == 1  # format 2: one order
     b = cal["temperature_per_bucket"]["choice"]
     assert 1.1 < b["2-10"] < 2.0 and 1.9 < b["11-26"] < 3.2 and "27-255" not in b
-    srv = Server(parser().parse_args(["--mode", "eager", "--calibration", str(out)]))
+    srv = Server(parser().parse_args(["--mode", "eager", "--model", "stub", "--calibration", str(out)]))
     assert srv.cal == cal and srv.fmt == 2
     assert temperature(srv.cal, "choice", 15) == b["11-26"] and temperature(srv.cal, "choice", 40) == \
         cal["temperature_per_prim"]["choice"]

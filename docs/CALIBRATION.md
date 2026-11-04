@@ -271,15 +271,20 @@ The probabilities, and so the temperatures and thresholds, belong to one model. 
 to `basal-calibrate`, except that a Hugging Face cache snapshot path is recorded as its repository ID in
 `fitted_on.model` and its commit in `fitted_on.revision`. A repository ID likewise records its resolved commit;
 plain local directories keep their path without a revision. `basal-serve --calibration FILE` compares
-them with the served model: on another model, or another revision, it warns at start-up and reports
-`"calibration_warning"` in `GET /v1/models`; with `--strict-calibration` it refuses to start. A local copy of a model
-matches its Hugging Face name by the last part of the path (`/data/basal-omni-1.0-max` = `Remek/basal-omni-1.0-max`).
+them with the served model: on another model, or another revision, it warns at start-up, reports
+`"calibration_warning"` in `GET /v1/models` and keeps the file for its temperatures only, as a file of other option
+orders: its thresholds, task thresholds, conformal levels and fitted fallback thresholds are not applied (`max_error`
+defers, tasks report `automated: null`, answer sets hold every option) and every answer is marked
+`"calibration": "unvalidated"`; with `--strict-calibration` it refuses to start. When both are Hugging Face snapshots
+(a revision on each side) the whole repository ID is compared, so `OrgA/basal-x` is not `OrgB/basal-x`; a local copy
+of a model matches its Hugging Face name by the last part of the path (`/data/basal-omni-1.0-max` =
+`Remek/basal-omni-1.0-max`).
 The files that ship in a model's directory are not checked.
 
 With `--adapter`, `basal-calibrate` records the adapter as `fitted_on.adapter` (`<name>@<sha256 of its
 adapter_config.json and weights>[:12]`, so a rescaled adapter is another one)
 and basal-serve compares it like the model: a file fitted with another adapter, or with one when none is served (or
-the reverse), warns or, with `--strict-calibration`, refuses. Without `--calibration`, a `CALIBRATION[.<engine>].json`
+the reverse), is kept for its temperatures only in the same way or, with `--strict-calibration`, refused. Without `--calibration`, a `CALIBRATION[.<engine>].json`
 in the adapter directory is loaded first (and checked); the model's own file is the base model's, so it is loaded for
 its temperatures only, without thresholds, and the answers are marked `"calibration": "unvalidated"`.
 

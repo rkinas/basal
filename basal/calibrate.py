@@ -79,8 +79,9 @@ Method (the one the shipped files were fitted with):
     "task_gates"). The task thresholds a shipped file holds are kept only when the temperatures are (no decision
     questions in the input); otherwise a task without labelled questions has none and its answers report
     automated: null.
-  * fitted_on names the model (and its Hugging Face revision): basal-serve warns when a --calibration file was fitted
-    on another model or revision, and refuses it with --strict-calibration.
+  * fitted_on names the model (and its Hugging Face revision): basal-serve keeps a --calibration file fitted on
+    another model or revision for its temperatures only (its thresholds are not applied, the answers are marked
+    unvalidated) with a warning, and refuses it with --strict-calibration.
 """
 import argparse
 import asyncio
@@ -101,9 +102,9 @@ from .cli import positive
 from .engine import resolve
 from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
-from .server import (MODES, Server, _text, add_engine_args, answer_set, calibration_file, calibration_name,
-                     calibration_orders, certified, default_mode, load_calibration, model_identity, refuse_lean_flex,
-                     temper, temperature, to_items)
+from .server import (MODES, UNVALIDATED_OUT, Server, _text, add_engine_args, answer_set, calibration_file,
+                     calibration_name, certified, default_mode, load_calibration, model_identity, refuse_lean_flex,
+                     temper, temperature, to_items, unvalidated_reason)
 from .sets import label_set_id
 from .sets import select as select_set
 
@@ -1390,11 +1391,11 @@ def refit(a, targets, reference, reference_name):
     base_file = None if a.no_calibration else (
         Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None))
     baseline = json.loads(base_file.read_text(encoding="utf-8")) if base_file is not None and base_file.exists() else {}
-    fo = calibration_orders(baseline)
-    if baseline and fo is not None and head.get("orders") is not None and fo != head["orders"]:  # as basal-serve
-        print(f"warning: {base_file.name} was fitted on {fo} option order(s), the rows on {head['orders']}: its "
-              "thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
-        baseline = {k: v for k, v in baseline.items() if k not in ("thresholds", "multi", "task_thresholds")}
+    why = unvalidated_reason(baseline, base_file.name, head.get("orders"), head.get("layout")) if baseline else None
+    if why:  # the rule of basal-serve (server.load_calibration), for the orders and layout the rows were read in
+        print(f"warning: {why} (the rows): its thresholds are not compared or kept (as in basal-serve)",
+              file=sys.stderr)
+        baseline = {k: v for k, v in baseline.items() if k not in UNVALIDATED_OUT}
     cal, report = fit(rows, baseline, targets, a.min_per_type, head["fmt"], a.min_family, reference, a.min_per_set,
                       a.min_blend, a.conformal)
     cal["gates"]["ece_reference"] = reference_name
