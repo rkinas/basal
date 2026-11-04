@@ -116,6 +116,10 @@ The shipped files were fitted with the same steps:
    The cost is that errors among the very top decisions end the test there (one is allowed at the start when the
    type has enough decisions); label more data, or check the CERT report, when a type you expected to certify does
    not (the reason names the first level and its errors).
+   Each certificate is one test of one question type at one target error: its 95% holds for that type and target,
+   which is what a request's `max_error` on a question of that type relies on. It is not a joint statement over all
+   types and targets at once (with three types and two targets, the chance that at least one of the six is wrong can
+   be up to six times 5%).
    A looser target never keeps a stricter threshold than a tighter one: a confidence certified at 1% is certified at
    5% too, so where the 5% test stops above the 1% threshold (it starts on fewer, very confident decisions and can
    stop on an error just below them), the 5% threshold is the 1% one, marked `floored_from`.

@@ -2,19 +2,27 @@
 accepted decisions has an error above the target, it certifies a threshold at most alpha of the time; the scan that
 went on past failing levels until one passed did not. Seeded Monte Carlo, and the exact chance of the first test."""
 import math
+import time
 
 import numpy as np
 import pytest
 
-from basal.calibrate import (ALPHA, accepted_needed, cp_upper, fit, fit_tasks, levels, no_threshold_reason,
-                             per_type_thresholds, served, start_level, threshold, within)
+from basal import calibrate
+from basal.calibrate import (ALPHA, accepted_needed, cp_upper, fit, fit_tasks, fit_temperature, levels,
+                             no_threshold_reason, per_type_thresholds, served, threshold)
+
+
+def tail(e, n, q):
+    """P(X <= e) for X ~ Binomial(n, q), computed here on its own (not with the code under test)."""
+    return sum(math.exp(math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1) + k * math.log(q)
+                        + (n - k) * math.log1p(-q)) for k in range(e + 1))
 
 
 def table(n_max, risk):
     """e_max[n]: the most errors among n accepted decisions that still meet the bound (-1: none)."""
     out, e = [-1] * (n_max + 1), -1
     for n in range(1, n_max + 1):
-        while within(e + 1, n, risk):
+        while e + 1 <= risk * n and tail(e + 1, n, risk) <= ALPHA:
             e += 1
         out[n] = e
     return np.array(out)
@@ -47,13 +55,19 @@ def test_false_certification_under_the_null_is_at_most_alpha(risk, p, n):
     assert hits / trials <= ALPHA
     if n >= 800:
         assert old / trials > ALPHA        # the same data: scanning on past failures certifies too often
-    # exact: only the first level tested can open the sequence, and its place is set by the counts
+
+
+@pytest.mark.parametrize("risk,n", [(0.05, 800), (0.05, 150), (0.01, 800), (0.01, 2000)])
+def test_only_the_first_level_tested_can_open_the_sequence(risk, n):
+    """Exact: the first level tested is set by the counts, and at any error rate >= risk it passes at most alpha of
+    the time; every later level is tested only after it passed."""
+    conf = np.linspace(0.999, 0.501, n).tolist()
     lv = levels([(c, True) for c in conf])
-    first = lv[start_level(lv, risk)][1]
+    first = lv[calibrate.start_level(lv, risk)][1]
     assert first in (accepted_needed(risk), accepted_needed(risk, 1))
-    for q in (risk, p, 2 * risk):
-        tail = sum(math.comb(first, k) * q ** k * (1 - q) ** (first - k) for k in range(e_max[first] + 1))
-        assert tail <= ALPHA
+    e_max = table(first, risk)
+    for q in (risk, 1.02 * risk, 2 * risk):
+        assert tail(int(e_max[first]), first, q) <= ALPHA
 
 
 def test_ties_and_an_error_rate_that_grows_towards_the_top_stay_under_alpha():
@@ -66,7 +80,7 @@ def test_ties_and_an_error_rate_that_grows_towards_the_top_stay_under_alpha():
 
 def test_the_first_level_is_set_by_the_counts_and_its_failure_ends_the_test():
     conf = np.linspace(0.999, 0.5, 2000).tolist()
-    lv = levels([(c, True) for c in conf])
+    lv, start_level = levels([(c, True) for c in conf]), calibrate.start_level
     assert lv[start_level(lv, 0.05)][1] == accepted_needed(0.05, 1) == 93       # 2000 >= 2 x 93: one error allowed
     small = levels([(c, True) for c in conf[:150]])
     assert small[start_level(small, 0.05)][1] == accepted_needed(0.05) == 59    # 150 < 186: none allowed
@@ -83,7 +97,46 @@ def test_the_first_level_is_set_by_the_counts_and_its_failure_ends_the_test():
 def test_within_is_the_clopper_pearson_bound():
     for e, n in ((0, 59), (0, 58), (1, 93), (1, 92), (10, 450), (12, 3240), (3, 50)):
         for risk in (0.01, 0.05, 0.2):
-            assert within(e, n, risk) == (cp_upper(e, n) <= risk)
+            assert calibrate.within(e, n, risk) == (cp_upper(e, n) <= risk) == (e <= risk * n and tail(e, n, risk)
+                                                                                 <= ALPHA)
+
+
+def test_a_scan_over_fifty_thousand_decisions_takes_well_under_a_second():
+    """The bound of every level reused one O(n) table copy, so a type or task with tens of thousands of decisions that
+    passes far down took minutes; levels that add no error need no bound at all."""
+    rng = np.random.default_rng(3)
+    c = rng.uniform(0.5, 1.0, 50000).round(6)
+    cs = list(zip(c.tolist(), (~((c < 0.7) & (rng.random(50000) < 0.02))).tolist()))  # errors below 0.7 only
+    t = time.perf_counter()
+    assert threshold(cs, 0.05) is not None and threshold(cs, 0.01) is not None
+    assert time.perf_counter() - t < 5
+
+
+def test_learned_temperatures_keep_false_certification_under_alpha():
+    """For choice decisions (three to five options) the temperature, fitted on the same FIT decisions, can reorder
+    their confidences. With every decision wrong with the same chance just above the target (so every order is a
+    null), the certificate on the confidences as served is still issued at most alpha of the time."""
+    rng = np.random.default_rng(11)
+    trials, n, risk, p = 400, 300, 0.05, 0.055
+    hits = moved = 0
+    for _ in range(trials):
+        rows, logits = [], []
+        for i in range(n):
+            z = rng.normal(0.0, 2.5, rng.integers(3, 6))
+            q = np.exp(z - z.max())
+            q /= q.sum()
+            top = int(q.argmax())
+            gold = top if rng.random() >= p else int(rng.choice([j for j in range(len(q)) if j != top]))
+            rows.append(dict(prim="choice", p=q.tolist(), gold=gold, group=f"g{i}"))
+            logits.append(np.log(q))
+        T = fit_temperature(rows)
+        conf = [float(np.exp(z / T - np.logaddexp.reduce(z / T)).max()) for z in logits]
+        ok = [int(np.argmax(z)) == r["gold"] for z, r in zip(logits, rows)]
+        hits += threshold(list(zip(conf, ok)), risk) is not None
+        raw = [float(np.exp(z).max()) for z in logits]
+        moved += np.argsort(conf, kind="stable").tolist() != np.argsort(raw, kind="stable").tolist()
+    assert moved > trials / 2                  # the learned temperature does reorder the confidences
+    assert hits / trials <= ALPHA
 
 
 def test_choice_thresholds_are_certified_on_the_served_confidences():
