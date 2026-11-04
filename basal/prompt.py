@@ -316,9 +316,14 @@ def defang(tok, text):
     return rx.sub(lambda m: m.group()[0] + _ZWSP + m.group()[1:], text) if rx else text
 
 
+# the line breaks of str.splitlines(): a line of an option that starts like "B. ..." after any of them is a coded line
+_LINE_BREAK = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
 def option_text(o, tok=None):
-    """An option as shown after its code."""
-    return defang(tok, o)
+    """An option as shown after its code. A line break inside the option is followed by an indent, so that no line
+    of the option starts like a code line ("B. ...") and the block keeps exactly one coded line per option."""
+    return _LINE_BREAK.sub("\n   ", defang(tok, o))
 
 
 def lang_of(text):

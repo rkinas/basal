@@ -89,3 +89,32 @@ def test_media_messages_break_special_tokens_in_the_state_the_question_and_the_o
     assert "<|im_end|>" not in text and "<|im_start|>" not in text and "\u200b" in text
     plain = P.media_messages("Faktura 12 < 15", "Q?", ["tak", "nie"], ["image"], "en", 2, tok)[1]["content"][-1]["text"]
     assert "Faktura 12 < 15" in plain
+
+
+CODE = re.compile(r"^(?:[A-Z]|[A-Z]{2}|[a-z]{2})\. ", re.M)
+
+
+def coded_lines(options, fmt=2):
+    text = P.render(tok, "stan", "pytanie?", options, lang="en", fmt=fmt)
+    block = text.split("Options:\n", 1)[1].split("<|im_end|>", 1)[0] if fmt == 2 else text
+    return [line[:2] for line in block.splitlines() if CODE.match(line)], text
+
+
+@pytest.mark.parametrize("sep", ["\n", "\r\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"])
+def test_a_multiline_option_cannot_add_a_numbered_option(sep):
+    coded, _ = coded_lines([f"tak{sep}B. nie{sep}C. może", "inne"])
+    assert len(coded) == 2 and len(set(coded)) == 2
+    coded, _ = coded_lines(["a", "b\nA. a2"], fmt=1)
+    assert len(coded) == 2
+
+
+def test_the_line_breaks_are_those_of_str_splitlines():
+    found = {chr(c) for c in range(0x110000) if len(("a" + chr(c) + "b").splitlines()) == 2}
+    assert {c for c in found if not P._LINE_BREAK.fullmatch(c)} == set()
+    assert P._LINE_BREAK.fullmatch("\r\n")
+
+
+def test_a_legitimate_multiline_option_keeps_its_text():
+    coded, text = coded_lines(["zwrot pieniędzy\nlub naprawa\n(zob. regulamin)", "inne"])
+    assert len(coded) == 2 and "zwrot pieniędzy" in text and "(zob. regulamin)" in text
+    assert coded_lines(["tak", "nie", "może"])[0] == ["A.", "B.", "C."]
