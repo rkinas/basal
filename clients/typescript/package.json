@@ -1,6 +1,6 @@
 {
   "name": "basal-client",
-  "version": "2.5.0",
+  "version": "2.5.3",
   "description": "TypeScript client for basal-serve (POST /v1/systemone): typed decisions with calibrated probabilities",
   "license": "Apache-2.0",
   "type": "module",
