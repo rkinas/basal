@@ -58,5 +58,6 @@ def test_state_and_template_cuts_find_a_state_with_special_tokens():
         ids = branches[0][3][0]
         cut, t = srv.state_cut(q), srv.template_cut(q, ids)
         assert cut and t and t < cut <= len(ids)
+        assert srv.state_cut(q, (ids, q["question"], q["options"])) == cut  # from the prompt's own ids (spliced)
         assert srv.tok.t.decode(ids[:cut]).endswith("Koniec." if state == STATE else "trzy miesiące.")
         assert srv.tok.t.decode(ids[:t]).endswith("Stan:\n")

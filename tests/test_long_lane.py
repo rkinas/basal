@@ -67,7 +67,7 @@ def test_a_cached_state_stays_in_the_main_lane():
         def has(self, key):
             return True
     srv.backend.state_cache = Cache()
-    srv.state_cut = lambda q: 30
+    srv.state_cut = lambda q, first=None: 30
     body = {"state": "Long state. " * 40, "questions": {"q": Q}}
     assert asyncio.run(srv._run(body))["usage"]["lane"] == "main" and srv.long_calls == []
 

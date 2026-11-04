@@ -49,6 +49,12 @@ def test_pack():
     assert seg == [0, 0, 0, 1, 1, 2, 2, 2] and last == [4, 7] and par == [-1, 0, 0]
 
 
+def test_pack_cut_of_zero_is_no_cut():
+    """A cut of 0 tokens packs as no cut (as in 2.5.3), not as an empty root block."""
+    toks = [[1, 2, 3, 4, 5], [1, 2, 3, 7, 8, 9]]
+    assert GraphBackend._pack(toks, cut=0) == GraphBackend._pack(toks) == GraphBackend._pack(toks, cut=None)
+
+
 def test_pack_trie_shares_nested_prefixes():
     """state | question 1 (two orders) | question 2 (two orders): the question text is shared by its orders."""
     s, q1, q2 = [1, 2, 3], [10, 11], [20, 21]
