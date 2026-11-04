@@ -336,6 +336,19 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
     return out
 
 
+def _cost(name, v):
+    """A cost of an act question: a finite number (the legacy coercion of numeric text stays)."""
+    try:
+        c = float(v)
+    except (TypeError, ValueError, OverflowError):  # (OverflowError: an integer beyond the largest float)
+        c = math.inf if isinstance(v, int) else None
+        if c is None:
+            raise RequestError(f"question {name!r}: a cost must be a number, got {v!r}") from None
+    if not math.isfinite(c):
+        raise RequestError(f"question {name!r}: a cost must be a finite number, got {v!r}")
+    return c
+
+
 def act_spec(name, q, outcomes):
     """Cost matrix C[action][outcome] from the full form or the short form {"wrong": W, "defer": D}."""
     max_error = q.get("max_error")
@@ -348,15 +361,15 @@ def act_spec(name, q, outcomes):
     if not isinstance(costs, dict) or not costs:
         raise RequestError(f"question {name!r}: act needs costs")
     if set(costs) <= {"wrong", "defer"} and not isinstance(costs.get("wrong"), dict):
-        w = float(costs["wrong"])
+        w = _cost(name, costs["wrong"])
         C = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
         if "defer" in costs:
-            C["defer"] = {z: float(costs["defer"]) for z in outcomes}
+            C["defer"] = {z: _cost(name, costs["defer"]) for z in outcomes}
         return dict(costs=C, defer="defer" if "defer" in costs else None, max_error=max_error)
     for a, row in costs.items():
         if not isinstance(row, dict) or set(row) != set(outcomes):
             raise RequestError(f"question {name!r}: costs[{a!r}] must give a cost for every outcome {outcomes}")
-    C = {a: {z: float(v) for z, v in row.items()} for a, row in costs.items()}
+    C = {a: {z: _cost(name, v) for z, v in row.items()} for a, row in costs.items()}
     defer = q.get("defer_action") or next((a for a in ("defer", "human") if a in C), None)
     return dict(costs=C, defer=defer, max_error=max_error)
 
