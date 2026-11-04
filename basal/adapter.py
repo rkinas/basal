@@ -107,7 +107,7 @@ def canonical(key):
 
 
 def read(path):
-    from safetensors.numpy import load_file
+    from safetensors.torch import load_file  # (the numpy reader has no bfloat16: PEFT / Unsloth save bf16 adapters)
     fmt, weights, scale = validate(path)
     pat = _MLX_KEY if fmt == "mlx" else _PEFT_KEY
     parts = {}
@@ -122,7 +122,7 @@ def read(path):
         side = m[2].lower()
         if side in parts.setdefault(key, {}):
             _fail(path, f"{k}: a second {side} tensor for {key}")
-        v = np.asarray(v, dtype=np.float32)
+        v = np.asarray(v.float().numpy(), dtype=np.float32)
         parts[key][side] = v.T if fmt == "mlx" else v  # mlx-lm stores a [in, r], b [r, out]
     deltas = {}
     for key, ab in sorted(parts.items()):
@@ -195,6 +195,9 @@ def merge_torch(model, ad):
             w = mod.weight
             if w.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
                 raise SystemExit(f"--adapter {ad.name}: {key}: FP8 weights cannot take a merge")
+            if not w.dtype.is_floating_point or w.element_size() < 2:  # (int8 / 4-bit quantised linears)
+                raise SystemExit(f"--adapter {ad.name}: {key}: {str(w.dtype).replace('torch.', '')} weights cannot "
+                                 "take a merge (merge into the bf16 model)")
             _check_shape(ad, key, w.shape)
             w.copy_(merged(w, delta(ad, key)))
     return len(ad.deltas)
