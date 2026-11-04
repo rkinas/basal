@@ -62,3 +62,30 @@ def test_sc3_a_run_where_almost_every_request_was_cut_by_the_context_is_not_a_pa
         n["n"] += 1
         return {"answers": {k: GOOD for k in NAMES}, "usage": {"truncated": n["n"] > 1}}
     assert run_check(monkeypatch, tmp_path, cut_most) != 0
+
+
+def test_s2_a_tie_inside_the_tolerance_is_agreement():
+    # docs/OLD_GPUS.md: a flip between options the reference had within 0.02 of each other counts as agreement
+    assert sc.compare({"a": .34, "b": .33, "c": .33}, {"a": .30, "b": .30, "c": .40})[1] is True
+    assert sc.compare({"a": .34, "b": .33, "c": .33}, {"a": .30, "b": .40, "c": .30})[1] is True
+    # the boundary: exactly TIE apart is not forgiven, and a clearly lower option never is
+    assert sc.compare({"a": .40, "b": .20, "c": .40}, {"a": .1, "b": .8, "c": .1})[1] is False
+
+
+@pytest.mark.parametrize("reply", [{"error": "overloaded"}, None, [], "x", {"answers": None}, {"answers": []}])
+def test_s3_a_200_json_that_is_not_an_answer_object_is_a_failed_request_not_a_traceback(monkeypatch, tmp_path, reply):
+    with pytest.raises(SystemExit, match="no readouts compared"):
+        run_check(monkeypatch, tmp_path, lambda b: reply, n_items=4)
+    n = {"n": 0}
+
+    def one_bad(body):
+        n["n"] += 1
+        return reply if n["n"] == 2 else {"answers": {k: GOOD for k in NAMES}, "usage": {}}
+    assert run_check(monkeypatch, tmp_path, one_bad, n_items=4) == 1
+
+
+@pytest.mark.parametrize("answer", [{"type": "noul"}, None, [], "x", {"probabilities": None}, {"probabilities": []}])
+def test_s3_an_answer_without_probabilities_is_a_missing_answer(monkeypatch, tmp_path, answer):
+    answers = lambda b: {"answers": {"u": GOOD, "t": GOOD, "c": answer}, "usage": {}}  # noqa: E731
+    assert run_check(monkeypatch, tmp_path, lambda b: {"answers": {k: GOOD for k in NAMES}, "usage": {}}) == 0
+    assert run_check(monkeypatch, tmp_path, answers) == 1
