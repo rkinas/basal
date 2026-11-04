@@ -9,11 +9,11 @@ repos:
       - id: check-json
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.1
+    rev: v0.15.16  # the Ruff of CI (.github/workflows/ci.yml), with the rules of pyproject.toml
     hooks:
       - id: ruff-check
-        types_or: [python, pyi]
-        args: [--select, 'E9,F63,F7,F82', --target-version, py310, --no-fix, --no-cache]
+        types_or: [python, pyi, jupyter]
+        args: [--no-fix, --no-cache]
 
   - repo: local
     hooks:
