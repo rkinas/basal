@@ -46,6 +46,7 @@ from pathlib import Path
 import torch
 
 from . import adapter as adapter_module
+from .signals import exit_on_sigterm
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
                      VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
@@ -2601,6 +2602,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
 
 
 def main():
+    exit_on_sigterm()  # SIGTERM (kill, docker stop) runs the exit handlers: the merged adapter copy, the vLLM sidecar
     a = parser().parse_args()
     if a.api_keys and not Path(a.api_keys).is_file():  # the file is re-read while running, so only a warning
         print(f"warning: --api-keys {a.api_keys}: no such file; every request gets 401 until it exists", file=sys.stderr)
