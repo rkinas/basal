@@ -367,7 +367,8 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 ```
 
 - Images: any format Pillow reads; `"detail": "high"` reads small print (1,120 image tokens instead of 280; slower).
-  Audio: WAV, FLAC, OGG or MP3, at most 30 s a clip. At most 8 items and 20 MB each per request.
+  Audio: WAV, FLAC, OGG or MP3, at most 30 s a clip (a longer clip is refused after reading 30 s of it). At most 8
+  items and 20 MB each per request.
 - Answers carry `"calibration": "text"`: the temperatures and thresholds were fitted on text, so validate them on your
   own media before automating with them. Text requests to the same server take the usual text path.
 - Details, memory and what the engine does differently for Gemma 4: [OMNI.md](OMNI.md). Media results:

@@ -1829,7 +1829,9 @@ class Server:
             if body.get("media") is not None:
                 raise RequestError("give media or images, not both")
             body = dict(body, media=images_as_media(body["images"]))
-        m = self.media_of(body, pol)
+        # (a request with media is decoded off the event loop; without, media_of is None at once)
+        m = self.media_of(body, pol) if body.get("media") is None else \
+            await asyncio.get_running_loop().run_in_executor(None, self.media_of, body, pol)
         lang = body.get("lang")  # the prompt language when the text alone does not show it (a state that is only media)
         if lang is not None and lang not in ("pl", "en"):
             raise RequestError('lang must be "pl" or "en"')
@@ -1906,6 +1908,13 @@ class Server:
         images, audio, order = decode(body["media"], kinds, getattr(self.backend, "max_audio_s", None))
         return dict(images=images, audio=audio, kinds=order, max_soft_tokens=soft, detail=body.get("detail", "default"))
 
+    def media_pool(self):
+        """The thread of the engine's media calls: the engines read one media request at a time (a lock), so requests
+        waiting for it wait here, never in the default executor's threads, which the text batches need."""
+        if getattr(self, "_media_pool", None) is None:
+            self._media_pool = ThreadPoolExecutor(1, thread_name_prefix="basal-media")
+        return self._media_pool
+
     async def ask_media(self, qs, branches, m):
         """Position probabilities of every prompt of every branch, with the request's media -> (outs, prompt tokens,
         the longest prompt of each branch, media tokens)."""
@@ -1922,7 +1931,7 @@ class Server:
                 ids.append(lid)
                 where.append(j)
         limit = getattr(self, "context", None)
-        res = await asyncio.get_running_loop().run_in_executor(None, functools.partial(
+        res = await asyncio.get_running_loop().run_in_executor(self.media_pool(), functools.partial(
             self.backend.run_media, msgs, ids, m["images"], m["audio"], m["max_soft_tokens"], limit[0] if limit else None))
         outs, longest = [[] for _ in branches], [0] * len(branches)
         for j, (p, n, _) in zip(where, res):
