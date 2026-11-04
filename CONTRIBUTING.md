@@ -58,9 +58,10 @@ value contains spaces. Inspect commands without launching with `make -n`.
 
 ## Development checks
 
-The [pre-commit configuration](.pre-commit-config.yaml) provides fast, read-only checks for Python syntax and
-critical errors (Ruff `E9`, `F63`, `F7`, `F82`), merge conflicts, private keys, TOML, YAML, JSON, and JSONL.
-It covers the engine, server, clients, benchmarks, examples, tests, and figure scripts. JSON checks include the
+The [pre-commit configuration](.pre-commit-config.yaml) provides fast, read-only checks: Ruff with the rules of
+`pyproject.toml` (`E`, `F`, `W`), the same version CI runs over the whole repository (0.15.16), merge conflicts,
+private keys, TOML, YAML, JSON, and JSONL. It covers the engine, server, clients, benchmarks, examples, tests, tools,
+notebooks, and figure scripts. JSON checks include the
 checked-in OpenAPI fixture; JSONL checks parse each nonblank line, matching the batch runner. These are syntax
 checks, not request or response schema validation; the latter remains in `tests/test_server.py`.
 

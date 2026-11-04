@@ -19,10 +19,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
+      # the same Ruff as .pre-commit-config.yaml, with the pyproject.toml rules, over the whole repository
       - uses: astral-sh/ruff-action@4919ec5cf1f49eff0871dbcea0da843445b837e6  # v3.6.1
         with:
           version: "0.15.16"
-          src: basal tests
+          src: .
 
   test-linux:
     runs-on: ubuntu-latest
@@ -54,3 +55,25 @@ jobs:
           python-version: "3.13"
       - run: uv sync --frozen --extra test
       - run: uv run --no-sync pytest -q -n 2 --dist loadfile  # whole files per worker: module fixtures load once
+
+  test-typescript:  # clients/typescript against basal-serve on the stub engine (its README, "Tests")
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "22"  # npm test passes a glob to node --test (Node 21+); the package itself needs 18.17
+      - run: uv venv
+      - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: uv pip install -e ".[test]"
+      - run: npm ci --ignore-scripts
+        working-directory: clients/typescript
+      - run: npm test
+        working-directory: clients/typescript
+        env:
+          BASAL_PYTHON: ${{ github.workspace }}/.venv/bin/python
