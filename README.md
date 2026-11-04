@@ -174,6 +174,7 @@ basal-serve --model Remek/basal-omni-1.0-mini --mode eager --media on --port 800
 They were trained on text decisions only: Gemma 4's encoders read the media zero-shot and the answers use the text
 calibration, so validate them on your own media. Request format and limits:
 [INSTALL](docs/INSTALL.md#images-and-audio-basal-omni-experimental); memory and engine details: [OMNI](docs/OMNI.md).
+External image OCR, generated choice/multi candidates, per-image image/text/both/none context (including CPU-only Basal), and PaddleX HTTP setup: [OCR](docs/OCR.md).
 
 ## MCP: basal as a tool for agents
 

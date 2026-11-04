@@ -55,6 +55,7 @@ from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so bas
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
+from .ocr import OCRClient, OCRServiceError, prepare as prepare_ocr, apply_answers as apply_ocr_answers
 from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, lang_of, letter_ids, max_options,
                      media_messages, model_format, model_layout, model_option_isolation, model_two_way, once_ids,
                      option_tokens, reads_request, render, tokens_once)
@@ -328,6 +329,10 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
             if isinstance(crit, list):
                 crit = {k: None for k in crit}
             keys, opts = named_options(crit, q.get("option_keys", "show"))
+        if t == "choice" and "__other__" in keys and q.get("_basal_other_label") is None:
+            raise RequestError(f"question {name!r}: '__other__' is reserved for the special choice option")
+        if t == "choice" and q.get("_basal_other_label") is not None:
+            opts[keys.index("__other__")] = q["_basal_other_label"]
         if not 2 <= len(opts) <= max_opts:
             what = " (tools and extra options)" if t == "tool" else ""
             raise RequestError(f"question {name!r}: {len(opts)} options{what} (supported: 2..{max_opts})")
@@ -663,6 +668,8 @@ def http_status(e):
     server error."""
     if isinstance(e, RequestError):
         return 422
+    if isinstance(e, OCRServiceError):
+        return 502
     return 503 if out_of_memory(e) else 500
 
 
@@ -1105,6 +1112,7 @@ class Server:
     waiting = None
 
     def __init__(self, a):
+        self.ocr_client = OCRClient(a.ocr_api, a.ocr_url, a.ocr_timeout) if getattr(a, "ocr_api", None) else None
         validate_quant(a.mode, a.quant)
         kind, quant, comp = MODES[a.mode]
         if getattr(a, "compile_scope", "model") == "layer" and (kind != "graph" or not comp):
@@ -1463,7 +1471,14 @@ class Server:
         self.in_flight += 1
         try:
             check_body(body)
-            return await self.decide(body)
+            started_ocr = time.perf_counter()
+            prepared, empty, meta = await prepare_ocr(body, getattr(self, "ocr_client", None), self.max_options)
+            if prepared["questions"]:
+                result = await self.decide(prepared)
+            else:
+                result = {"model": self.name, "answers": {}, "usage": {"input_tokens": 0, "output_tokens": 0,
+                          "questions": 0, "branches": 0, "latency_ms": 0, "longest_prompt_tokens": 0}}
+            return apply_ocr_answers(result, body, empty, meta, time.perf_counter() - started_ocr) if meta else result
         finally:
             self.in_flight -= 1
 
@@ -2321,6 +2336,12 @@ def add_engine_args(ap):
 def parser():
     ap = argparse.ArgumentParser(description="basal typed-decision server")
     add_engine_args(ap)
+    ap.add_argument("--ocr-api", choices=["paddlex"], default=None,
+                    help="external image OCR candidate generator (PaddleX POST /ocr); disabled by default")
+    ap.add_argument("--ocr-url", default="http://127.0.0.1:8080",
+                    help="base URL of separately running OCR service, distinct from Basal --host/--port")
+    ap.add_argument("--ocr-timeout", type=float, default=30.0,
+                    help="timeout in seconds per OCR image")
     ap.add_argument("--name", default=None, help="model name reported in responses (default: last part of --model)")
     ap.add_argument("--no-calibration", dest="no_calibration", action="store_true")
     ap.add_argument("--calibration", default=None,
@@ -2418,7 +2439,7 @@ def error_body(e, error_format="basal"):
     if error_format == "openai":
         kind = "validation_error" if status == 422 else "server_error"
         return {"error": {"message": str(e), "type": kind, "code": status}}, status
-    code = {422: "INVALID_REQUEST", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[status]
+    code = {422: "INVALID_REQUEST", 502: "UPSTREAM_OCR_ERROR", 503: "OUT_OF_MEMORY", 500: "INTERNAL_ERROR"}[status]
     body = {"error": str(e), "code": code}
     if status == 422:
         body["detail"] = [{"loc": ["body"], "msg": str(e), "type": "value_error"}]
