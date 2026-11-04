@@ -460,8 +460,7 @@ def facts(text):
     if m:
         today = _dates(text[m.end():m.end() + 40])
         if today:
-            for g in AGO.finditer(text):
-                n = int(g.group(1))
+            for n in list(dict.fromkeys(int(g.group(1)) for g in AGO.finditer(text)))[:MAX_DURATIONS]:
                 try:
                     before = today[0] - timedelta(days=n)
                 except OverflowError:  # before year 1: no fact rather than an HTTP 500
