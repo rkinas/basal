@@ -35,13 +35,24 @@ def _text(unit, n):
     return "".join(out)[:n]
 
 
+def _best(text, reps):
+    best = float("inf")
+    for _ in range(reps):
+        t = time.perf_counter()
+        facts(text)
+        best = min(best, time.perf_counter() - t)
+    return best
+
+
 @pytest.mark.parametrize("name", list(UNITS))
 def test_facts_reads_a_long_text_in_linear_time(name):
-    """40 000 characters in well under a second (each case took 0.1 to 14 s when the scans were quadratic)."""
-    text = _text(UNITS[name], 40_000)
-    t = time.perf_counter()
-    facts(text)
-    assert time.perf_counter() - t < 0.5, name
+    """16 times the text takes far less than 16 x 16 times as long: the ratio of the best of a few runs on 40 000 and
+    2 500 characters (linear scans: about 16; the quadratic ones took 0.1 to 14 s on 40 000 characters, a ratio near
+    256). A ratio, not a wall time, so a loaded machine slows both sizes alike."""
+    small, large = _text(UNITS[name], 2_500), _text(UNITS[name], 40_000)
+    _best(small, 1)  # (warm: compiled patterns, caches)
+    ratio = _best(large, 2) / max(_best(small, 5), 1e-4)
+    assert ratio < 64, f"{name}: 16 x the text took {ratio:.0f} x as long"
 
 
 @pytest.mark.parametrize("text,expected", [
