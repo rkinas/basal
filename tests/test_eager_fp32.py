@@ -9,6 +9,20 @@ from transformers import (Gemma4ForCausalLM, Gemma4TextConfig, LlamaConfig, Llam
 from basal.engine import EagerBackend
 
 
+@pytest.fixture(autouse=True)
+def _reference_gated_delta_rule(monkeypatch):
+    """transformers takes Qwen3.5's gated delta rule and causal convolution from flash-linear-attention / causal-conv1d
+    whenever they are installed, also for CPU tensors, where their Triton kernels fail ("cannot be accessed from
+    Triton (cpu tensor?)" on a CUDA machine with fla). These CPU tests use the reference PyTorch functions."""
+    import inspect
+
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as q
+    for name in ("torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule", "causal_conv1d_fn",
+                 "causal_conv1d_update"):
+        if hasattr(q, name):
+            monkeypatch.setattr(q, name, inspect.unwrap(getattr(q, name)))
+
+
 class Stub(EagerBackend):
     def __init__(self, model):  # the real __init__ minus loading
         self.model, self.dev, self.tok = model, torch.device("cpu"), type("Tok", (), {"pad_token_id": 0})()
