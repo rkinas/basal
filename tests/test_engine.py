@@ -328,3 +328,25 @@ def test_backends_split_flat_readouts_with_one_helper():
     assert src.count("out.append(flat[j: j + len(g[0])])") == 1  # in _split only
     assert not hasattr(eng.GraphBackend, "_eager_shared")
     assert eng._split([1, 2, 3, 4, 5], [([0, 0], None), ([0], None), ([0, 0], None)]) == [[1, 2], [3], [4, 5]]
+
+
+def test_mps_backend_gemma4_reads_the_sliding_window():
+    """--mode mps of a Gemma 4 model (basal-omni): states longer than the sliding window are read with the window in
+    the sliding layers (the engine's own Gemma 4 forward, as --mode eager), so every readout equals the model's own
+    forward of the prompt alone; a 4D trie mask through the transformers forward would let the sliding layers see the
+    whole state."""
+    import threading
+
+    from basal.gemma4 import Gemma4Forward
+    from test_gemma4_graph import tiny as gtiny
+    m = gtiny("e4b", torch.float32)  # window 5
+    be = MPSStub(m)
+    be.g4, be.lock = Gemma4Forward(m), threading.Lock()
+    be.head, be.softcap = m.lm_head, m.config.final_logit_softcapping
+    state = [1, 5, 9, 11, 3, 4, 6, 12, 13, 14, 15, 16]
+    g1 = ([state + [20 + q, 21, 30 + o, 31 - o] for q in range(2) for o in range(2)], [[7, 8]] * 4)
+    g2 = ([state + [22, 23]], [[7, 8, 9]])
+    out = be.run_shared([g1, g2])
+    for (toks, lids), res in zip([g1, g2], out):
+        for r, e in zip(res, separate(m, toks, lids)):
+            assert torch.allclose(torch.tensor(r), e.float(), atol=1e-5)
