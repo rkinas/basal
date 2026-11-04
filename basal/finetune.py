@@ -118,7 +118,8 @@ def copy_side_files(src, out):
 def code_logits(model, ids, codes, softcap, device):
     """The logits of the option codes at the answer position as basal-serve reads them: the output head's input (the
     final norm's output at the last position) times the code rows in fp32, then the model's final logit soft cap once.
-    (The model's own logits are capped already: a Gemma forward applies final_logit_softcapping itself.)"""
+    (The model's own logits are capped already: a Gemma forward applies final_logit_softcapping itself.) In fp32 also
+    under the training steps' autocast, which would take the product in bf16 / fp16."""
     head = model.get_output_embeddings()
     got = {}
     hook = head.register_forward_pre_hook(lambda mod, args: got.__setitem__("h", args[0]))
@@ -127,10 +128,11 @@ def code_logits(model, ids, codes, softcap, device):
     finally:
         hook.remove()
     sel = torch.tensor(codes, device=device)
-    z = got["h"][0, -1].float() @ head.weight.index_select(0, sel).float().T
-    if head.bias is not None:
-        z = z + head.bias.index_select(0, sel).float()
-    return torch.tanh(z / softcap) * softcap if softcap else z
+    with torch.autocast(torch.device(device).type, enabled=False):  # fp32 under the training steps' autocast too
+        z = got["h"][0, -1].float() @ head.weight.index_select(0, sel).float().T
+        if head.bias is not None:
+            z = z + head.bias.index_select(0, sel).float()
+        return torch.tanh(z / softcap) * softcap if softcap else z
 
 
 def accuracy(model, examples, softcap, device):
