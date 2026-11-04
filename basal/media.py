@@ -44,12 +44,13 @@ def detail_tokens(detail):
 def _raw(data, n):
     if not isinstance(data, str) or not data:
         raise ValueError(f"media {n}: data must be a base64 string")
-    if data.startswith("data:") and "," in data:  # a data URL: data:<type>;base64,<payload>
+    if data[:5].lower() == "data:" and "," in data:  # a data URL: data:<type>;base64,<payload> (the scheme is case-insensitive)
         data = data.split(",", 1)[1]
+    data = "".join(data.split())  # MIME-wrapped base64 (every 76 characters) is the output of base64 tools
     if len(data) * 3 // 4 > MAX_BYTES:
         raise ValueError(f"media {n}: more than {MAX_BYTES // (1024 * 1024)} MB")
     try:
-        return base64.b64decode(data, validate=True)
+        return base64.b64decode(data.replace("-", "+").replace("_", "/"), validate=True)  # (also the urlsafe alphabet)
     except (binascii.Error, ValueError):
         raise ValueError(f"media {n}: data is not valid base64") from None
 

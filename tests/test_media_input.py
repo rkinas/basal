@@ -141,3 +141,17 @@ def test_s19_decoding_does_not_overwrite_the_global_pil_pixel_limit(monkeypatch)
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 123456789)
     media._image(png(Image.new("RGB", (8, 8))), 0)
     assert Image.MAX_IMAGE_PIXELS == 123456789
+
+
+RAW = bytes([251, 255, 254, 250, 253, 252] * 40)  # its base64 has "+" and "/" (urlsafe: "-" and "_")
+
+
+@pytest.mark.parametrize("wrap", [
+    lambda s: s,
+    lambda s: "\r\n".join(s[i:i + 76] for i in range(0, len(s), 76)),  # `base64` of coreutils, MIME
+    lambda s: s.replace("+", "-").replace("/", "_"),
+    lambda s: "DATA:image/png;base64," + s,
+], ids=["plain", "wrapped", "urlsafe", "upper-case-scheme"])
+def test_s20_base64_as_the_tools_write_it_is_accepted(wrap):
+    import base64
+    assert media._raw(wrap(base64.b64encode(RAW).decode()), 0) == RAW
