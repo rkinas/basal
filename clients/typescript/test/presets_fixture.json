@@ -2054,6 +2054,1049 @@
     },
     "mode": "certified"
    }
+  },
+  {
+   "answers": {},
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "jailbreak",
+    "checks": {
+     "jailbreak": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     },
+     "harmful": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     },
+     "medical": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     },
+     "self_harm": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     },
+     "severity": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "jailbreak",
+    "checks": {
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "jailbreak": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     },
+     "medical": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     },
+     "self_harm": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     },
+     "severity": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "policy_break": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": 0.97,
+      "1": 0.01,
+      "2": 0.01,
+      "3": 0.01
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "self_harm",
+    "checks": {
+     "policy_break": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "jailbreak": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": 0.97,
+      "1": 0.01,
+      "2": 0.01,
+      "3": 0.01
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "harmful",
+    "checks": {
+     "jailbreak": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "review",
+      "p": null,
+      "why": "malformed answer"
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "pass",
+      "p": 0.0
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "jailbreak": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": "0.9",
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": 0.97,
+      "1": 0.01,
+      "2": 0.01,
+      "3": 0.01
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "harmful",
+    "checks": {
+     "jailbreak": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "review",
+      "p": null,
+      "why": "malformed answer"
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "pass",
+      "p": 0.0
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "jailbreak": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 1.5,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": 0.97,
+      "1": 0.01,
+      "2": 0.01,
+      "3": 0.01
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "harmful",
+    "checks": {
+     "jailbreak": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "review",
+      "p": null,
+      "why": "malformed answer"
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "pass",
+      "p": 0.0
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "jailbreak": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": null,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": 0.97,
+      "1": 0.01,
+      "2": 0.01,
+      "3": 0.01
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "permissive",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "medical",
+    "checks": {
+     "jailbreak": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "medical": {
+      "action": "review",
+      "p": null,
+      "why": "malformed answer"
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "pass",
+      "p": 0.0
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "jailbreak": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {},
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "severity",
+    "checks": {
+     "jailbreak": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "review",
+      "p": null,
+      "why": "malformed answer"
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "jailbreak": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": "high",
+      "1": 0.1
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "severity",
+    "checks": {
+     "jailbreak": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "review",
+      "p": null,
+      "why": "malformed answer"
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "jailbreak": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "none": 0.9,
+      "low": 0.1
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "expect": {
+    "action": "review",
+    "reason": "severity",
+    "checks": {
+     "jailbreak": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "review",
+      "p": null,
+      "why": "malformed answer"
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "jailbreak": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0,
+     "abstain": null
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0,
+     "abstain": false
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0,
+     "abstain": false
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0,
+     "abstain": false
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": 0.97,
+      "1": 0.01,
+      "2": 0.01,
+      "3": 0.01
+     },
+     "confidence": 0.97,
+     "abstain": false
+    }
+   },
+   "policy": "strict",
+   "max_error": 0.05,
+   "expect": {
+    "action": "review",
+    "reason": "jailbreak",
+    "checks": {
+     "jailbreak": {
+      "action": "review",
+      "p": null,
+      "why": "no abstain flag: ask with max_error"
+     },
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "pass",
+      "p": 0.0
+     }
+    },
+    "mode": "certified"
+   }
+  },
+  {
+   "answers": {
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "spam": {
+     "type": "noul",
+     "noul": 0.1,
+     "probabilities": {
+      "true": 0.1,
+      "false": 0.9
+     },
+     "confidence": 0.9
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "battery": [
+    "harmful",
+    "spam"
+   ],
+   "expect": {
+    "action": "pass",
+    "reason": null,
+    "checks": {
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "spam": {
+      "action": "pass",
+      "p": 0.1
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "battery": [
+    "harmful",
+    "spam"
+   ],
+   "expect": {
+    "action": "review",
+    "reason": "spam",
+    "checks": {
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "spam": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "policy_break": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": 0.97,
+      "1": 0.01,
+      "2": 0.01,
+      "3": 0.01
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "battery": "output",
+   "expect": {
+    "action": "pass",
+    "reason": null,
+    "checks": {
+     "policy_break": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "pass",
+      "p": 0.0
+     }
+    },
+    "mode": "fixed"
+   }
+  },
+  {
+   "answers": {
+    "policy_break": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "harmful": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "medical": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "self_harm": {
+     "type": "noul",
+     "noul": 0.0,
+     "probabilities": {
+      "true": 0.0,
+      "false": 1.0
+     },
+     "confidence": 1.0
+    },
+    "severity": {
+     "type": "score",
+     "score": 0.0,
+     "probabilities": {
+      "0": 0.97,
+      "1": 0.01,
+      "2": 0.01,
+      "3": 0.01
+     },
+     "confidence": 0.97
+    }
+   },
+   "policy": "strict",
+   "max_error": null,
+   "battery": "input",
+   "expect": {
+    "action": "review",
+    "reason": "jailbreak",
+    "checks": {
+     "policy_break": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "harmful": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "medical": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "self_harm": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "severity": {
+      "action": "pass",
+      "p": 0.0
+     },
+     "jailbreak": {
+      "action": "review",
+      "p": null,
+      "why": "no answer"
+     }
+    },
+    "mode": "fixed"
+   }
   }
  ],
  "route": [
@@ -2253,6 +3296,103 @@
       "2": 0.1
      },
      "confidence": 0.8
+    }
+   },
+   "max_error": 0.05,
+   "expect": {
+    "route": "human",
+    "why": "no abstain flag: ask with max_error"
+   }
+  },
+  {
+   "answers": {
+    "intent": {
+     "type": "choice",
+     "choice": "billing",
+     "probabilities": {
+      "billing": 0.9,
+      "other": 0.1
+     },
+     "confidence": "0.9"
+    },
+    "complexity": {
+     "type": "score",
+     "score": 1.0,
+     "legend": {
+      "0": "simple",
+      "1": "moderate",
+      "2": "complex"
+     },
+     "probabilities": {
+      "0": 0.1,
+      "1": 0.8,
+      "2": 0.1
+     },
+     "confidence": 0.8
+    }
+   },
+   "max_error": null,
+   "expect": {
+    "route": "human",
+    "why": "malformed answer"
+   }
+  },
+  {
+   "answers": {
+    "intent": {
+     "type": "choice",
+     "choice": "billing",
+     "probabilities": {
+      "billing": 0.9,
+      "other": 0.1
+     },
+     "confidence": 0.9
+    },
+    "complexity": {
+     "type": "score",
+     "score": 1.0,
+     "legend": {
+      "0": "simple",
+      "1": "moderate",
+      "2": "complex"
+     },
+     "probabilities": {},
+     "confidence": 0.8
+    }
+   },
+   "max_error": null,
+   "expect": {
+    "route": "human",
+    "why": "malformed answer"
+   }
+  },
+  {
+   "answers": {
+    "intent": {
+     "type": "choice",
+     "choice": "billing",
+     "probabilities": {
+      "billing": 0.9,
+      "other": 0.1
+     },
+     "confidence": 0.9,
+     "abstain": null
+    },
+    "complexity": {
+     "type": "score",
+     "score": 1.0,
+     "legend": {
+      "0": "simple",
+      "1": "moderate",
+      "2": "complex"
+     },
+     "probabilities": {
+      "0": 0.1,
+      "1": 0.8,
+      "2": 0.1
+     },
+     "confidence": 0.8,
+     "abstain": false
     }
    },
    "max_error": 0.05,

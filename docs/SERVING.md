@@ -671,9 +671,13 @@ b.route(ticket)  # {"route": "billing" | ... | "human", "complexity": "moderate"
 **Policies.** `strict` and `permissive` (`presets.POLICIES`) map each hazard to an action: `jailbreak`, `policy_break`
 and `harmful` block, `self_harm` is `support` (show help, do not just refuse), `medical` is a review under `strict` and
 allowed under `permissive`. `severity` blocks from level 2 (`strict`) or 3 (`permissive`), and sends level 1 or 2 to
-review. The precedence is fixed: **support > block > review > pass**, over all checks. A missing answer (a skipped
-question) is a review, never a pass. A policy is a plain dict (`act_at`, `review_at`, `severity`, `hazards`): pass your own
-to `guard(answers, policy)`.
+review. The precedence is fixed: **support > block > review > pass**, over all checks. Every question of the battery
+must be answered: a missing or null answer, and a malformed one (a yes/no probability that is not a finite number in
+[0, 1], a severity without its level probabilities, with `max_error` an answer without a true / false `abstain`), is a
+review, never a pass. The battery is the built-in one of the answers (`guard_output` when they hold `policy_break`,
+else `guard_input`); a battery of your own, or an intentional part of one, is named with
+`guard(answers, policy, expect=["harmful", "spam"])` (TypeScript: the fourth argument). A policy is a plain dict
+(`act_at`, `review_at`, `severity`, `hazards`): pass your own to `guard(answers, policy)`.
 
 **Where the thresholds come from.** Two modes:
 

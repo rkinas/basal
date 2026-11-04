@@ -1,6 +1,7 @@
 """guard_input / guard_output / route_intent presets and their decision steps (basal/presets.py), no model."""
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -116,3 +117,43 @@ def test_async_client_presets_send_and_return_what_basal_does():
                                                                               "en", max_error=0.05)
     got = asyncio.run(go())
     assert got == want and seen[0] == seen[1]
+
+
+FIXTURE = Path(__file__).resolve().parents[1] / "clients" / "typescript" / "test" / "presets_fixture.json"
+
+
+def test_guard_and_route_decide_the_shared_cases_of_the_typescript_client():
+    """The cases the TypeScript client checks its guard() / route() with are Python's decisions."""
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    for c in fixture["guard"]:
+        assert presets.guard(c["answers"], c["policy"], c["max_error"], c.get("battery")) == c["expect"], c
+    for c in fixture["route"]:
+        assert presets.route(c["answers"], 0.6, c["max_error"]) == c["expect"], c
+
+
+@pytest.mark.parametrize("answers", [{}, {"harmful": noul(0.0)}, {"jailbreak": None}])
+def test_an_incomplete_battery_is_never_a_pass(answers):
+    r = presets.guard(answers)
+    assert r["action"] == "review" and set(r["checks"]) >= {"jailbreak", "harmful", "medical", "self_harm", "severity"}
+    assert r["checks"]["self_harm"]["why"] == "no answer"
+    assert presets.guard(battery(), expect=["harmful"])["action"] == "pass"     # an explicit (partial) battery
+    with pytest.raises(ValueError, match="unknown battery"):
+        presets.guard(battery(), expect="middle")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.1, 1.1, None, "0.9", True])
+def test_a_malformed_probability_is_a_review(bad):
+    for name in ("jailbreak", "harmful", "medical"):
+        a = battery()
+        a[name] = dict(a[name], noul=bad)
+        r = presets.guard(a, "permissive")
+        assert r["action"] == "review" and r["checks"][name]["why"] == "malformed answer"
+    a = battery()
+    a["severity"] = dict(a["severity"], probabilities={"0": bad, "1": 0.1, "2": 0.0, "3": 0.0})
+    assert presets.guard(a)["checks"]["severity"]["why"] == "malformed answer"
+    a = battery(a=False)
+    a["harmful"] = dict(a["harmful"], abstain=None if bad is True else bad)
+    assert presets.guard(a, max_error=0.05)["action"] == "review"
+    intent = {"choice": "billing", "confidence": bad}
+    comp = {"probabilities": {"0": 0.2, "1": 0.8}}
+    assert presets.route({"intent": intent, "complexity": comp})["route"] == "human"

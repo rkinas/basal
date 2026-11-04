@@ -202,7 +202,7 @@ export class Basal {
     opts: { kind?: "input" | "output"; policy?: string | GuardPolicy; lang?: "pl" | "en"; maxError?: number } = {},
   ): Promise<GuardDecision & { answers: Record<string, Answer | null> }> {
     const answers = await this.preset(state, `guard_${opts.kind ?? "input"}`, opts.lang, opts.maxError);
-    return { ...guard(answers, opts.policy ?? "strict", opts.maxError), answers };
+    return { ...guard(answers, opts.policy ?? "strict", opts.maxError, opts.kind ?? "input"), answers };
   }
 
   /** Runs "route_intent" on `state`: the intent, or "human" on low confidence or abstain. */
