@@ -91,8 +91,8 @@ class RouterUI:
         the first choice made for it (the replica its pool and state give; cascade / blend calls come after)."""
         choose = self.router.choose
 
-        def chosen(key, pool="main"):
-            out = choose(key, pool)
+        def chosen(key, pool="main", hs=None):
+            out = choose(key, pool, hs)
             box = PICK.get()
             if box is not None and not box:
                 box.extend(out)

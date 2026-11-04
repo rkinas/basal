@@ -106,7 +106,7 @@ def request_key(req):
     re.sub(r"\\s+", " ", state.strip()) gave, for every string (str.isspace and re's whitespace class agree on every
     code point), in a quarter of the time (3.4 -> 0.85 ms on a 64 KB state)."""
     state = req.get("state") if isinstance(req, dict) else None
-    if isinstance(state, (list, dict)) and state:
+    if isinstance(state, (list, dict)):
         state = json.dumps(state, ensure_ascii=False)
     return (" ".join(state.split()) or None) if isinstance(state, str) else None
 
@@ -365,21 +365,16 @@ class Router:
         self.client = httpx.AsyncClient(timeout=None, transport=transport,
                                         limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
-    def choose(self, key, pool="main"):
+    def choose(self, key, pool="main", hs=None):
         """(replica, how) for a request with routing key key (None: by load), among the replicas of pool: with
-        --prefix-affinity the replica a state with the same beginning went to ("prefix", _prefix), else the ring's."""
+        --prefix-affinity the replica a state with the same beginning went to ("prefix", _prefix), else the ring's.
+        hs: key_blocks(key), when the caller has them (_send records them after the replica answers, _remember)."""
         if key is not None:
-            hs = key_blocks(key) if self.affinity else ()
+            if hs is None:
+                hs = key_blocks(key) if self.affinity else ()
             r, how = self._prefix(hs, pool, len(key)), "prefix"
             if r is None:
                 r, how = self.rings[pool].pick(key, self.load, self.ready, self.factor), "state"
-            if hs and r is not None:
-                idx = self.index.setdefault(pool, OrderedDict())
-                for h in hs:
-                    idx[h] = r
-                    idx.move_to_end(h)
-                while len(idx) > MAX_BLOCKS:
-                    idx.popitem(last=False)
             return r, how
         ready = sorted(self.ready & set(self.pools[pool]))
         if not ready:
@@ -387,17 +382,26 @@ class Router:
         a, b = self.rng.choice(ready), self.rng.choice(ready)
         return (a if self.load[a] <= self.load[b] else b), "load"
 
+    def _remember(self, hs, pool, r):
+        """--prefix-affinity: the blocks of a key replica r answered (200: it read, and may cache, that state) go to r;
+        a request it refused or failed records nothing."""
+        idx = self.index.setdefault(pool, OrderedDict())
+        for h in hs:
+            idx[h] = r
+            idx.move_to_end(h)
+        while len(idx) > MAX_BLOCKS:
+            idx.popitem(last=False)
+
     def _prefix(self, hs, pool, n):
         """The replica whose earlier state shares the longest beginning (whole blocks) with a key of n characters,
         when that beginning is at least as long as the rest (a shared letterhead does not pin unrelated documents)
         and the replica is ready, with its load within PREFIX_FACTOR x --load-factor of the mean; else None."""
         idx = self.index.get(pool)
         hit, m = None, 0
-        for i, h in enumerate(hs if idx else ()):
-            r = idx.get(h)
-            if r is None:
-                break
-            hit, m = r, (i + 1) * BLOCK
+        for i, h in enumerate(hs if idx else ()):  # the deepest recorded block: the hashes are chained, so a block
+            r = idx.get(h)                        # stands for the whole beginning up to it (one evicted before it
+            if r is not None:                     # does not end the match)
+                hit, m = r, (i + 1) * BLOCK
         if hit is None or hit not in self.ready or m < n - m:
             return None
         names = [x for x in self.pools[pool] if x in self.ready]
@@ -596,7 +600,8 @@ class Router:
         return json.dumps(resp, ensure_ascii=False).encode()
 
     async def _send(self, pool, path, body, headers, key):
-        r, how = self.choose(key, pool)
+        hs = key_blocks(key) if self.affinity and key is not None else ()
+        r, how = self.choose(key, pool, hs)
         if r is None:
             return 503, b'{"error": "no basal replica is ready"}', "application/json"
         self.load[r] += 1
@@ -605,6 +610,8 @@ class Router:
             resp = await self.client.post(r + path, content=body, headers=headers)
             if resp.status_code >= 500:
                 self.failed[r] += 1
+            if hs and resp.status_code == 200:
+                self._remember(hs, pool, r)
             return resp.status_code, resp.content, resp.headers.get("content-type", "application/json")
         except Exception as e:  # noqa: BLE001
             self.failed[r] += 1
