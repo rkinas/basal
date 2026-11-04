@@ -375,6 +375,9 @@ def expand(body, max_options=255):
                 f = _field_text(path, spec)
                 if kind in ("enum", "enum_list"):
                     vals = _consts(spec if kind == "enum" else spec["items"])
+                    keys = [str(v) for v, _ in vals]
+                    if len(set(keys)) != len(keys) or (kind == "enum" and "__missing__" in keys):  # 1 and "1" share an answer key
+                        raise ValueError(f"extract: enum values of {path!r} must differ as text and not be '__missing__'")
                     crit = {str(v): f"{v} ({d})" if d else str(v) for v, d in vals}  # shown: the value (+ its description)
                     if kind == "enum":
                         crit["__missing__"] = w["missing"]

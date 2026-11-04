@@ -45,3 +45,13 @@ def test_extract_rejects_a_property_name_with_a_dot():
     ok = {"type": "object", "properties": {"a_b": {"type": "boolean"},
                                            "a": {"type": "object", "properties": {"b": {"type": "boolean"}}}}}
     assert len(tasks.expand({"state": "s", "questions": {"q": {"type": "extract", "schema": ok}}})[0]["questions"]) == 2
+
+
+# B-096: enum values that share an answer key
+@pytest.mark.parametrize("values", [[1, "1"], ["__missing__", "x"]])
+def test_extract_rejects_enum_values_that_share_an_answer_key(values):
+    with pytest.raises(RequestError):
+        tasks.expand({"state": "s", "questions": {"q": {"type": "extract", "schema": {
+            "type": "object", "properties": {"f": {"enum": values}}}}}})
+    tasks.expand({"state": "s", "questions": {"q": {"type": "extract", "schema": {            # control
+        "type": "object", "properties": {"f": {"enum": ["a", "b"]}}}}}})
