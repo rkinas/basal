@@ -144,7 +144,10 @@ The shipped files were fitted with the same steps:
      for the mix of question types it was certified on, not for each type; callers who need a per-type guarantee
      should use a format-2 model.
 4. CERT, not used for fitting, reports coverage, error and the same bound at that threshold, next to the shipped
-   threshold on the same decisions.
+   threshold on the same decisions. When CERT refutes a threshold (its errors at that threshold put the one-sided 95%
+   *lower* bound of the error above the target) the threshold is withdrawn: the type (or task) has none at that target,
+   `"refuted"` keeps the FIT threshold and the reason names CERT's errors. A threshold that holds is refuted at most
+   5% of the time, since CERT took no part in the fit.
 5. The gates. They are measured, not fitted.
    - `ece_lofo`, per type: for every family, the temperatures are fitted again on the FIT decisions of the other
      families and applied to that family's CERT decisions. The ECE is then reported per family, as the mean and the
@@ -333,8 +336,9 @@ decisions without an error (...); this file gives 192 FIT decisions of 275; labe
 A threshold certified on FIT is written even when its CERT decisions are too few to confirm it. 2.3.1 then says so,
 in the report and on stderr: "noul at max_error 0.01: certified on FIT; CERT has 150 accepted, 1 error, upper bound
 3.12% > 1%, too few to confirm on CERT (0 errors would need >= 299 accepted CERT decisions)". If the error observed on
-CERT is above the target, it says that the threshold does not hold on CERT. The threshold and the exit status do not
-change (`--strict` checks only the leave-one-family-out ECE).
+CERT is above the target, it says that the threshold does not hold on CERT. Such a threshold stays (and the exit
+status does not change; `--strict` checks only the leave-one-family-out ECE) unless CERT refutes it, as in step 4
+above: then it is withdrawn.
 
 ## Output
 

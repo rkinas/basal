@@ -51,7 +51,8 @@ Method (the one the shipped files were fitted with):
     Clopper-Pearson upper bound of its accepted decisions <= r, and the scan stops at the first level that fails; the
     threshold is the last level that passed (none when the first fails). The first level tested is set by the counts
     alone: the first that accepts enough decisions to meet the bound with one error (93 at 5%, 473 at 1%) when the
-    type has at least twice that many FIT decisions, else without an error (59 / 299; at least 50). CERT reports its coverage, error and bound. The threshold is fitted per type (thresholds[r].per_type[type], on the type's own decisions), and
+    type has at least twice that many FIT decisions, else without an error (59 / 299; at least 50). CERT reports its coverage, error and bound, and a threshold CERT refutes (its
+    one-sided 95% lower bound of the error above r) is withdrawn. The threshold is fitted per type (thresholds[r].per_type[type], on the type's own decisions), and
     once pooled over all types (thresholds[r].confidence, informational: basal-serve never applies it). A type
     without a certified threshold of its own ("confidence": null, or no entry) has every automatic action of act and
     tool with that max_error deferred ("no certified threshold for this type at this max_error"). A few hundred
@@ -621,6 +622,32 @@ def within(e, n, risk, alpha=ALPHA):
     return math.exp(m) * float(np.exp(t - m).sum()) <= alpha
 
 
+def refutes(e, n, risk, alpha=ALPHA):
+    """Whether e errors among n accepted CERT decisions refute a threshold certified at `risk`: P(X >= e) <= alpha for
+    X ~ Binomial(n, risk), i.e. the one-sided 95% lower bound of their error is above risk. CERT took no part in the
+    fit, so a threshold whose error is at most risk is refuted at most alpha of the time; too few CERT decisions to
+    confirm it (cert_note) is not a refutation."""
+    if n == 0 or e <= risk * n:
+        return False
+    lf = log_factorials(n)
+    i = np.arange(e)
+    t = lf[n] - lf[i] - lf[n - i] + i * math.log(risk) + (n - i) * math.log1p(-risk)
+    m = t.max()
+    return 1.0 - math.exp(m) * float(np.exp(t - m).sum()) <= alpha
+
+
+def withdrawn(entry, risk):
+    """A per-type or task entry (certified on FIT, measured on CERT) -> the entry, or with its confidence withdrawn
+    (null: basal-serve defers) when CERT refutes it."""
+    n = entry.get("cert_accepted") or 0
+    e = round((entry.get("cert_error") or 0.0) * n)
+    if entry.get("confidence") is None or not refutes(e, n, risk):
+        return entry
+    return dict(entry, confidence=None, refuted=entry["confidence"],
+                reason=f"certified on FIT at {entry['confidence']:.4f}, but CERT refutes it: {e} error"
+                       f"{'' if e == 1 else 's'} in {n} accepted, a one-sided 95% lower bound above {risk:g}")
+
+
 def start_level(lv, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
     """The first level the fixed sequence tests, of levels lv (levels()): the most confident one that accepts enough
     decisions to meet the bound with one error (93 at 5%, 473 at 1%) when there are at least twice that many decisions,
@@ -889,9 +916,10 @@ def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk):
             out[t] = dict(confidence=None, reason=no_threshold_reason(cf, risk))
             continue
         g_fit, g_cert = gate(cf, thr), gate(cc, thr)
-        out[t] = dict(confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
-                      fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"], cert_error=g_cert["error"],
-                      cert_upper95=g_cert["upper95"], cert_accepted=g_cert["accepted"])
+        out[t] = withdrawn(dict(confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
+                                fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"],
+                                cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
+                                cert_accepted=g_cert["accepted"]), risk)
     return out
 
 
@@ -1186,11 +1214,12 @@ def fit_tasks(rows, targets, shipped=None):
                     confidence=None, reason=no_threshold_reason(cf, risk) if cf else "no FIT decisions")
                 continue
             g_fit, g_cert = gate(cf, thr), gate(cc, thr)
-            e["targets"][str(float(risk))] = dict(
+            e["targets"][str(float(risk))] = x = withdrawn(dict(
                 confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"], fit_upper95=g_fit["upper95"],
                 cert_coverage=g_cert["coverage"], cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
-                cert_accepted=g_cert["accepted"])
-            thresholds.setdefault(t, {})[str(float(risk))] = thr
+                cert_accepted=g_cert["accepted"]), risk)
+            if x["confidence"] is not None:
+                thresholds.setdefault(t, {})[str(float(risk))] = thr
         rs_ = sorted(float(r) for r in targets)  # a looser target never keeps a stricter threshold (floor_thresholds)
         for lo, hi in zip(rs_, rs_[1:]):
             a, b = e["targets"][str(lo)], e["targets"][str(hi)]
