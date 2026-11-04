@@ -102,8 +102,11 @@ SCRIPTS = ("latin", "cyrillic", "greek", "arabic", "hebrew", "cjk")
 
 
 def script_of(text):
-    """The script most of the letters of text are in (SCRIPTS, or "other"; None without letters)."""
+    """The script most of the letters of text are in (SCRIPTS, or "other"; None without letters). A state that is not a
+    string is read as its JSON text, as basal-serve shows it to the model (keys too)."""
     import unicodedata
+    if text is not None and not isinstance(text, str):
+        text = _text(text)
     count = {}
     for ch in text or "":
         if ch.isalpha():
@@ -356,7 +359,7 @@ class Router:
         if any(name.startswith("script:") for name in self.rings):  # --route
             try:
                 sc = script_of(json.loads(body).get("state"))
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, TypeError):  # (not JSON, not an object: the replica refuses it)
                 sc = None
             if sc is not None:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
@@ -378,7 +381,7 @@ class Router:
             req, resp = json.loads(body), json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
-            if req.get("media"):
+            if req.get("media") is not None or req.get("images") is not None:  # (images: the alias of media)
                 return content
             go = []
             for q, a in answers.items():
