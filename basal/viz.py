@@ -27,6 +27,7 @@ import torch
 from .engine import EagerBackend, default_device
 from .facts import inject as inject_facts
 from .gemma4 import is_gemma4, text_model
+from .jsonl import read_lines
 from .prompt import FORMATS, PREFILL, RequestError
 from .run import to_request
 from .server import Server, certified, http_status, temperature, to_items
@@ -308,7 +309,7 @@ def compare_served(res, served):
 def examples():
     out = []
     for f in sorted(EXAMPLES.glob("*.jsonl")):
-        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines()):
+        for n, line in enumerate(read_lines(f)):
             if not line.strip():
                 continue
             item = json.loads(line)

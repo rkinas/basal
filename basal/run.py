@@ -16,9 +16,10 @@ import asyncio
 import json
 import statistics
 import time
-from pathlib import Path
 
 import httpx
+
+from .jsonl import read_lines
 
 
 def to_request(item, early_exit=None, preset=None, lang=None):
@@ -60,7 +61,7 @@ def summarise(item, resp):
 
 
 async def run(a):
-    items = [json.loads(line) for line in Path(a.input).read_text(encoding="utf-8").splitlines() if line.strip()]
+    items = [json.loads(line) for line in read_lines(a.input) if line.strip()]
     for i, it in enumerate(items):
         it.setdefault("id", i)
     results: list[dict] = [{} for _ in items]

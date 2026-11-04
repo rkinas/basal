@@ -49,7 +49,7 @@ def load_panel(path):
 
 
 def load_rows(path, panel, line_of):
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    lines = Path(path).read_text(encoding="utf-8").split("\n")  # not splitlines: U+2028 is text in a JSON string
     head = json.loads(lines[0])
     if head.get("basal_calibrate_rows") != 1:
         raise SystemExit(f"{path}: not a file written by basal-calibrate --save-rows")

@@ -92,6 +92,7 @@ import torch
 from . import __version__
 from . import tasks as task_types
 from .engine import resolve
+from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
 from .server import (MODES, Server, _text, add_engine_args, answer_set, calibration_file, calibration_name,
                      calibration_orders, certified, default_mode, load_calibration, model_identity, refuse_lean_flex,
@@ -293,7 +294,7 @@ def read(path):
     """Labelled JSONL -> (decision requests, decisions, task requests, labelled task decisions). Raises InputError
     listing every problem with its line."""
     errors, bodies, decisions, task_bodies, units = [], [], [], [], []
-    for n, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+    for n, line in enumerate(read_lines(path), 1):
         if not line.strip():
             continue
         try:
@@ -1300,7 +1301,7 @@ def refit(a, targets, reference, reference_name):
     """--from-rows: the fit on the probabilities a --save-rows run recorded (no engine). The baseline is --calibration,
     else the file that run compared with."""
     try:
-        lines = Path(a.input).read_text(encoding="utf-8").splitlines()
+        lines = read_lines(a.input)
     except (OSError, UnicodeDecodeError) as e:  # a binary file, a directory
         raise SystemExit(f"{a.input}: not a file written by basal-calibrate --save-rows ({type(e).__name__})") from None
     try:
