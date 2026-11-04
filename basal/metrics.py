@@ -9,7 +9,7 @@ def prometheus(metrics):
         return str(v).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
     out = []
     for name, help_, kind, samples in metrics:
-        out += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
+        out += [f"# HELP {name} " + str(help_).replace("\\", "\\\\").replace("\n", "\\n"), f"# TYPE {name} {kind}"]
         for labels, value in samples:
             lab = ",".join(f'{k}="{esc(v)}"' for k, v in labels.items())
             out.append(f"{name}{{{lab}}} {value}" if lab else f"{name} {value}")
