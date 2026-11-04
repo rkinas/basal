@@ -333,6 +333,18 @@ def test_broken_inductor_file_is_left_out(tmp_path, monkeypatch):
     assert prepared.load(tmp_path)["inductor"] == "not loaded (EOFError)"
 
 
+def test_broken_inductor_file_still_loads_the_fla_configs(tmp_path, monkeypatch):
+    def broken(b):
+        raise EOFError("truncated")
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", broken)
+    monkeypatch.setattr(gdn_graph, "FLA_CONFIGS", None)
+    (tmp_path / "inductor.bin").write_bytes(b"x")
+    (tmp_path / "fla_configs.json").write_text("{}")
+    out = prepared.load(tmp_path)
+    assert out["inductor"] == "not loaded (EOFError)" and out["fla"] == str(tmp_path / "fla_configs.json")
+    assert gdn_graph.FLA_CONFIGS == tmp_path / "fla_configs.json"
+
+
 def test_save_lists_its_files(tmp_path, monkeypatch):
     monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (b"kernels", None))
     man = prepared.save(tmp_path / "p", dict(ENV, architecture="a", mode="fast", dtype="bfloat16", attn="auto"))
