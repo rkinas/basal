@@ -110,7 +110,8 @@ async def determinism(a, bodies):
     top = lambda ps: max(range(len(ps)), key=ps.__getitem__)  # noqa: E731
     flips = sum(top(pa) != top(qa) for p, q in zip(alone, loaded) for pa, qa in zip(p, q))
     out = dict(url=a.url, determinism=dict(requests=n, identical=sum(d == 0.0 for d in diffs), max_abs_diff=max(diffs),
-                                           decision_flips=flips, concurrency=a.concurrency))
+                                           decision_flips=flips, concurrency=a.concurrency,
+                                           load_errors=sum(r.status_code != 200 for r in res[1::2])))
     print(json.dumps(out))
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
