@@ -469,11 +469,11 @@ class Router:
             members = [(self.blend_weight, resp.get("model"), a)] + [
                 (w, m, x[q]) for w, m, x in others if isinstance(x.get(q), dict) and x[q].get("type") == a["type"]
                 and isinstance(x[q].get("probabilities"), dict) and list(x[q]["probabilities"]) == keys]
-            members = [m for m in members if m[0] > 0]
+            members = [m for m in members if m[0] > 0]  # (a weight of 0: the model takes no part, the first one too)
             if len(members) > 1:
-                answers[q] = blend_answer(a, members)
-            elif members:  # only one model answered: its answer as it is
-                a["blend"] = {"models": [members[0][1]], "weights": [members[0][0]]}
+                answers[q] = blend_answer(members[0][2], members)
+            elif members:  # only one model answered (or has a weight): its answer as it is
+                answers[q] = dict(members[0][2], blend={"models": [members[0][1]], "weights": [members[0][0]]})
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
         return json.dumps(resp, ensure_ascii=False).encode()
 
