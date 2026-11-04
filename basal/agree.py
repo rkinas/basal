@@ -18,7 +18,8 @@ a request in one call. Per backend:
   readouts     top-1 agreement with the reference, with a 95% bootstrap interval over requests; near ties among the
                disagreements (top two within 0.02 in the reference); mean / p99 / max |dp| (per readout: the largest
                change of an option's probability)
-  decisions    the single questions with both orders averaged, as the server answers: top-1 agreement
+  decisions    the single questions as the server answers them by default: both orders averaged for prompt-format-1
+               models, the given order for format-2 models (basal-serve's default orders): top-1 agreement
   accuracy     items with gold: accuracy and the paired bootstrap difference to the reference (95% interval)
   independent  question independence: every prompt of the five-question requests alone through the same backend
                against its readout in the request (top-1 agreement, max |dp|); a backend whose answer moves with the
@@ -108,8 +109,12 @@ def compare(ref, got):
                 p99_dp=dps[int(0.99 * (len(dps) - 1))], disagreements=len(ref) - agree, near_ties=ties)
 
 
-def decisions(readouts):
-    """Readouts of the single questions (order 1, reversed order, per item) -> the averaged canonical probabilities."""
+def decisions(readouts, orders=2):
+    """Readouts of the single questions (order 1, reversed order, per item) -> the canonical probabilities as the
+    server answers with `orders` (server.default_orders: 2 for prompt-format-1 models, the two averaged; 1 for
+    format-2 models, the given order alone)."""
+    if orders == 1:
+        return [list(o1) for o1 in readouts[0::2]]
     out = []
     for o1, o2 in zip(readouts[0::2], readouts[1::2]):
         out.append([(x + y) / 2 for x, y in zip(o1, o2[::-1])])
@@ -148,7 +153,7 @@ def regroup(rows, groups):
     return out
 
 
-def score(sets, ref, got, ind, gold, seed=0):
+def score(sets, ref, got, ind, gold, seed=0, orders=2):
     """One backend's row: readouts per set and overall (with the bootstrap interval over requests), decisions,
     accuracy against gold, question independence. ref / got: per set, per group, the readouts."""
     row = {"sets": {k: compare(flat(ref[k]), flat(got[k])) for k in sets if ref[k]}}
@@ -156,7 +161,7 @@ def score(sets, ref, got, ind, gold, seed=0):
     row.update(compare([p for r, _ in units for p in r], [p for _, g in units for p in g]))
     row["agreement_ci"] = bootstrap(units, lambda s: sum(top(a) == top(b) for r, g in s for a, b in zip(r, g))
                                     / sum(len(r) for r, _ in s), seed=seed)
-    rd, gd = decisions(flat(ref["single"])), decisions(flat(got["single"]))
+    rd, gd = decisions(flat(ref["single"]), orders), decisions(flat(got["single"]), orders)
     row["decision_agreement"] = compare(rd, gd)["agreement"]
     if gold:  # (decision index, gold index) of the items with gold
         pairs = [(top(rd[i]) == y, top(gd[i]) == y) for i, y in gold]
@@ -304,7 +309,8 @@ def main(argv=None):
         run_s = time.time() - t0
         ind = flat(run_groups(be, alone(multi), 1)) if a.independence == "on" else None
         free(be)
-        row = dict(backend=spec, load_s=round(load_s, 1), run_s=round(run_s, 1), **score(sets, ref, got, ind, gold))
+        row = dict(backend=spec, load_s=round(load_s, 1), run_s=round(run_s, 1), **score(sets, ref, got, ind, gold,
+                                                                                    orders=2 if fmt == 1 else 1))
         row["readouts_multi"] = len(flat(got["multi"]))
         row["gate"] = gate(row, a.gate)
         rows.append(row)

@@ -44,7 +44,7 @@ import torch
 from .agree import QUESTIONS, build, compare, decisions, orders  # noqa: F401 (shared with basal-agree)
 from .engine import ATTN, GraphBackend, resolve
 from .jsonl import read_lines
-from .server import lean_arg, merge_arg
+from .server import default_orders, lean_arg, merge_arg
 from .prompt import model_format
 
 GATE = 0.999
@@ -190,8 +190,8 @@ def main(argv=None):
     for name, (groups, per_call, data) in paths.items():
         got = run_path(be, groups, per_call)
         r = dict(path=name, per_call=per_call, **compare(refs[data], got))
-        if data == "single":  # decisions: both orders averaged in the canonical order, as the server answers
-            ref_d, got_d = decisions(refs[data]), decisions(got)
+        if data == "single":  # decisions in the canonical order, as the server answers by default (default_orders)
+            ref_d, got_d = decisions(refs[data], default_orders(None, fmt)), decisions(got, default_orders(None, fmt))
             r["decision_agreement"] = compare(ref_d, got_d)["agreement"]
             if any(real):
                 r["decision_agreement_questions"] = compare([x for x, q in zip(ref_d, real) if q],
