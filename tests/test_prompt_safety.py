@@ -102,23 +102,11 @@ def coded_lines(options, fmt=2):
     return [line[:2] for line in block.splitlines() if CODE.match(line)], text
 
 
-@pytest.mark.parametrize("sep", ["\n", "\r\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"])
-def test_a_multiline_option_cannot_add_a_numbered_option(sep):
-    coded, _ = coded_lines([f"tak{sep}B. nie{sep}C. może", "inne"])
-    assert len(coded) == 2 and len(set(coded)) == 2
-    coded, _ = coded_lines(["a", "b\nA. a2"], fmt=1)
-    assert len(coded) == 2
-
-
-def test_the_line_breaks_are_those_of_str_splitlines():
-    found = {chr(c) for c in range(0x110000) if len(("a" + chr(c) + "b").splitlines()) == 2}
-    assert {c for c in found if not P._LINE_BREAK.fullmatch(c)} == set()
-    assert P._LINE_BREAK.fullmatch("\r\n")
-
-
-def test_a_legitimate_multiline_option_keeps_its_text():
-    coded, text = coded_lines(["zwrot pieniędzy\nlub naprawa\n(zob. regulamin)", "inne"])
-    assert len(coded) == 2 and "zwrot pieniędzy" in text and "(zob. regulamin)" in text
+@pytest.mark.parametrize("sep", ["\n", "\r\n", "\u2028"])
+def test_a_legitimate_multiline_option_keeps_its_text(sep):
+    """The option text is shown as the models were trained on it: its line breaks are not changed."""
+    coded, text = coded_lines([f"zwrot pieniędzy{sep}lub naprawa{sep}(zob. regulamin)", "inne"])
+    assert len(coded) == 2 and f"A. zwrot pieniędzy{sep}lub naprawa{sep}(zob. regulamin)\nB. inne" in text
     assert coded_lines(["tak", "nie", "może"])[0] == ["A.", "B.", "C."]
 
 

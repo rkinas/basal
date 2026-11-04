@@ -89,32 +89,16 @@ def _lit(text):
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t") + '"'
 
 
-# the line breaks of str.splitlines() other than "\n" and "\r\n", as basal-serve indents an option after each of them
-# (prompt.option_text); written as llama.cpp's template lexer reads them: "\r" and "\f" as escapes, the rest as the
-# character itself (the lexer has no escape for it)
-_OTHER_BREAKS = ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
-
-
 STRING_T = '(t ~ "")'  # the option as a string, whatever the label or description was
 
 
-def _break_lit(c):
-    return {"\r": '"\\r"', "\x0c": '"\\f"'}.get(c) or '"' + c + '"'
-
-
-def _fang(var, specials, options=False):
+def _fang(var, specials):
     """Jinja expression for `var` as basal-serve shows it after prompt.defang (each special token broken by a
-    zero-width space after its first character) and, for an option, after prompt.option_text (every line break
-    followed by an indent)."""
+    zero-width space after its first character)."""
     from .prompt import _ZWSP
 
     for n in specials:
         var = f"{var}.replace({_lit(n)}, {_lit(n[0] + _ZWSP + n[1:])})"
-    if options:
-        var = f'{var}.replace("\\r\\n", "\\n")'
-        for c in _OTHER_BREAKS:
-            var = f'{var}.replace({_break_lit(c)}, "\\n")'
-        var = f'{var}.replace("\\n", "\\n   ")'
     return var
 
 
@@ -142,7 +126,7 @@ def systemone_template(head, mid, tail, trims=False, specials=()):
     labels A, B, ... (a choice in request order, noul true then false, score levels low to high). `trims`: the chat
     template strips the user text (llama.cpp's trim strips ASCII whitespace only, Python's strip all of it).
     `specials`: the special tokens of the tokenizer (prompt.special_names), broken in the state, the question and the
-    options as prompt.defang does; an option's line breaks are followed by an indent as prompt.option_text does."""
+    options as prompt.defang does."""
     from .prompt import CODES, PL_CHARS, PREFILL, TEMPLATES_2
 
     def turn(lang):
@@ -190,7 +174,7 @@ def systemone_template(head, mid, tail, trims=False, specials=()):
         "{%- elif d is none -%}{%- set t = k -%}",
         f"{{%- else -%}}{{%- set t = k ~ \": \" ~ {text('d')} -%}}",
         "{%- endif -%}",
-        f"{{%- set t = {_fang(STRING_T, specials, options=True)} -%}}",
+        f"{{%- set t = {_fang(STRING_T, specials)} -%}}",
         "{%- set ns.opts = ns.opts ~ (\"\" if loop.first else \"\\n\") ~ codes[loop.index0] ~ \". \" ~ t -%}",
         "{%- endfor -%}",
         "{%- if ns.pl -%}{{- " + turn("pl") + " -}}{%- else -%}{{- " + turn("en") + " -}}{%- endif -%}"])

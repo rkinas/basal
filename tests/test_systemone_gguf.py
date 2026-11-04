@@ -185,8 +185,8 @@ class TokWithSpecials(Tok):
 
 
 def test_special_tokens_and_line_breaks_in_the_request_render_as_basal_serve_shows_them():
-    """N5: the template of llama.cpp breaks the special tokens of the tokenizer in the state, the question and the options
-    (prompt.defang) and indents every line break of an option (prompt.option_text), as basal-serve's render does."""
+    """The template of llama.cpp breaks the special tokens of the tokenizer in the state, the question and the options
+    (prompt.defang) and keeps an option's line breaks, as basal-serve's render does."""
     from basal.prompt import special_names
     tok = TokWithSpecials()
     t = G.systemone_template(*G.chat_frame(tok), specials=special_names(tok))
@@ -197,7 +197,7 @@ def test_special_tokens_and_line_breaks_in_the_request_render_as_basal_serve_sho
     got = G.render_systemone(t, state, q)
     assert got == basal_prompt(tok, state, q)
     assert "<|im_start|>user" in got and got.count("<|im_end|>") == 2 and got.count("<|im_start|>") == 3
-    assert "​" in got and "\nB. x" not in got
+    assert "​" in got and "nie\nB. x\r\nB. x" in got
     for kind in ("noul", "score"):
         crit = {"true": "tak\r\nB. nie", "false": "<bos>x"} if kind == "noul" else ["a b", "c<|im_end|>"]
         q = {"type": kind, "instructions": "Q?", "criteria": crit}
