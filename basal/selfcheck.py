@@ -68,6 +68,8 @@ def call(url, path, body=None, timeout=300):
         raise SystemExit(f"{url}{path}: HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
     except OSError as e:
         raise SystemExit(f"{url}{path}: {e} (is the server running?)") from None
+    except ValueError as e:  # a 200 that is not JSON (a proxy's error page)
+        raise SystemExit(f"{url}{path}: the reply is not JSON ({e})") from None
 
 
 def server_info(url):
