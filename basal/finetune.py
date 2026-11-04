@@ -46,13 +46,26 @@ def in_holdout(group, holdout, seed):
 
 
 def split(path, holdout=0.25, seed=0):
-    """Labelled JSONL -> (train decisions with their bodies, held-out line texts, skipped counts). A line goes with the
-    group of its first decision."""
+    """Labelled JSONL -> (train decisions with their bodies, held-out line texts, skipped counts). Lines that share a
+    group on any of their decisions (a per-question "group") form one unit, so no group is on both sides; a unit goes
+    with the group of the first decision of its first line (a line that shares no group: its first decision's group)."""
     bodies, decisions = load(path)
     lines = read_lines(path)
-    side = {}
+    root, first, owner = {}, {}, {}  # line -> parent line (union-find), line -> its first group, group -> a line
+
+    def find(x):
+        while root[x] != x:
+            root[x] = root[root[x]]
+            x = root[x]
+        return x
     for d in decisions:
-        side.setdefault(d["line"], in_holdout(d["group"], holdout, seed))
+        n = d["line"]
+        root.setdefault(n, n)
+        first.setdefault(n, d["group"])
+        other = owner.setdefault(d["group"], n)
+        a, b = find(n), find(other)
+        root[max(a, b)] = min(a, b)  # the unit's root is its first line
+    side = {n: in_holdout(first[find(n)], holdout, seed) for n in root}
     train, skipped = [], {}
     for d in decisions:
         if side[d["line"]]:

@@ -27,6 +27,26 @@ def test_split_keeps_groups_together_and_trains_only_on_the_rest():
     assert finetune.split(DATA, holdout=0.25, seed=1)[1] != held                # the seed moves it
 
 
+def test_a_group_shared_by_lines_with_other_first_groups_stays_on_one_side(tmp_path):
+    """A per-question group joins the lines that share it, whatever their first group: no group is on both sides."""
+    q = {"type": "choice", "instructions": "Which?", "criteria": {"a": "Alpha", "b": "Beta"}, "gold": "a"}
+    train_g = next(str(n) for n in range(100) if not finetune.in_holdout(str(n), 0.25, 0))
+    held_g = next(str(n) for n in range(100) if finetune.in_holdout(str(n), 0.25, 0))
+    lines = [{"state": "s", "questions": {"first": dict(q, group=g), "second": dict(q, group="shared-customer")}}
+             for g in (train_g, held_g, train_g + "x", held_g + "y")]
+    lines += [{"state": "s", "group": f"alone{i}", "questions": {"q": q}} for i in range(40)]   # one group per line
+    p = tmp_path / "data.jsonl"
+    p.write_text("\n".join(map(json.dumps, lines)) + "\n", encoding="utf-8")
+    train, held, _ = finetune.split(p, 0.25, 0)
+    held_groups = {x.get("group") for line in held for x in json.loads(line)["questions"].values()} | \
+        {json.loads(line).get("group") for line in held}
+    train_groups = {d["group"] for _, d in train}
+    assert not (held_groups - {None}) & train_groups
+    assert {"shared-customer", train_g, held_g} <= train_groups    # the unit goes with its first line's first group
+    for i in range(40):  # a line that shares no group keeps the side of its own group, as before
+        assert (f"alone{i}" in train_groups) != finetune.in_holdout(f"alone{i}", 0.25, 0)
+
+
 def test_example_is_the_served_prompt_in_both_orders_and_the_gold_follows_the_order():
     body = {"state": "Anna writes: the app crashes.", "questions": {"dept": {
         "type": "choice", "instructions": "Which team?", "criteria": {"billing": "money", "tech": "bugs", "ship": "parcels"}}}}
