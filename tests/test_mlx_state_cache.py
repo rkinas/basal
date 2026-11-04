@@ -74,10 +74,11 @@ def test_a_cut_is_ignored_without_a_cache(tmp_path, forward):
 @FORWARDS
 def test_single_prompts_and_the_packed_path(tmp_path, forward):
     """A single prompt with a cut reuses the cached state (it would otherwise go to the batches without a prefix); with
-    --mlx-packed a cut group runs on the KV-cache path, an uncut one stays packed."""
+    --mlx-packed a cut group runs on the KV-cache path, an uncut one stays packed. (continuing: the two requests' row
+    counts give the same bits, so the second request may take the first one's state.)"""
     pytest.importorskip("mlx.core")
     m = tiny_llama(tmp_path)
-    be = cached_stub(tmp_path, packed=True, forward=forward)
+    be = cached_stub(tmp_path, packed=True, forward=forward, continuing=True)
     one = [TOKS[4]]
     first = be.run_shared([(one, [LIDS[4]], len(STATE))])[0]
     both = be.run_shared([(TOKS[:2], LIDS[:2], len(STATE)), (TOKS[2:4], LIDS[2:4])])
@@ -315,3 +316,23 @@ def test_a_single_prompt_runs_its_rest_in_one_forward(tmp_path, forward):
     seen.clear()
     assert be.run_shared([(one, [LIDS[4]], len(STATE))])[0] == cold and seen == [20]
     assert close(reference(m, one, [LIDS[4]]), cold)
+
+
+@FORWARDS
+def test_a_state_cached_by_another_request_gives_the_uncached_bits(tmp_path, forward):
+    """Several requests about one state (the usual use of the cache): the state is cached by a single question, then
+    read by a request of other questions. With 8-bit weights its answers equal the server's without the cache bit for
+    bit (docs/HARDWARE.md, Apple M4 state cache): an entry whose rows were computed at another row count is not
+    continued (MLXBackend._kernels), whether the root matches it exactly or only begins with it."""
+    pytest.importorskip("mlx.core")
+    tiny_llama(tmp_path)
+    plain, cached = mlx_stub(tmp_path, "q8", forward=forward), mlx_stub(tmp_path, "q8", forward=forward)
+    cached.state_cache = StateCache(2 ** 30)
+    one = [STATE + list(range(7, 26)) + [3]]
+    assert cached.run_shared([(one, LIDS[4:], len(STATE))])[0] == plain.run_shared([(one, LIDS[4:])])[0]
+    assert cached._kernels(len(one[0])) != cached._kernels(len(TOKS[0]))  # other bits at the group's row count
+    for _ in range(2):  # computed afresh at the group's row count, then from its own entry
+        assert cached.run_shared([(TOKS, LIDS, len(STATE))])[0] == plain.run_shared([(TOKS, LIDS)])[0]
+    assert cached.run_shared([(one, LIDS[4:], len(STATE))])[0] == plain.run_shared([(one, LIDS[4:])])[0]
+    st = cached.state_cache.stats()
+    assert (st["entries"], st["misses"], st["hits"]) == (2, 2, 2)  # one entry per row count, each found again

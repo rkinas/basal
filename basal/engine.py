@@ -3991,16 +3991,22 @@ class MLXBackend:
         alive, so the cache would hold more memory than its budget counts. ref: the rows of the request's uncached
         forward (_uncut). A cached entry is continued only when its rows have the bits this request's uncached forward
         gives them (the same _kernels for the row count it was computed for); otherwise the root is computed afresh
-        (and still replaces the entry it extends)."""
+        (and still replaces the entry it extends). The same holds for an entry of exactly this root: one computed at
+        other row counts (another request about the same state: a single question, then other questions) is not
+        returned; the root's first entry keeps the plain key (StateCache.has, the server's cut), an entry at other
+        bits is keyed by the root and its kernels."""
         mx, cache = self.mx, self.state_cache
+        refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
+        bits = self._kernels(ref)
+
+        def same_bits(old):
+            return self._kernels(refs.get(old)) == bits
         key = cache.key(root)
+        if bits and cache.has(key) and not same_bits(key):
+            key = cache.key(list(root) + [-1, *bits])
         kv = cache.get(key)
         if kv is not None:
             return kv
-        refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
-
-        def same_bits(old):
-            return self._kernels(refs.get(old)) == self._kernels(ref)
         initial, replaces = None, None
         found = cache.longest(root, use=same_bits)
         if found is not None:
