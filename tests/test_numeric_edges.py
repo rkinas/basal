@@ -13,6 +13,7 @@ from basal import bench
 from basal import calibrate as cal
 from basal import synth
 from basal import tasks
+from basal.client import Basal
 
 
 @contextlib.contextmanager
@@ -109,3 +110,14 @@ def test_z7_options_below_2_are_refused(options):
 
 def test_z7_two_options_still_work():
     assert len(synth.items(3, options=2)) == 3
+
+
+@pytest.mark.parametrize("backoff", [-1, float("nan"), True, "1"])
+def test_z8_a_bad_backoff_is_refused_in_the_constructor(backoff):
+    with pytest.raises(ValueError, match="backoff"):
+        Basal("http://basal/", backoff=backoff)
+
+
+@pytest.mark.parametrize("backoff", [0, 0.5, 2])
+def test_z8_a_good_backoff_is_accepted(backoff):
+    assert Basal("http://basal/", backoff=backoff).backoff == backoff

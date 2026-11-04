@@ -176,6 +176,8 @@ class _Client:
         self.defaults = {k: v for k, v in (("early_exit", early_exit), ("facts", facts), ("lang", lang)) if v}
         if not isinstance(retries, int) or retries < 0:
             raise ValueError(f"retries must be an integer >= 0, not {retries!r}")
+        if isinstance(backoff, bool) or not isinstance(backoff, (int, float)) or not backoff >= 0:
+            raise ValueError(f"backoff must be a number >= 0, not {backoff!r}")
         self.retries, self.backoff = retries, backoff
 
     def _body(self, state, questions, fields):
