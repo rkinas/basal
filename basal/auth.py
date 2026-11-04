@@ -86,8 +86,8 @@ def protect(app, keys, cors_origins=()):
             headers = dict(scope.get("headers", ()))
             authorization = headers.get(b"authorization", b"").decode("latin1")
             secret = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-            secret = headers.get(b"x-api-key", b"").decode("latin1") or secret
-            record = keys.check(secret) if secret else None
+            x_key = headers.get(b"x-api-key", b"").decode("latin1")
+            record = next((r for r in (keys.check(s) for s in (x_key, secret) if s) if r is not None), None)
             if record is None:
                 if path in ("/v1/decisions", "/decisions"):
                     body = {"error": {"message": "missing or invalid API key", "type": "authentication_error",
