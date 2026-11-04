@@ -99,3 +99,21 @@ def test_i16_exif_upside_down_is_applied():
 def test_i16_no_exif_or_normal_orientation_is_unchanged(orientation):
     out = media._image(jpeg((40, 20), orientation), 0)
     assert out.size == (40, 20) and red(out.getpixel((2, 2)))
+
+
+def frames(fmt, n):
+    ims = [Image.new("RGB", (16, 16), c) for c in [(255, 0, 0), (0, 255, 0), (0, 0, 255)][:n]]
+    b = io.BytesIO()
+    ims[0].save(b, fmt, save_all=True, append_images=ims[1:], duration=100, loop=0)
+    return b.getvalue()
+
+
+@pytest.mark.parametrize("fmt", ["GIF", "TIFF"])
+def test_i17_animated_or_multi_page_image_is_refused(fmt):
+    with pytest.raises(ValueError, match="frame"):
+        media._image(frames(fmt, 3), 0)
+
+
+@pytest.mark.parametrize("fmt", ["GIF", "TIFF", "PNG"])
+def test_i17_single_frame_image_is_accepted(fmt):
+    assert media._image(frames(fmt, 1), 0).size == (16, 16)

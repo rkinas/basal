@@ -61,6 +61,8 @@ def _image(raw, n):
         w, h = im.size
         if w * h > MAX_PIXELS:
             raise ValueError(f"media {n}: {w}x{h} pixels, more than {MAX_PIXELS:,}")
+        if getattr(im, "n_frames", 1) > 1:
+            raise ValueError(f"media {n}: {im.n_frames} frames (animated or multi-page); send a single frame")
         im.load()
         im = ImageOps.exif_transpose(im)  # a phone photo is stored sideways with an Orientation tag
         if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:  # onto white, not onto black
