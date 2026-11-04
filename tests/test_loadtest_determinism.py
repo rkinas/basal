@@ -1,11 +1,14 @@
 """basal-loadtest --determinism: the same requests alone and under load -> identical answers, max |dp| and decision
-flips (answers whose top option changed)."""
+flips (answers whose top option changed); the p95 of the sequential latencies."""
 import argparse
 import asyncio
+import itertools
 import json
 import sys
+import types
 
 import httpx
+import pytest
 
 from basal import loadtest
 
@@ -39,3 +42,20 @@ def test_seed_gives_other_synthetic_states(monkeypatch):
     assert seen == [0, 2]
     from basal import synth
     assert synth.items(3, 200, 1)[0]["state"] != synth.items(3, 200, 2)[0]["state"]
+
+
+@pytest.mark.parametrize("n_seq, p95", [(19, 19.0), (20, 19.0), (21, 20.0), (200, 190.0)])
+def test_p95_is_the_nearest_rank(monkeypatch, tmp_path, n_seq, p95):
+    """The sequential latencies are 1, 2, ... n_seq ms; p95 is the ceil(0.95 n)-th smallest: with 20 the 19th (19 ms),
+    not the largest; with 200 (the default --n-seq) the 190th, not the 191st."""
+    real = httpx.AsyncClient
+    monkeypatch.setattr(loadtest.httpx, "AsyncClient", lambda **kw: real(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"answers": {}})), **kw))
+    ticks = itertools.chain(*[(10.0 * k, 10.0 * k + (k + 1) / 1000) for k in range(n_seq)], itertools.count(1e6))
+    monkeypatch.setattr(loadtest, "time", types.SimpleNamespace(perf_counter=lambda: next(ticks)))
+    a = argparse.Namespace(url="http://test/v1/systemone", synthetic=None, questions=loadtest.DEFAULT_QUESTIONS,
+                           early_exit=None, questions_per_request=1, n_seq=n_seq, n_conc=4, concurrency=2,
+                           out=str(tmp_path / "l.json"), long_frac=0.0, seed=0)
+    asyncio.run(loadtest.run(a))
+    out = json.loads((tmp_path / "l.json").read_text(encoding="utf-8"))
+    assert round(out["p95_ms"], 6) == p95 and out["errors"] == 0, out
