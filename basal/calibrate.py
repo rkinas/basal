@@ -235,7 +235,12 @@ def field_correct(kind, value, gold):
     if value is None or gold is None:
         return value is None and gold is None
     if kind in ("number", "integer"):
-        return abs(float(value) - float(gold)) <= 1e-9 * max(1.0, abs(float(gold)))
+        if isinstance(value, int) and isinstance(gold, int):  # exact, also beyond a float's 53 bits
+            return value == gold
+        try:
+            return abs(float(value) - float(gold)) <= 1e-9 * max(1.0, abs(float(gold)))
+        except OverflowError:  # an integer beyond a float's range against a fraction
+            return False
     if kind == "string":
         norm = lambda s: " ".join(str(s).split()).casefold()
         return norm(value) == norm(gold)

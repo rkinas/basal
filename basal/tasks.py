@@ -17,6 +17,7 @@ calibration file ("task_thresholds"); basal-calibrate fits them on labelled task
 import json
 import math
 import re
+from decimal import Decimal, InvalidOperation
 
 from .prompt import lang_of, reads_request
 
@@ -276,6 +277,8 @@ NUM = re.compile(r"[-+]?\d[\d\s .,']*")
 
 
 def parse_number(text, integer=False):
+    """The first number in text -> an int (no decimal part: exact) or a float; None when there is none, integer=True
+    and it has a fractional part, or it does not fit a float (the field then reports an error)."""
     m = NUM.search((text or "").replace("\u2212", "-"))  # U+2212, the minus of typeset text, is a minus
     if not m:
         return None
@@ -288,14 +291,17 @@ def parse_number(text, integer=False):
     elif s.count(".") > 1:
         s = s.replace(".", "")
     try:
-        v = float(s)
-    except ValueError:
+        v = int(s) if "." not in s else Decimal(s)  # an int is exact: 9007199254740993 stays itself (not ...992)
+        f = float(v)
+    except (ValueError, InvalidOperation, OverflowError):  # no number, more digits than int() takes, beyond a float
         return None
-    if not math.isfinite(v):  # 309 digits or more are float inf, and int(inf) raises OverflowError
+    if not math.isfinite(f):  # 309 digits or more are beyond a float: no value, like text that is no number
         return None
+    if isinstance(v, int):
+        return v
     if integer:
-        return int(v) if v == int(v) else None
-    return int(v) if v == int(v) and "." not in s else v
+        return int(v) if v == v.to_integral_value() else None
+    return f
 
 
 # --- expansion ------------------------------------------------------------------------------------------------------

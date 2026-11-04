@@ -54,6 +54,21 @@ def test_parse_number(text, integer, value):
     assert parse_number(text, integer) == value
 
 
+def test_parse_number_keeps_integers_exact_and_refuses_overflow():
+    assert parse_number("9007199254740993") == 9007199254740993                  # a float would give ...992
+    assert parse_number("9007199254740993", integer=True) == 9007199254740993
+    assert parse_number("-12 345 678 901 234 567 zł", integer=True) == -12345678901234567
+    assert parse_number("9" * 400, integer=True) is None                        # beyond a float: no value (no 500)
+    assert parse_number("9" * 400 + ".5") is None                               # beyond a float: not a number
+    assert parse_number("9" * 5000) is None                                     # beyond int(): not a number
+    assert parse_number("2.0", integer=True) == 2 and isinstance(parse_number("2.0", integer=True), int)
+    assert parse_number("1 000,50") == 1000.5 and isinstance(parse_number("12"), int)
+    from basal.calibrate import field_correct
+    assert field_correct("integer", 9007199254740993, 9007199254740993)
+    assert not field_correct("integer", 9007199254740993, 9007199254740992)
+    assert not field_correct("number", int("9" * 400), 0.5)
+
+
 def test_schema_leaves():
     schema = {"type": "object", "properties": {
         "number": {"type": "string", "description": "invoice number"},
