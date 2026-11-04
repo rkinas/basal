@@ -103,15 +103,28 @@ The shipped files were fitted with the same steps:
    For prompt-format-2 models (see [FORMATS.md](FORMATS.md)) `choice` also gets a temperature per option-count bucket
    (2–10, 11–26, 27–255 options), fitted the same way where FIT has at least `--min-per-type` decisions in the bucket;
    a bucket with fewer keeps the shipped bucket temperature, else the type temperature applies to it.
-3. For each target error *r*, the threshold is the lowest confidence whose accepted FIT decisions have a one-sided 95%
-   Clopper–Pearson upper bound ≤ *r*, scanned from the most confident decision down (at least 50 accepted; equal
-   confidences are accepted or refused together). The candidates are the observed confidences, never a fixed grid.
+3. For each target error *r*, the threshold comes from a **fixed-sequence test** on FIT. The candidates are the
+   observed confidences, never a fixed grid; equal confidences are accepted or refused together. They are tested from
+   the most confident down, each with the one-sided 95% Clopper–Pearson upper bound of the decisions it accepts
+   ≤ *r*, and the test stops at the first level that fails: the threshold is the last level that passed. The first
+   level tested is set by the counts alone, before any outcome is read: the most confident level that accepts enough
+   decisions to meet the bound with one error (93 at 5%, 473 at 1%) when the type has at least twice that many FIT
+   decisions, else enough to meet it without an error (59 at 5%, 299 at 1%; at least 50). If it fails, the type has no
+   threshold at that target, even when a lower level would pass on its own: scanning on past a failure until some level passes
+   tests many times and certifies a type whose error is just above the target far more often than 5% of the time
+   (about 20% with 1,000 decisions at 5.1% error and a 5% target); stopping at the first failure keeps it at most 5%.
+   The cost is that errors among the very top decisions end the test there (one is allowed at the start when the
+   type has enough decisions); label more data, or check the CERT report, when a type you expected to certify does
+   not (the reason names the first level and its errors).
    A looser target never keeps a stricter threshold than a tighter one: a confidence certified at 1% is certified at
-   5% too, so where the 5% scan stops above the 1% threshold (it can pass early on a few very confident decisions
-   and stop on an error just below them), the 5% threshold is the 1% one, marked `floored_from`.
-   - It is certified per question type (`thresholds[r].per_type`). A temperature preserves the order of a type's
-     yes/no confidences (and, up to ties, its other confidences), so a type's certified coverage does not depend on
-     its temperature.
+   5% too, so where the 5% test stops above the 1% threshold (it starts on fewer, very confident decisions and can
+   stop on an error just below them), the 5% threshold is the 1% one, marked `floored_from`.
+   - It is certified per question type (`thresholds[r].per_type`), on the confidences as served. A temperature keeps
+     the order of a type's yes/no confidences, but not of its choice and score confidences: with three or more
+     options it can swap two decisions (logits [0, −3, −3] and [0, −2, −20]: 0.909 above 0.881 at T = 1, 0.403
+     below 0.512 at T = 10), and the option-count buckets of format 2 have their own temperatures. The temperatures
+     are fitted on the same FIT decisions, so for choice and score the order of the levels, and therefore the
+     certified coverage, can depend on them.
    - One threshold pooled over all types (`thresholds[r].confidence`, as in earlier files) is still written, marked
      `"pooled": "informational: ..."`, and never applied. It moves with the temperatures (a yes/no temperature of 1.7
      pushes yes/no confidences below the choice ones, and the pooled threshold then refuses yes/no decisions that are
@@ -269,11 +282,13 @@ its temperatures only, without thresholds, and the answers are marked `"calibrat
 ## How many items
 
 For the **temperatures**, a few dozen labelled decisions of a type already help (`--min-blend`, above); 50 FIT
-decisions, about 72 labelled ones, fit it fully. For the **thresholds**, a few hundred labelled decisions usually certify the 5% target. The 1% target needs at least 299 accepted FIT
-decisions without an error (473 with one error, 628 with two), so in practice about 1,000 labelled decisions of a
-type or more. The thresholds are certified per question type, so these numbers hold for each type on its own: 299
-accepted `noul` decisions without an error, and again 299 `choice` decisions, not 299 in total. An error made with
-very high confidence is accepted at every threshold below it and raises the count for its type. On one external set
+decisions, about 72 labelled ones, fit it fully. For the **thresholds**, a few hundred labelled decisions usually certify the 5% target. The 1% target needs the 299 most confident FIT
+decisions of a type without an error (the first level the fixed-sequence test checks; with at least 946 FIT decisions
+of the type it checks the top 473 and allows one error there; further down, 628 accepted with two errors pass too), so
+in practice about 1,000 labelled decisions of a type or more. The thresholds
+are certified per question type, so these numbers hold for each type on its own: 299 accepted `noul` decisions without
+an error, and again 299 `choice` decisions, not 299 in total. An error made with very high confidence, among the
+first level tested, leaves its type without a threshold at that target. On one external set
 of 1,254 Polish business decisions (FIT: 462 `noul`, 371 `choice`) no type of five basal-2.0 and basal-omni models
 was certified at 1%: the lowest bound of any type was 1.2%, and for the basal-omni models a few errors at confidence
 0.997–0.999 set that floor. With fewer, use the refitted temperatures and the 5% threshold, or route uncertain cases

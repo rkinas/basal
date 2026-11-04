@@ -43,9 +43,12 @@ Method (the one the shipped files were fitted with):
   * prompt-format-2 models (basal.json "prompt": 2): the file is calibration file 2 ("prompt": 2), and choice questions
     also get a temperature per option-count bucket (2-10, 11-26, 27-255) fitted the same way where FIT has at least
     --min-per-type decisions in the bucket (otherwise the shipped bucket temperature, else the type temperature);
-  * for each target error r, the threshold is the lowest confidence whose accepted FIT decisions (at least 50; equal
-    confidences accepted together) have a one-sided 95% Clopper-Pearson upper bound <= r; CERT reports its coverage,
-    error and bound. The threshold is fitted per type (thresholds[r].per_type[type], on the type's own decisions), and
+  * for each target error r, the threshold comes from a fixed-sequence test on FIT: the confidence levels (equal
+    confidences accepted together) are tested from the most confident down, each with the one-sided 95%
+    Clopper-Pearson upper bound of its accepted decisions <= r, and the scan stops at the first level that fails; the
+    threshold is the last level that passed (none when the first fails). The first level tested is set by the counts
+    alone: the first that accepts enough decisions to meet the bound with one error (93 at 5%, 473 at 1%) when the
+    type has at least twice that many FIT decisions, else without an error (59 / 299; at least 50). CERT reports its coverage, error and bound. The threshold is fitted per type (thresholds[r].per_type[type], on the type's own decisions), and
     once pooled over all types (thresholds[r].confidence, informational: basal-serve never applies it). A type
     without a certified threshold of its own ("confidence": null, or no entry) has every automatic action of act and
     tool with that max_error deferred ("no certified threshold for this type at this max_error"). A few hundred
@@ -565,17 +568,47 @@ def levels(cs):
     return out
 
 
+def within(e, n, risk, alpha=ALPHA):
+    """Whether the one-sided Clopper-Pearson upper bound of e errors in n is at most risk: P(X <= e) <= alpha for
+    X ~ Binomial(n, risk) (the bound is the p where that probability is alpha, and it falls as p grows), one binomial
+    tail instead of a bisection."""
+    if n == 0 or e / n > risk:
+        return False
+    while len(_LGAMMA) <= n + 1:
+        _LGAMMA.append(math.lgamma(len(_LGAMMA) + 1))
+    lf = np.array(_LGAMMA[: n + 1])
+    i = np.arange(e + 1)
+    t = lf[n] - lf[i] - lf[n - i] + i * math.log(risk) + (n - i) * math.log1p(-risk)
+    m = t.max()
+    return math.exp(m) * float(np.exp(t - m).sum()) <= alpha
+
+
+def start_level(lv, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
+    """The first level the fixed sequence tests, of levels lv (levels()): the most confident one that accepts enough
+    decisions to meet the bound with one error (93 at 5%, 473 at 1%) when there are at least twice that many decisions,
+    else enough to meet it without an error (59 / 299; fewer cannot meet it at all). One error allowed at the start
+    keeps a single error among the very top decisions from ending the test, where the data can afford it. The start
+    depends on the counts only, never on which decisions are correct -> its index, None when no level accepts that
+    many."""
+    need = accepted_needed(risk, 1, alpha, min_n)
+    if not lv or lv[-1][1] < 2 * need:
+        need = accepted_needed(risk, 0, alpha, min_n)
+    return next((k for k, (_, n, _) in enumerate(lv) if n >= need), None)
+
+
 def threshold(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
-    """Most permissive confidence whose accepted decisions have an upper bound <= risk, scanned from the most confident
-    level down and stopped at the first level that fails after one passed (fixed sequence, as for the shipped files)."""
+    """The certified threshold of a fixed-sequence test: the levels are tested from the most confident down, starting
+    at start_level (set by the counts alone, before any outcome is read), each at the one-sided bound <= risk, and the
+    scan stops at the first level that fails; the threshold is the last level that passed, None when the first one
+    fails. Testing in a fixed order and stopping at the first failure keeps the chance of certifying a threshold whose
+    accepted decisions are above `risk` at <= alpha; scanning on past failures until one level passes does not."""
+    lv = levels(cs)
+    k = start_level(lv, risk, alpha, min_n)
     thr = None
-    for c, n, e in levels(cs):
-        if n < min_n:
-            continue
-        if e / n <= risk and cp_upper(e, n, alpha) <= risk:
-            thr = c
-        elif thr is not None:
+    for c, n, e in (lv[k:] if k is not None else ()):
+        if not within(e, n, risk, alpha):
             break
+        thr = c
     return thr
 
 
@@ -658,9 +691,10 @@ def no_threshold_reason(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
     need = accepted_needed(risk, 0, alpha, min_n)  # accepted decisions without an error
     if len(cs) < need:
         return f"a {risk:g} bound needs at least {need} accepted FIT decisions without an error; FIT has {len(cs)}"
-    best = min(((cp_upper(e, n, alpha), n) for _, n, e in levels(cs) if n >= min_n), default=None)
-    return (f"no confidence level on FIT meets the bound (lowest upper bound {best[0]:.3f}, "
-            f"at {best[1] / len(cs):.0%} coverage)") if best else "no confidence level on FIT accepts enough decisions"
+    lv = levels(cs)
+    c, n, e = lv[start_level(lv, risk, alpha, min_n)]
+    return (f"the first level tested (confidence {c:.4f}, the top {n} FIT decisions, {e} error{'' if e == 1 else 's'}) "
+            f"does not meet the bound (upper bound {cp_upper(e, n, alpha):.3f}), and the fixed sequence stops there")
 
 
 def gate(cs, thr):
@@ -798,9 +832,12 @@ def fit_fallback(sets, T, min_per_set=30):
 
 
 def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk):
-    """The certified threshold of every type on its own decisions: a temperature changes neither the order of a type's
-    yes/no confidences nor (up to ties) of its other confidences, so the accepted decisions do not depend on it, while
-    one threshold pooled over the types moves with the temperatures of the others."""
+    """The certified threshold of every type on its own decisions, while one threshold pooled over the types moves
+    with the temperatures of the others. A temperature keeps the order of a type's yes/no confidences (the top
+    probability is monotone in T for two options), not of choice and score ones: with three or more options it can
+    swap two decisions (logits [0, -3, -3] and [0, -2, -20]: 0.909 > 0.881 at T = 1, 0.403 < 0.512 at T = 10), and
+    format-2 choice buckets have temperatures of their own. The levels are therefore ordered as served, with the
+    temperatures fitted on the same FIT decisions."""
     out = {}
     for t in PRIMS:
         cf = served([r for r in fit_rows if r["prim"] == t], temps, buckets)
@@ -846,9 +883,9 @@ def served_gate(rows, temps, buckets, cal, risk):
 
 def floor_thresholds(thresholds, targets):
     """A confidence certified at a target error is certified at every looser target too (its bound is below both), so a
-    looser target never keeps a stricter threshold than a tighter one: the scan stops at the first failing level after
-    a pass, and at a loose target it can pass early on a small top level and stop on a few errors below it (basal-omni
-    mini FP8, 17 Oct 2026: 5% at 0.9999 against 1% at 0.9587). Floors the pooled and per-type entries in place, marking
+    looser target never keeps a stricter threshold than a tighter one: the fixed sequence stops at its first failing
+    level, and at a loose target it starts on a small top level and can stop on a few errors below it (5% at 0.9999
+    against 1% at 0.9587). Floors the pooled and per-type entries in place, marking
     them "floored_from"; returns the targets whose entries changed."""
     changed = set()
     rs = sorted(float(r) for r in targets)
