@@ -161,6 +161,8 @@ def validate(name, objective, keys, threshold=None, min=None, max=None, exclusiv
     n = len(keys)
     if objective not in OBJECTIVES:
         raise ValueError(f"question {name!r}: objective must be one of {list(OBJECTIVES)}, got {objective!r}")
+    if objective in ("iou", "f1") and n > 256:  # (expected_scores; refused after the engine's run before)
+        raise ValueError(f"question {name!r}: objective {objective!r} takes at most 256 labels, got {n}")
     if exclusive is not None:
         if not isinstance(exclusive, list) or not all(isinstance(e, str) for e in exclusive):
             raise ValueError(f"question {name!r}: exclusive must be a list of label keys")
