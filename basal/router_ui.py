@@ -18,10 +18,10 @@ import sys
 import time
 from collections import deque
 from contextvars import ContextVar
-from importlib import metadata
 
 from .router import POLL_S, key_headers
-from .ui import END, FOLD, FONTS, HEADERS, HERE, MEMO_S, RECENT, RING, Hist, _ms, exact, redact
+from .ui import END, FOLD, MEMO_S, RECENT, RING, Hist, _ms, exact, redact, with_page
+from .ui import versions as ui_versions
 
 DECISIONS = ("/v1/systemone", "/v1/basal", "/v1/decisions")  # the router's routes whose requests are recorded
 REPLICA_TIMEOUT = 2.0  # seconds a replica's GET /ui/state may take; then the page shows what the router knows
@@ -55,13 +55,7 @@ def shown(name, value):
 
 
 def versions():
-    out = {}
-    for p in PACKAGES:
-        try:
-            out[p] = metadata.version(p)
-        except metadata.PackageNotFoundError:
-            pass
-    return out
+    return ui_versions(PACKAGES)  # (basal-serve's reader; no torch here, so no CUDA line)
 
 
 class RouterUI:
@@ -147,21 +141,8 @@ class RouterUI:
         return out + [Route("/ui/state", state)]
 
     def page(self, app):
-        """app with GET /ui (the page) and its fonts (basal-serve's) in front of it. The files are read once, here."""
-        from starlette.responses import Response
-        files = {"/ui": ((HERE / "router_ui.html").read_bytes(), "text/html; charset=utf-8", HEADERS)}
-        for name in FONTS:
-            kind = "font/woff2" if name.endswith(".woff2") else "text/plain; charset=utf-8"
-            files[f"/ui/fonts/{name}"] = ((HERE / "fonts" / name).read_bytes(), kind,
-                                          {"Cache-Control": "max-age=86400", "X-Content-Type-Options": "nosniff"})
-
-        async def with_page(scope, receive, send):
-            f = files.get(scope["path"]) if scope["type"] == "http" and scope["method"] == "GET" else None
-            if f is None:
-                await app(scope, receive, send)
-                return
-            await Response(f[0], media_type=f[1], headers=f[2])(scope, receive, send)
-        return with_page
+        """app with GET /ui (the page) and its fonts (basal-serve's) in front of it."""
+        return with_page(app, "router_ui.html")
 
     async def state(self, keys):
         """GET /ui/state: the JSON snapshot, built at most once per MEMO_S for each set of key headers (the replicas'

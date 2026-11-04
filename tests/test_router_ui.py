@@ -12,6 +12,7 @@ from starlette.testclient import TestClient
 
 from basal import router as R
 from basal import router_ui as RU
+from basal import ui as U
 
 KEY = "k-123"
 
@@ -237,10 +238,10 @@ def test_route_urls_are_redacted_like_the_others(monkeypatch):
 
 
 def test_page_loads_nothing_from_outside_and_stays_small():
-    page = (RU.HERE / "router_ui.html").read_text()
+    page = (U.HERE / "router_ui.html").read_text()  # (served by ui.with_page, with basal-serve's fonts)
     assert not re.search(r"(src|href)=[\"']?(https?:)?//", page) and "@import" not in page
     assert not re.search(r"fetch\(['\"]https?:", page)
-    size = len(page.encode()) + sum((RU.HERE / "fonts" / f).stat().st_size for f in RU.FONTS)
+    size = len(page.encode()) + sum((U.HERE / "fonts" / f).stat().st_size for f in U.FONTS)
     assert size <= 400_000
 
 

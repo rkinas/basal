@@ -126,10 +126,11 @@ def redact(name, value):
     return value
 
 
-def versions():
-    """Installed versions of the packages basal can serve with (metadata only: nothing is imported)."""
+def versions(packages=PACKAGES):
+    """Installed versions of the packages basal can serve with (metadata only: nothing is imported); basal-router's UI
+    asks for its own packages."""
     out = {}
-    for p in PACKAGES:
+    for p in packages:
         try:
             out[p] = metadata.version(p)
         except metadata.PackageNotFoundError:
@@ -310,6 +311,25 @@ def gpu(nvml, i, h):
             "sm_clock": _try(lambda: nvml.nvmlDeviceGetClockInfo(h, nvml.NVML_CLOCK_SM))}
 
 
+def with_page(app, html):
+    """app with GET /ui (html, a page next to this module) and its fonts in front of it, for basal-serve's UI and
+    basal-router's. The files are read once, here."""
+    from starlette.responses import Response
+    files = {"/ui": ((HERE / html).read_bytes(), "text/html; charset=utf-8", HEADERS)}
+    for name in FONTS:
+        kind = "font/woff2" if name.endswith(".woff2") else "text/plain; charset=utf-8"
+        files[f"/ui/fonts/{name}"] = ((HERE / "fonts" / name).read_bytes(), kind,
+                                      {"Cache-Control": "max-age=86400", "X-Content-Type-Options": "nosniff"})
+
+    async def page(scope, receive, send):
+        f = files.get(scope["path"]) if scope["type"] == "http" and scope["method"] == "GET" else None
+        if f is None:
+            await app(scope, receive, send)
+            return
+        await Response(f[0], media_type=f[1], headers=f[2])(scope, receive, send)
+    return page
+
+
 class UI:
     """The state behind the page of one basal-serve process. Built when the server is ready (start-up work such as
     reading package versions is done here, not at a request); http_app takes its routes, main its page."""
@@ -415,21 +435,8 @@ class UI:
 
     def page(self, app):
         """app with GET /ui (the page) and its fonts in front of it, open (the page asks for the key when GET
-        /ui/state needs one). The files are read once, here."""
-        from starlette.responses import Response
-        files = {"/ui": ((HERE / "ui.html").read_bytes(), "text/html; charset=utf-8", HEADERS)}
-        for name in FONTS:
-            kind = "font/woff2" if name.endswith(".woff2") else "text/plain; charset=utf-8"
-            files[f"/ui/fonts/{name}"] = ((HERE / "fonts" / name).read_bytes(), kind,
-                                          {"Cache-Control": "max-age=86400", "X-Content-Type-Options": "nosniff"})
-
-        async def with_page(scope, receive, send):
-            f = files.get(scope["path"]) if scope["type"] == "http" and scope["method"] == "GET" else None
-            if f is None:
-                await app(scope, receive, send)
-                return
-            await Response(f[0], media_type=f[1], headers=f[2])(scope, receive, send)
-        return with_page
+        /ui/state needs one)."""
+        return with_page(app, "ui.html")
 
     def fold(self, rows):
         """Requests answered since the last read (rows: the ring's rows, oldest first) into the totals since start,
