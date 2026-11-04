@@ -224,10 +224,11 @@ class Basal(_Client):
                  backoff=0.5, http=None, transport=None, api_key=None):
         super().__init__(url, early_exit, facts, lang, retries, backoff)
         self.http = http or httpx.Client(timeout=timeout, transport=transport)
-        if api_key:
-            self.http.headers["Authorization"] = f"Bearer {api_key}"
+        self.auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}  # per request: a shared http stays untouched
 
     def _send(self, method, url, **kw):
+        if self.auth:
+            kw["headers"] = {**self.auth, **kw.get("headers", {})}
         for attempt in range(self.retries + 1):
             r = self.http.request(method, url, **kw)
             if r.status_code == 200:
@@ -291,10 +292,11 @@ class AsyncBasal(_Client):
                  backoff=0.5, http=None, transport=None, api_key=None):
         super().__init__(url, early_exit, facts, lang, retries, backoff)
         self.http = http or httpx.AsyncClient(timeout=timeout, transport=transport)
-        if api_key:
-            self.http.headers["Authorization"] = f"Bearer {api_key}"
+        self.auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}  # per request: a shared http stays untouched
 
     async def _send(self, method, url, **kw):
+        if self.auth:
+            kw["headers"] = {**self.auth, **kw.get("headers", {})}
         for attempt in range(self.retries + 1):
             r = await self.http.request(method, url, **kw)
             if r.status_code == 200:
