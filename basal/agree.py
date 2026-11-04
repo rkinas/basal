@@ -158,14 +158,15 @@ def score(sets, ref, got, ind, gold, seed=0):
     row["agreement_ci"] = bootstrap(units, lambda s: sum(top(a) == top(b) for r, g in s for a, b in zip(r, g))
                                     / sum(len(r) for r, _ in s), seed=seed)
     rd, gd = decisions(flat(ref["single"])), decisions(flat(got["single"]))
-    row["decision_agreement"] = compare(rd, gd)["agreement"]
+    if rd:  # no single questions (--n-single 0): no decision agreement
+        row["decision_agreement"] = compare(rd, gd)["agreement"]
     if gold:  # (decision index, gold index) of the items with gold
         pairs = [(top(rd[i]) == y, top(gd[i]) == y) for i, y in gold]
         row["accuracy"] = sum(b for _, b in pairs) / len(pairs)
         row["reference_accuracy"] = sum(a for a, _ in pairs) / len(pairs)
         row["accuracy_diff_ci"] = bootstrap(pairs, lambda s: (sum(b for _, b in s) - sum(a for a, _ in s)) / len(s),
                                             seed=seed)
-    if ind is not None:
+    if ind:  # no multi readouts (--n-multi 0): no independence figure
         c = compare(flat(got["multi"]), ind)
         row["independence"] = c["agreement"]
         row["independence_ties"] = c["near_ties"]
@@ -329,7 +330,7 @@ def main(argv=None):
         ind = f"{r['independence']:.3f}" if "independence" in r else "-"
         print(f"{r['backend']:<{w}}{r['readouts']:>9}{r['agreement']:>8.4f}{ci:>16}"
               f"{str(r['near_ties']) + '/' + str(r['disagreements']):>7}{r['mean_dp']:>10.2e}{r['max_dp']:>10.2e}"
-              f"{r['decision_agreement']:>10.4f}{ind:>8}  {r['gate']}")
+              f"{r.get('decision_agreement', float('nan')):>10.4f}{ind:>8}  {r['gate']}")
         if "accuracy" in r:
             lo, hi = r["accuracy_diff_ci"]
             print(f"{'':<{w}}accuracy {r['accuracy']:.4f} vs {r['reference_accuracy']:.4f} "

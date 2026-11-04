@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from basal import agree
 from basal import bench
 from basal import calibrate as cal
 
@@ -68,3 +69,16 @@ def test_z3_too_few_questions_or_lat_n_0_stop_before_the_model(tmp_path, monkeyp
     monkeypatch.setattr(bench, "resolve", lambda *a, **k: object())
     with pytest.raises(SystemExit, match="at least 6 questions"):
         bench.main()
+
+
+def test_z4_no_single_questions_gives_a_row_without_decision_agreement():
+    readouts = [[0.6, 0.4], [0.3, 0.7]]
+    ref = {"single": [], "multi": [readouts]}
+    row = agree.score(("single", "multi"), ref, ref, None, None)
+    assert "decision_agreement" not in row and row["agreement"] == 1.0
+
+
+def test_z4_no_multi_readouts_gives_a_row_without_independence():
+    ref = {"single": [[[0.6, 0.4], [0.4, 0.6]]], "multi": []}
+    row = agree.score(("single", "multi"), ref, ref, [], None)
+    assert "independence" not in row and row["decision_agreement"] == 1.0
