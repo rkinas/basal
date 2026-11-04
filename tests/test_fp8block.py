@@ -26,6 +26,18 @@ def test_quantize_keeps_each_block_within_e4m3_rounding():
     assert torch.all(err <= bound * 1.0001)
 
 
+def test_block_gemm_grid_needs_whole_output_tiles():
+    """The block GEMM (FP8 and int8) stores whole 128-wide output tiles: one program per 128 x 128 tile, and N not a
+    multiple of 128 is refused (its last outputs would stay unwritten; fits() keeps every layer to multiples of 128).
+    There is one rule for both kernels, not a tile-width override that could never apply."""
+    from basal import int8block
+    assert fp8block.grid(1, 384) == (3,) and fp8block.grid(129, 384) == (6,) and fp8block.grid(0, 128) == (0,)
+    assert int8block.grid is fp8block.grid and int8block.CONFIG["BN"] == fp8block.CONFIG["BN"] == fp8block.BLOCK
+    for n in (200, 64):
+        with pytest.raises(ValueError, match="not a multiple of 128"):
+            fp8block.grid(4, n)
+
+
 def test_linear_is_close_to_the_bf16_product():
     torch.manual_seed(0)
     x, w = torch.randn(5, 3, 256), torch.randn(384, 256) / 16

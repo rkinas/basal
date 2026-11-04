@@ -21,9 +21,9 @@ import torch
 E4M3 = torch.float8_e4m3fn
 FP8_MAX = 448.0
 BLOCK = 128
-# the GEMM's tiles and launch: rows x outputs per program (BN: a multiple of 128 dividing N, else 128), row tiles per
-# group, warps, pipeline stages. Fixed for every shape (no autotuning: a CUDA graph replays what warm-up chose, and a
-# row's output must not depend on how many rows there are)
+# the GEMM's tiles and launch: rows x outputs per program (BN = BLOCK: every N here is a multiple of 128, fits), row
+# tiles per group, warps, pipeline stages. Fixed for every shape (no autotuning: a CUDA graph replays what warm-up
+# chose, and a row's output must not depend on how many rows there are)
 CONFIG = dict(BM=128, BN=128, GROUP_M=8, num_warps=8, num_stages=4)
 _KERNEL, _ACT = [], []
 
@@ -69,6 +69,15 @@ def _reference(q, s, w, ws, dtype):
     x = (q.float().view(M, K // BLOCK, BLOCK) * s[..., None]).view(M, K)
     y = (w.float().view(N // BLOCK, BLOCK, K // BLOCK, BLOCK) * ws[:, None, :, None]).view(N, K)
     return (x @ y.t()).to(dtype)
+
+
+def grid(M, N, config=CONFIG):
+    """The launch grid of the block GEMM (fp8block's and int8block's) for M rows and N outputs: one program per BM x BN
+    tile. N must be a multiple of BN: the kernel stores whole BN-wide tiles only, so the outputs past the last one would
+    stay unwritten (fits() keeps every weight to multiples of 128)."""
+    if N % config["BN"]:
+        raise ValueError(f"block GEMM: {N} outputs, not a multiple of {config['BN']}")
+    return ((M + config["BM"] - 1) // config["BM"] * (N // config["BN"]),)
 
 
 def _build():
@@ -118,11 +127,7 @@ def _build():
         N = w.shape[0]
         c = torch.empty((M, N), dtype=dtype, device=q.device)
         if M:
-            cf = dict(CONFIG)
-            if N % cf["BN"]:
-                cf["BN"] = BLOCK
-            grid = ((M + cf["BM"] - 1) // cf["BM"] * (N // cf["BN"]),)
-            wrap_triton(kernel)[grid](q, s, w, ws, c, M, N, K, BK=BLOCK, **cf)
+            wrap_triton(kernel)[grid(M, N)](q, s, w, ws, c, M, N, K, BK=BLOCK, **CONFIG)
         return c
 
     return op
