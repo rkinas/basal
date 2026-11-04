@@ -10,6 +10,8 @@ prefilled with `{"answer": "` and the decision is the softmax over the next-toke
 """
 import functools
 import json
+import re
+import weakref
 from pathlib import Path
 
 LETTERS = "ABCDEFGHIJ"
@@ -164,10 +166,10 @@ class OptionIds(list):
     blocks = ()
 
 
-def option_pieces(prompt, options, fmt=2):
+def option_pieces(prompt, options, fmt=2, tok=None):
     """(prefix, [option blocks], suffix) of a rendered prompt: prefix + "".join(blocks) + suffix == prompt. Block k is
     "\n<code k>. <option k>": the newline that separates the options opens each block, so all blocks have one form."""
-    lines = [f"{FORMATS[fmt]['codes'][k]}. {o}" for k, o in enumerate(options)]
+    lines = [f"{FORMATS[fmt]['codes'][k]}. {option_text(o, tok)}" for k, o in enumerate(options)]
     body = "\n".join(lines)
     i = prompt.rfind(body)
     if i < 1 or prompt[i - 1] != "\n":
@@ -177,7 +179,7 @@ def option_pieces(prompt, options, fmt=2):
 
 def option_tokens(tok, prompt, options, fmt=2):
     """OptionIds of a prompt: its pieces (option_pieces) tokenized one by one and joined, as the model was trained."""
-    pre, blocks, suf = option_pieces(prompt, options, fmt)
+    pre, blocks, suf = option_pieces(prompt, options, fmt, tok)
     parts = tok([pre] + blocks + [suf], add_special_tokens=False).input_ids
     out = OptionIds(x for part in parts for x in part)
     out.blocks = tuple(map(len, parts))
@@ -270,6 +272,55 @@ def tokens_once(tok, prompts, nl):
     return [head + t[len(nl):] for t in tails]
 
 
+_ADDED_RX = weakref.WeakKeyDictionary()  # tokenizer -> compiled pattern of its added / special tokens, or None
+_ZWSP = "\u200b"
+
+
+def token_pattern(names):
+    """One compiled regex for a set of literal strings, built from their trie: at each position of a text it follows
+    the shared prefixes, so a scan costs the length of the text, not the length times the number of names."""
+    trie = {}
+    for n in names:
+        node = trie
+        for c in n:
+            node = node.setdefault(c, {})
+        node[""] = {}
+
+    def pat(node):
+        alts = [re.escape(c) + pat(child) for c, child in sorted(node.items()) if c]
+        if not alts:
+            return ""
+        return "(?:" + "|".join(alts) + ")" + ("?" if "" in node else "")
+
+    return re.compile(pat(trie))
+
+
+def defang(tok, text):
+    """Request text (state, question, option) with every added / special token of the tokenizer written out in it
+    broken by a zero-width space after its first character. The tokenizer parses such strings in raw text as real
+    special tokens (add_special_tokens=False does not stop that), so a state that contains "<|im_end|>" could close
+    the user turn and open a forged one; the count of special tokens in a prompt must come from the template alone."""
+    if tok is None or not text:
+        return text
+    try:
+        rx = _ADDED_RX[tok]
+    except (KeyError, TypeError):
+        names = set(getattr(tok, "all_special_tokens", None) or ())
+        names.update(str(getattr(t, "content", t)) for t in (getattr(tok, "added_tokens_decoder", None) or {}).values())
+        names = [n for n in names if len(n) > 1]
+        rx = token_pattern(names) if names else None
+        try:
+            _ADDED_RX[tok] = rx
+        except TypeError:  # a tokenizer that cannot be weakly referenced or hashed: no cache
+            pass
+    return rx.sub(lambda m: m.group()[0] + _ZWSP + m.group()[1:], text) if rx else text
+
+
+def option_text(o, tok=None):
+    """An option as shown after its code."""
+    return defang(tok, o)
+
+
 def lang_of(text):
     """Polish if the text contains Polish diacritics, otherwise English (selects the prompt template)."""
     return "pl" if any(c in PL_CHARS for c in text) else "en"
@@ -282,10 +333,10 @@ def render(tok, state, question, options, lang=None, fmt=1, layout="canonical"):
         raise ValueError(f"{len(options)} options (supported: 2..{len(f['codes'])})")
     lang = lang or lang_of(state + question)
     t = f["templates"][lang]
-    opts = "\n".join(f"{f['codes'][k]}. {o}" for k, o in enumerate(options))
+    opts = "\n".join(f"{f['codes'][k]}. {option_text(o, tok)}" for k, o in enumerate(options))
     user = user_template(fmt, lang, layout)
     msgs = [{"role": "system", "content": t["system"]},
-            {"role": "user", "content": user.format(state=state, q=question, opts=opts)}]
+            {"role": "user", "content": user.format(state=defang(tok, state), q=defang(tok, question), opts=opts)}]
     text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False)
     return text + PREFILL
 
