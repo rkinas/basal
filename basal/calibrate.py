@@ -529,16 +529,23 @@ def ece(cs, bins=10):
     return float(e)
 
 
-_LGAMMA = [0.0]
+_LF = np.zeros(1)  # _LF[i] = log(i!), grown on demand
+
+
+def log_factorials(n):
+    """log(i!) for i = 0..n at least: one table grown by doubling (a slice of it costs nothing, where a list turned
+    into an array on every bound cost O(n) and made a threshold scan over n decisions O(n^2))."""
+    global _LF
+    if len(_LF) <= n:
+        _LF = np.array([math.lgamma(i + 1) for i in range(max(n + 1, 2 * len(_LF)))])
+    return _LF
 
 
 def cp_upper(e, n, alpha=ALPHA):
     """One-sided Clopper-Pearson upper bound of a binomial error rate (bisection on the binomial CDF, in log space)."""
     if n == 0:
         return 1.0
-    while len(_LGAMMA) <= n + 1:
-        _LGAMMA.append(math.lgamma(len(_LGAMMA) + 1))  # _LGAMMA[i] = log(i!)
-    lf = np.array(_LGAMMA[: n + 1])
+    lf = log_factorials(n)
     i = np.arange(e + 1)
     comb = lf[n] - lf[i] - lf[n - i]
 
@@ -574,9 +581,7 @@ def within(e, n, risk, alpha=ALPHA):
     tail instead of a bisection."""
     if n == 0 or e / n > risk:
         return False
-    while len(_LGAMMA) <= n + 1:
-        _LGAMMA.append(math.lgamma(len(_LGAMMA) + 1))
-    lf = np.array(_LGAMMA[: n + 1])
+    lf = log_factorials(n)
     i = np.arange(e + 1)
     t = lf[n] - lf[i] - lf[n - i] + i * math.log(risk) + (n - i) * math.log1p(-risk)
     m = t.max()
@@ -601,14 +606,16 @@ def threshold(cs, risk, alpha=ALPHA, min_n=MIN_ACCEPTED):
     at start_level (set by the counts alone, before any outcome is read), each at the one-sided bound <= risk, and the
     scan stops at the first level that fails; the threshold is the last level that passed, None when the first one
     fails. Testing in a fixed order and stopping at the first failure keeps the chance of certifying a threshold whose
-    accepted decisions are above `risk` at <= alpha; scanning on past failures until one level passes does not."""
+    accepted decisions are above `risk` at <= alpha; scanning on past failures until one level passes does not. A
+    level that adds no error to a passing one passes too (more decisions, the same errors: a lower bound), so the
+    bound is computed only where errors are added."""
     lv = levels(cs)
     k = start_level(lv, risk, alpha, min_n)
-    thr = None
+    thr, passed = None, None  # passed: the errors of the last level that passed
     for c, n, e in (lv[k:] if k is not None else ()):
-        if not within(e, n, risk, alpha):
+        if e != passed and not within(e, n, risk, alpha):
             break
-        thr = c
+        thr, passed = c, e
     return thr
 
 

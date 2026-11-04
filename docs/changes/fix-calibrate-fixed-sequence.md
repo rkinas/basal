@@ -6,6 +6,8 @@
   decisions to meet the bound with one error (93 at 5%, 473 at 1%) when the type has at least twice that many, else
   without an error (59 / 299). A type with errors among its most confident decisions can now get no threshold where it
   got one before; the reason names the first level tested. The docs no longer say that a temperature keeps the order
-  of choice and score confidences (it does for yes/no only). The bound is a binomial tail instead of a bisection: a
-  task with 50,000 claims and no threshold fits in 0.2 s instead of 18 s. Shipped calibration files are unchanged; a
+  of choice and score confidences (it does for yes/no only). The scan is fast on large sets: the bound is a binomial
+  tail instead of a bisection, the log-factorial table is no longer copied for every level, and a level that adds no
+  error needs no bound (a type or task with 50,000 decisions took about a minute, now under a second). Each
+  certificate holds for one type at one target error, as the docs now say. Shipped calibration files are unchanged; a
   refit can certify less.
