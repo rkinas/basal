@@ -68,6 +68,33 @@ def test_code_logits_read_the_option_codes_at_the_last_position_with_the_softcap
     assert finetune.accuracy(Toy(), ex, None, "cpu") == 1.0
 
 
+@pytest.mark.parametrize("softcap", [None, 30.0])
+def test_code_logits_stay_fp32_under_the_training_autocast(softcap):
+    """The training steps run the forward under autocast (bf16 / fp16); the code readout stays the served one, in fp32
+    (under autocast the head's input times the code rows was a bf16 product: logits of 16-32 step by 0.125)."""
+    h = torch.tensor([[[1.2345, -0.777, 2.5, 0.111]]])
+
+    class Toy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.head = torch.nn.Linear(4, 8, bias=True)
+            with torch.no_grad():
+                self.head.weight.copy_(torch.linspace(-3, 3, 32).view(8, 4) * 7.123)
+                self.head.bias.copy_(torch.linspace(-1, 1, 8) / 3)
+
+        def get_output_embeddings(self):
+            return self.head
+
+        def forward(self, input_ids, logits_to_keep=None):
+            return SimpleNamespace(logits=self.head(h))
+    m, codes = Toy(), [5, 3, 0]
+    want = h[0, -1] @ m.head.weight[codes].T + m.head.bias[codes]
+    want = torch.tanh(want / softcap) * softcap if softcap else want
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        got = finetune.code_logits(m, [1], codes, softcap, "cpu")
+    assert got.dtype == torch.float32 and torch.allclose(got, want, rtol=0, atol=1e-5)
+
+
 @pytest.mark.parametrize("kind", ["gemma", "llama"])
 def test_code_logits_are_the_served_readout_capped_once(kind):
     """On real model classes: a Gemma 4 forward caps its logits itself (final_logit_softcapping), a Llama one has no
