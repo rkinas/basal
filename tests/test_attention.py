@@ -46,7 +46,7 @@ def test_graph_backend_tells_the_attention_choice_about_fp8(monkeypatch):
     def stop(choice, fp8=False):
         seen.append((choice, fp8))
         raise RuntimeError("stop")   # before any model is loaded
-    monkeypatch.setattr(E, "set_attention", stop)
+    monkeypatch.setattr(E, "resolve_attention", stop)  # (graph_options resolves --attn before anything is loaded)
     monkeypatch.setattr(E, "fp8_refused", lambda: None)  # a GPU that runs torchao FP8 (sm 8.9+)
     for checkpoint, quant in ((True, None), (False, "fp8"), (False, None), (False, "nvfp4")):
         monkeypatch.setattr(E, "modelopt_fp8", lambda d, c=checkpoint: c)

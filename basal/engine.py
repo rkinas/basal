@@ -456,16 +456,22 @@ def gemma_fast_kernels():
     return None
 
 
+def resolve_attention(choice="auto", fp8=False):
+    """The kernel --attn names (auto: auto_attention) when it runs here, else ValueError; nothing is set."""
+    impl = auto_attention(fp8) if choice == "auto" else choice
+    why = attention_available(impl)
+    if why:
+        raise ValueError(f"--attn {impl}: {why}")
+    return impl
+
+
 def set_attention(choice="auto", fp8=False):
     """Choose the kernel of the causal forwards without a mask (plain prompts and the root pass of branched units):
     fa2 = torch SDPA's built-in FlashAttention 2, fa3 = FlashAttention 3 in SDPA's flash slot (torch's registry),
     fa4 = flash-attn-4 called directly, cudnn = SDPA's cuDNN kernel. Masked attention (the branch pass) and fp32 keep
     SDPA. Process-wide; call before any graph is captured. fp8: the model runs FP8 GEMMs (auto_attention).
     -> the attention in use."""
-    impl = auto_attention(fp8) if choice == "auto" else choice
-    why = attention_available(impl)
-    if why:
-        raise ValueError(f"--attn {impl}: {why}")
+    impl = resolve_attention(choice, fp8)
     if _ATTN["impl"] == "fa3" and impl != "fa3":
         torch.nn.attention.restore_flash_attention_impl()
     if impl == "fa3" and _ATTN["impl"] != "fa3":
@@ -1134,6 +1140,71 @@ def kv_dequant(e, bits, keys):
     return (q.view(H, T, D // G, G).float() * step.float() + lo.float()).view(H, T, D).to(dtype)
 
 
+class GraphOptions(NamedTuple):
+    """GraphBackend's options as graph_options resolved them."""
+    two_way: dict           # basal.json "two_way" limits, or None
+    batches: str
+    fp8_checkpoint: bool    # a ModelOpt FP8 checkpoint (its weights are FP8 as stored)
+    fp8_scaling: str
+    attn: str               # the kernel of the causal forwards (resolve_attention)
+
+
+def graph_options(model_dir, dtype="bfloat16", quant=None, compile=False, attn="auto", lean=False, tree="dense",
+                  state_cache_gb=0, prefix=False, batches="default", readout_layer="off", template="off",
+                  gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=None, nvfp4_amax=None, quant_load="gpu"):
+    """Every check of GraphBackend's options that needs no weights, in one pure function (ValueError with the reason;
+    only the model's config / basal.json and what this machine runs are read): recurrent models, two-way reading, the
+    quantisations, --compile-scope layer, --fp8-scaling / --fp8-bf16-layers, --quant-load, --attn, --batches compact and
+    --gemma-attn. -> GraphOptions, the values the engine then applies."""
+    from . import gemma4_graph
+    what = recurrent_layers(model_dir)
+    if what:
+        from .gdn_graph import is_gdn
+        raise ValueError(recurrent_refused(model_dir, what, is_gdn(model_dir)))
+    two_way = model_two_way(model_dir)
+    if two_way:
+        why = graph_two_way_refused(model_dir, state_cache_gb, prefix, batches, lean, tree, readout_layer, template)
+        if why:
+            raise ValueError(f"{model_dir}: {why}")
+        batches = "default" if batches == "auto" else batches
+    if quant == "fp8" and fp8_refused():
+        raise ValueError(fp8_refused())
+    if quant == "int8":
+        from .int8block import int8_refused
+        if int8_refused():
+            raise ValueError(int8_refused())
+    gemma = gemma4_graph.is_gemma4_dir(model_dir)
+    ckpt = modelopt_fp8(model_dir)
+    if compile == "layer":  # measured on the bf16 Llama forward only
+        what = "FP8 / NVFP4 weights" if quant or ckpt else "Gemma 4" if gemma else "--lean" if lean else None
+        if what:
+            raise ValueError(f"--compile-scope layer: the bf16 Llama forward only, not {what}")
+    fp8_scaling = fp8_scaling_of(fp8_scaling, quant, gemma, ckpt)
+    if fp8_scaling == "block" and (quant != "fp8" or not gemma):
+        raise ValueError("--fp8-scaling block: --mode fp8 with basal-omni (Gemma 4) only")
+    if fp8_bf16_layers is not None and fp8_bf16_layers < 0:
+        raise ValueError(f"--fp8-bf16-layers {fp8_bf16_layers}: give 0 or more layers")
+    if gemma and (fp8_scaling == "block" or quant in ("nvfp4", "int8")):
+        why = omni_quant_refused(model_dir, quant, nvfp4_amax)
+        if why:
+            raise ValueError(why)
+    if quant == "int8" and not gemma:
+        raise ValueError("--mode int8 (block-scaled int8 weights and activations) is for basal-omni (Gemma 4)")
+    why = quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma, ckpt)
+    if why:
+        raise ValueError(why)
+    # the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs; Gemma 4 picks its own)
+    impl = resolve_attention(attn, fp8=ckpt or quant == "fp8" and fp8_scaling != "block")
+    if batches == "compact" and impl != "fa3":
+        flex = gemma_attn == "flex" or gemma_attn == "auto" and compile and gemma_fast_kernels() == "flex"
+        why = (None if flex else GEMMA_COMPACT) if gemma else torch_varlen_available(getattr(torch, dtype))
+        if why:
+            raise ValueError(compact_refused(why))
+    if gemma_attn in ("flex", "fa3") and attention_available("flex") and gemma:
+        raise ValueError(f"--gemma-attn {gemma_attn}: {attention_available('flex')}")  # fa3: flex in global layers
+    return GraphOptions(two_way, batches, ckpt, fp8_scaling, impl)
+
+
 class StateCache:
     """Keys and values of request states (the root of a unit cut at the state boundary: template and state), keyed by a
     hash of their token ids, kept on the GPU within a byte budget with least-recently-used eviction. A request whose
@@ -1391,25 +1462,12 @@ class GraphBackend(EagerBackend):
                  global_attn="flex", adapter=None):
         if compile:
             persist_compile_cache()  # before anything compiles
-        what = recurrent_layers(model_dir)  # before anything is loaded
-        if what:
-            from .gdn_graph import is_gdn
-            raise ValueError(recurrent_refused(model_dir, what, is_gdn(model_dir)))
+        # every option checked before anything is loaded (graph_options); then the process-wide settings
+        opt = graph_options(model_dir, dtype, quant, compile, attn, lean, tree, state_cache_gb, prefix, batches,
+                            readout_layer, template, gemma_attn, fp8_scaling, fp8_bf16_layers, nvfp4_amax, quant_load)
         # basal.json "two_way" (a model trained with two-way reading): every prompt is a plain row of its own, read
         # two-way in the global layers where it fits the limits (Gemma4Graph._plain_masks), nothing shared or cached
-        self.two_way = model_two_way(model_dir)
-        if self.two_way:
-            why = graph_two_way_refused(model_dir, state_cache_gb, prefix, batches, lean, tree, readout_layer,
-                                        template)
-            if why:
-                raise ValueError(f"{model_dir}: {why}")
-            batches = "default" if batches == "auto" else batches
-        if quant == "fp8" and fp8_refused():
-            raise ValueError(fp8_refused())
-        if quant == "int8":
-            from .int8block import int8_refused
-            if int8_refused():
-                raise ValueError(int8_refused())
+        self.two_way, batches = opt.two_way, opt.batches
         torch.backends.cuda.enable_cudnn_sdp(False)  # before capture: a captured graph keeps its attention kernel
         from . import gemma4_graph
         # every captured graph keeps its own cuBLAS workspace (32 MB on an H100): basal-omni-1.1-max's ~400 graphs held
@@ -1419,40 +1477,10 @@ class GraphBackend(EagerBackend):
         # handle is made, so set before any GEMM; a value the user set is kept, and --deterministic has set :4096:8 before
         # (deterministic cuBLAS needs it)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:2")
-        self.fp8_checkpoint = modelopt_fp8(model_dir)  # the -FP8 repositories: FP8 weights with static scales
-        if compile == "layer":  # measured on the bf16 Llama forward only (refused before the weights are loaded)
-            what = ("FP8 / NVFP4 weights" if quant or self.fp8_checkpoint else
-                    "Gemma 4" if gemma4_graph.is_gemma4_dir(model_dir) else "--lean" if lean else None)
-            if what:
-                raise ValueError(f"--compile-scope layer: the bf16 Llama forward only, not {what}")
-        fp8_scaling = fp8_scaling_of(fp8_scaling, quant, gemma4_graph.is_gemma4_dir(model_dir), self.fp8_checkpoint)
-        if fp8_scaling == "block" and (quant != "fp8" or not gemma4_graph.is_gemma4_dir(model_dir)):
-            raise ValueError("--fp8-scaling block: --mode fp8 with basal-omni (Gemma 4) only")
-        if fp8_bf16_layers < 0:
-            raise ValueError(f"--fp8-bf16-layers {fp8_bf16_layers}: give 0 or more layers")
-        if gemma4_graph.is_gemma4_dir(model_dir) and (fp8_scaling == "block" or quant in ("nvfp4", "int8")):
-            why = omni_quant_refused(model_dir, quant, nvfp4_amax)
-            if why:
-                raise ValueError(why)
+        self.fp8_checkpoint, fp8_scaling = opt.fp8_checkpoint, opt.fp8_scaling
         self.fp8_scaling, self.fp8_bf16_layers = fp8_scaling, fp8_bf16_layers
-        if quant == "int8" and not gemma4_graph.is_gemma4_dir(model_dir):
-            raise ValueError("--mode int8 (block-scaled int8 weights and activations) is for basal-omni (Gemma 4)")
-        why = quant_load_refused(quant_load, quant, fp8_scaling, nvfp4_amax, gemma4_graph.is_gemma4_dir(model_dir),
-                                 self.fp8_checkpoint)
-        if why:
-            raise ValueError(why)
         self.graph_memory = graph_memory_bytes(graph_memory_gb)
-        # likewise: the kernel of the causal forwards (--attn; auto keeps FlashAttention 2 for FP8 GEMMs; the Gemma 4
-        # forward picks its own kernels, --gemma-attn)
-        self.attn = set_attention(attn, fp8=self.fp8_checkpoint or quant == "fp8" and fp8_scaling != "block")
-        if batches == "compact" and self.attn != "fa3":  # refused before the weights are loaded
-            flex = gemma_attn == "flex" or gemma_attn == "auto" and compile and gemma_fast_kernels() == "flex"
-            why = ((None if flex else GEMMA_COMPACT) if gemma4_graph.is_gemma4_dir(model_dir)
-                   else torch_varlen_available(getattr(torch, dtype)))
-            if why:
-                raise ValueError(compact_refused(why))
-        if gemma_attn in ("flex", "fa3") and attention_available("flex") and gemma4_graph.is_gemma4_dir(model_dir):
-            raise ValueError(f"--gemma-attn {gemma_attn}: {attention_available('flex')}")  # fa3: flex in global layers
+        self.attn = set_attention(opt.attn)
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         if self.fp8_checkpoint:

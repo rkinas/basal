@@ -136,7 +136,7 @@ def test_gemma_compact_rows_need_fa3_or_flex(tmp_path, monkeypatch, gemma_attn, 
     def loaded(*_):
         raise RuntimeError("loading")
     monkeypatch.setattr("basal.engine.AutoTokenizer.from_pretrained", loaded)
-    monkeypatch.setattr("basal.engine.set_attention", lambda *_, **__: "fa2")
+    monkeypatch.setattr("basal.engine.resolve_attention", lambda *_, **__: "fa2")
     monkeypatch.setattr(engine_module, "attention_available", lambda impl: None)
     monkeypatch.setattr(engine_module, "gemma_fast_kernels", lambda: "flex")
     with pytest.raises(ValueError if refused else RuntimeError, match="fa3 \\(Hopper\\) or flex" if refused else "loading"):
