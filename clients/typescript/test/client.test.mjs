@@ -181,10 +181,10 @@ describe("errors through the whole response (a fetch of the test's own)", () => 
     await assert.rejects(new Basal({ fetch: slow }).health(ac.signal), (e) => !(e instanceof BasalError) && e.message === "mine");
   });
 
-  test("statuses and malformed JSON keep their kinds; only 503 is retryable", async () => {
+  test("statuses and malformed JSON keep their kinds; 429, 502, 503 and 504 are retryable", async () => {
     await assert.rejects(new Basal({ fetch: respond("not json") }).health(), (e) => e.kind === "server" && e.status === 200 && !e.retryable);
     for (const [status, kind, retryable] of [[422, "validation", false], [500, "server", false], [503, "unavailable", true],
-      [429, "server", false], [502, "server", false], [504, "server", false]])
+      [429, "server", true], [502, "server", true], [504, "server", true]])
       await assert.rejects(new Basal({ fetch: respond('{"error": "x"}', status) }).health(),
         (e) => e.status === status && e.kind === kind && e.retryable === retryable && e.detail === "x");
   });

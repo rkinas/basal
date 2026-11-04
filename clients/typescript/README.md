@@ -58,7 +58,7 @@ Every failure throws a `BasalError` with `kind`, `status`, `detail` (the server'
 |---|---|---|
 | `validation` | HTTP 422: the request must change | no |
 | `unavailable` | HTTP 503: the GPU ran out of memory, or the server is still starting | yes |
-| `server` | HTTP 500 and any other status | no |
+| `server` | HTTP 500 and any other status | only 429, 502 and 504 (a proxy or router in front) |
 | `timeout`, `network` | no answer, or the response broke off (`timeout` covers the body too) | yes |
 
 Both error formats (`{"error": "..."}` and `basal-serve --error-format openai`) are read. A request you cancel with

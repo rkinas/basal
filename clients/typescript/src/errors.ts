@@ -1,9 +1,12 @@
 /** What went wrong:
  *  - "validation" (422): the request is invalid and must be changed;
  *  - "unavailable" (503): the GPU ran out of memory, or the server is still starting; a retry later or on another server may succeed;
- *  - "server" (500 and other statuses);
+ *  - "server" (500 and other statuses; 429, 502 and 504, from a proxy or a router in front, are retryable);
  *  - "timeout" / "network": no answer, or the response broke off (the request may or may not have run). */
 export type ErrorKind = "validation" | "unavailable" | "server" | "timeout" | "network";
+
+/** Statuses a later retry may get past: too many requests, and a gateway (proxy, router) without an answer. */
+const RETRYABLE = new Set([429, 502, 503, 504]);
 
 export class BasalError extends Error {
   readonly kind: ErrorKind;
@@ -26,9 +29,10 @@ export class BasalError extends Error {
     this.body = opts.body;
   }
 
-  /** True for the errors where the same request may succeed later (503, timeout, network). */
+  /** True for the errors where the same request may succeed later (429, 502, 503, 504, timeout, network). */
   get retryable(): boolean {
-    return this.kind === "unavailable" || this.kind === "timeout" || this.kind === "network";
+    return this.kind === "unavailable" || this.kind === "timeout" || this.kind === "network" ||
+      (this.status !== undefined && RETRYABLE.has(this.status));
   }
 }
 
