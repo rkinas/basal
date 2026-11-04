@@ -49,6 +49,10 @@ Off by default (the replicas' answers then pass through untouched):
   --route SCRIPT=URL[,URL]                requests whose state is mostly in that script (latin, cyrillic, greek,
                                           arabic, hebrew, cjk) go to those replicas instead
 
+With --escalate, --blend or --fallback, the questions asked again go without their ask_if / depends_on, and ask_if is
+applied to the final answers: a question whose gate a replaced answer fails is null (usage.skipped), and one whose
+gate it now passes is asked of the first replica and goes through the same levels.
+
   basal-router --replicas http://127.0.0.1:8001 http://127.0.0.1:8002 --port 8000
   basal-router --gpus 0,1,2,3 --port 8000 -- --model Remek/basal-2.0-mini --mode fast   (starts one basal-serve per
                                                                                           GPU on ports 8001..)
@@ -161,6 +165,71 @@ def blend_answer(answer, members):
     out["blend"] = {"models": [m for _, m, _ in members], "weights": [w for w, _, _ in members]}
     out["calibrated"] = False
     return out
+
+
+GATES = ("ask_if", "depends_on")
+
+
+def ungated(questions, names):
+    """The named questions of a request without ask_if / depends_on: what a cascade level or a blend model is asked
+    again (the questions a gate names may not be among them; the router applies the gates to the final answers)."""
+    return {q: {k: v for k, v in questions[q].items() if k not in GATES} if isinstance(questions[q], dict)
+            else questions[q] for q in names}
+
+
+def gate_order(questions):
+    """[(name, ask_if)] of the questions with an ask_if, each after every question its ask_if names; [] without gates
+    or when they do not form an order (the replica that answered the request checked them)."""
+    gates = {n: q["ask_if"] for n, q in questions.items() if isinstance(q, dict) and isinstance(q.get("ask_if"), dict)
+             and q["ask_if"]}
+    order, done = [], set()
+    while len(order) < len(gates):
+        ready = [n for n in gates if n not in done and all(x in done or x not in gates for x in gates[n])]
+        if not ready:
+            return []
+        done.update(ready)
+        order += [(n, gates[n]) for n in ready]
+    return order
+
+
+def answer_key(answer):
+    """The canonical answer of a choice / noul / score answer, as basal-serve's ask_if reads it: the choice, "true" /
+    "false" (true on a tie), the top score level; None for another answer or none."""
+    if not isinstance(answer, dict):
+        return None
+    t, p = answer.get("type"), answer.get("probabilities")
+    if t == "choice":
+        return answer.get("choice")
+    if t == "noul":
+        if isinstance(p, dict) and "true" in p and "false" in p:
+            return "true" if p["true"] >= p["false"] else "false"
+        return None if answer.get("noul") is None else "true" if answer["noul"] >= 0.5 else "false"
+    if t == "score" and isinstance(p, dict) and p:
+        return max(p, key=p.get)
+    return None
+
+
+def gates_pass(answers, ask):
+    """Whether every question an ask_if names has an answer among its values (yes / no / booleans of a noul question, a
+    score level's key or its text, as basal-serve reads them)."""
+    for x, vals in ask.items():
+        a = answers.get(x)
+        key = answer_key(a)
+        if key is None or not isinstance(vals, list):
+            return False
+        legend = a.get("legend") if isinstance(a.get("legend"), dict) else {}
+        text = {t: k for k, t in legend.items() if t not in legend}
+        ok = set()
+        for v in vals:
+            v = ("true" if v else "false") if isinstance(v, bool) else v
+            if a.get("type") == "noul":
+                v = {"yes": "true", "no": "false"}.get(v, v)
+            elif a.get("type") == "score" and v not in legend:
+                v = text.get(v, v)
+            ok.add(v)
+        if key not in ok:
+            return False
+    return True
 
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -373,14 +442,75 @@ class Router:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
                 pool = f"script:{sc}" if f"script:{sc}" in self.rings else pool
         status, content, ctype = await self._send(pool, path, body, headers)
-        level = {}
-        if self.levels and status == 200:
-            content = await self._cascade(path, body, content, headers, level)
-        if self.blends and status == 200:
-            content = await self._blend(path, body, content, headers)
-        if self.fallback and status == 200:
-            content = await self._fallback(body, content, level if self.levels else None)
+        if status == 200 and (self.levels or self.blends or self.fallback):
+            content = await self._stages(path, body, content, headers)
+            if b'"ask_if"' in body:
+                content = await self._gates(pool, path, body, content, headers)
         return status, content, ctype
+
+    async def _stages(self, path, body, content, headers):
+        """The first replica's response (content) through the cascade, the blend and the fallback."""
+        level = {}
+        if self.levels:
+            content = await self._cascade(path, body, content, headers, level)
+        if self.blends:
+            content = await self._blend(path, body, content, headers)
+        if self.fallback:
+            content = await self._fallback(body, content, level if self.levels else None)
+        return content
+
+    async def _gates(self, pool, path, body, content, headers):
+        """ask_if over the final answers: the replica skipped questions by its own answers, which a cascade level, a
+        blend or the fallback may have replaced. In the gates' order, a question whose gate now fails is null; the ones
+        it now passes that were skipped are asked (without their gates, through the same stages), and the questions
+        gated on them are decided after their answers. usage.skipped names the null ones."""
+        try:
+            req, resp = json.loads(body), json.loads(content)
+            qs, answers = req["questions"], resp["answers"]
+            order = gate_order(qs)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return content
+        if not order or not isinstance(answers, dict):
+            return content
+        tried = set()
+        for _ in range(len(order) + 1):
+            todo, open_ = [], set()  # (open: asked now, or gated on a question that is)
+            for name, ask in order:
+                if any(x in open_ for x in ask):
+                    open_.add(name)
+                elif not gates_pass(answers, ask):
+                    answers[name] = None
+                elif answers.get(name) is None and name not in tried:
+                    todo.append(name)
+                    open_.add(name)
+            if not todo:
+                break
+            tried.update(todo)
+            sub = json.dumps(dict(req, questions=ungated(qs, todo))).encode()
+            st, c2, _ = await self._send(pool, path, sub, headers)
+            if st != 200:
+                continue  # (they stay null; the next round decides the questions gated on them)
+            try:
+                r2 = json.loads(await self._stages(path, sub, c2, headers))
+            except ValueError:
+                continue
+            for q in todo:
+                answers[q] = (r2.get("answers") or {}).get(q)
+            for k in ("cascade", "fallback"):  # what the stages did to them
+                if isinstance(r2.get(k), dict) and k not in resp:
+                    resp[k] = r2[k]
+                elif isinstance(r2.get(k), dict) and isinstance(resp.get(k), dict):
+                    for f in ("escalated", "asked", "answered"):
+                        if isinstance(r2[k].get(f), list) and isinstance(resp[k].get(f), list):
+                            resp[k][f] += r2[k][f]
+        skipped = [name for name, _ in order if answers.get(name) is None]
+        usage = resp.setdefault("usage", {})
+        if isinstance(usage, dict):
+            if skipped:
+                usage["skipped"] = skipped
+            else:
+                usage.pop("skipped", None)
+        return json.dumps(resp, ensure_ascii=False).encode()
 
     async def _fallback(self, body, content, level=None):
         """The answers of the last level (level: the cascade's level of each question; None: one model) whose top
@@ -464,7 +594,7 @@ class Router:
             return content
         if not want:
             return content
-        sub = json.dumps(dict(req, questions={q: qs[q] for q in want})).encode()
+        sub = json.dumps(dict(req, questions=ungated(qs, want))).encode()
         outs = await asyncio.gather(*(self._send(pool, path, sub, headers) for pool, _ in self.blends))
         others = []
         for (_, w), (st, c, _) in zip(self.blends, outs):
@@ -511,7 +641,7 @@ class Router:
                    and (top_probability(a) if isinstance(a, dict) else None) is not None and top_probability(a) < below]
             if not low:
                 break
-            sub = dict(req, questions={q: req["questions"][q] for q in low})
+            sub = dict(req, questions=ungated(req["questions"], low))
             st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers)
             if st != 200:
                 break

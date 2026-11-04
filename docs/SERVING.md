@@ -314,6 +314,10 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   answer replaces the first one. Every answer says `"answered_by": "first"` or `"escalated"`, the response lists the
   escalated questions under `"cascade"`, and `/metrics` counts both (`basal_router_answers_total`). Questions without
   option probabilities (multi, tasks) are never escalated.
+- **`ask_if` with a cascade, a blend or the fallback:** the questions asked again go without their `ask_if` /
+  `depends_on`, and the router applies `ask_if` to the final answers: a question whose gate a replaced answer fails
+  is `null` (and in `usage.skipped`), one whose gate it now passes is asked of the first replica and goes through the
+  same levels.
 - **Several levels:** repeat the pair, one `--escalate-below` per `--escalate`, in order (without any, 0.8 for each).
   The first replica is level 1 and the k-th `--escalate` is level k + 1. A question goes on from level k to level
   k + 1 only while its top probability at level k is under the k-th `--escalate-below`; the last level's answer stands.
