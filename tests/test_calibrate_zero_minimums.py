@@ -39,3 +39,20 @@ def test_refit_on_a_file_that_is_not_a_rows_file_exits_with_a_message(tmp_path, 
     path.write_text(content, encoding="utf-8")
     with pytest.raises(SystemExit, match="not a file written by basal-calibrate --save-rows"):
         calibrate.refit(argparse.Namespace(input=str(path)), [0.05], None, None)
+
+
+def test_refit_on_a_binary_file_exits_with_a_message(tmp_path):
+    path = tmp_path / "rows.jsonl"
+    path.write_bytes(b"\xff\xfe\x00\x01\n")
+    with pytest.raises(SystemExit, match="not a file written by basal-calibrate --save-rows"):
+        calibrate.refit(argparse.Namespace(input=str(path)), [0.05], None, None)
+    with pytest.raises(SystemExit, match="not a file written by basal-calibrate --save-rows"):
+        calibrate.refit(argparse.Namespace(input=str(tmp_path)), [0.05], None, None)  # a directory
+
+
+@pytest.mark.parametrize("bad", ["{not json", "[1]", "7", "null"])
+def test_refit_on_a_good_header_and_a_bad_row_names_the_line(tmp_path, bad):
+    path = tmp_path / "rows.jsonl"
+    path.write_text('{"basal_calibrate_rows": 1}\n' + '{"prim": "choice"}\n' + bad + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"line 3 is not a row"):
+        calibrate.refit(argparse.Namespace(input=str(path)), [0.05], None, None)

@@ -131,6 +131,8 @@ def main():
                     help="N: compare N answers given alone and under load (instead of the load test)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
+    if a.concurrency < 1:
+        raise SystemExit("basal-loadtest: --concurrency must be at least 1")
     if a.determinism:
         n = 2 * a.determinism
         qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic \

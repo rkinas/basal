@@ -1299,14 +1299,27 @@ def engine_name(kind, quant, preset=None):
 def refit(a, targets, reference, reference_name):
     """--from-rows: the fit on the probabilities a --save-rows run recorded (no engine). The baseline is --calibration,
     else the file that run compared with."""
-    lines = Path(a.input).read_text(encoding="utf-8").splitlines()
+    try:
+        lines = Path(a.input).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as e:  # a binary file, a directory
+        raise SystemExit(f"{a.input}: not a file written by basal-calibrate --save-rows ({type(e).__name__})") from None
     try:
         head = json.loads(lines[0])
     except (IndexError, ValueError):
         head = {}
     if not isinstance(head, dict) or head.get("basal_calibrate_rows") != 1:
         raise SystemExit(f"{a.input}: not a file written by basal-calibrate --save-rows")
-    rows = [json.loads(x) for x in lines[1:] if x.strip()]
+    rows = []
+    for i, x in enumerate(lines[1:], 2):
+        if not x.strip():
+            continue
+        try:
+            row = json.loads(x)
+        except ValueError:
+            row = None
+        if not isinstance(row, dict):
+            raise SystemExit(f"{a.input}: line {i} is not a row written by basal-calibrate --save-rows")
+        rows.append(row)
     small = sample_size(rows, [], targets)
     for w in small:
         print(f"warning: {w}", file=sys.stderr)

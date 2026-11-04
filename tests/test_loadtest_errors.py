@@ -69,3 +69,13 @@ def test_clean_run_has_no_errors(monkeypatch, questions, capsys):
     monkeypatch.setattr(loadtest.httpx, "AsyncClient", client([]))
     asyncio.run(loadtest.run(args()))
     assert json.loads(capsys.readouterr().out)["errors"] == 0
+
+
+@pytest.mark.parametrize("argv", [["--concurrency", "0"], ["--concurrency", "-3"],
+                                  ["--concurrency", "0", "--determinism", "2"]])
+def test_concurrency_below_one_stops_at_start(monkeypatch, argv):
+    import sys
+    monkeypatch.setattr(sys, "argv", ["basal-loadtest", "--synthetic", "200"] + argv)
+    monkeypatch.setattr(loadtest, "run", lambda a: pytest.fail("a run started"))
+    with pytest.raises(SystemExit, match="--concurrency must be at least 1"):
+        loadtest.main()
