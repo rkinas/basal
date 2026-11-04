@@ -3,6 +3,8 @@ from the new checkpoint, shards (also nested ones) are kept, mismatched or quant
 anything is written, a tokenizer serialized differently is accepted while one that splits text differently needs
 --allow-tokenizer-difference, and the non-weight files come from --meta-from (on tiny checkpoints)."""
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -110,6 +112,35 @@ def test_sharded(tmp_path, subdir):
     assert all((out / f).is_file() for f in index["weight_map"].values())  # the index finds every shard
     assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*.safetensors")) == [
         f"{subdir}model-00001-of-00002.safetensors", f"{subdir}model-00002-of-00002.safetensors"]
+    r = load_dir(out)
+    assert torch.equal(r["a.weight"], ((to["a.weight"].float() + tn["a.weight"].float()) / 2).to(torch.bfloat16))
+    assert set(r) == set(tn)
+
+
+def hub_layout(src, root):
+    """src (a model folder) in the Hugging Face cache layout under root: every file moved to root/blobs and linked
+    back from root/snapshots/rev by a relative symlink, as snapshot_download leaves a repository. -> the snapshot."""
+    snap = Path(root) / "snapshots" / "rev"
+    blobs = Path(root) / "blobs"
+    blobs.mkdir(parents=True)
+    for n, f in enumerate(sorted(p for p in Path(src).rglob("*") if p.is_file())):
+        link = snap / f.relative_to(src)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        f.rename(blobs / f"b{n}")
+        os.symlink(os.path.relpath(blobs / f"b{n}", link.parent), link)
+    return snap
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+@pytest.mark.parametrize("subdir", ["", "weights/"])
+def test_sharded_checkpoints_from_the_hub_cache(tmp_path, subdir):
+    """Sharded checkpoints as snapshot_download leaves them (files are symlinks into blobs/, outside the snapshot
+    folder) interpolate like local folders; an index that names a path outside the folder is still refused."""
+    to = make_ckpt(tmp_path / "o1", 1, sharded=True, subdir=subdir)[1]
+    tn = make_ckpt(tmp_path / "n1", 2, sharded=True, subdir=subdir)[1]
+    old, new = hub_layout(tmp_path / "o1", tmp_path / "hub-old"), hub_layout(tmp_path / "n1", tmp_path / "hub-new")
+    out = interpolate(old, new, 0.5, tmp_path / "o")
+    assert not any(p.is_symlink() for p in out.rglob("*"))
     r = load_dir(out)
     assert torch.equal(r["a.weight"], ((to["a.weight"].float() + tn["a.weight"].float()) / 2).to(torch.bfloat16))
     assert set(r) == set(tn)

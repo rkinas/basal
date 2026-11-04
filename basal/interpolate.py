@@ -72,8 +72,10 @@ def shards(model_dir):
         out = {}
         for k, v in json.loads(index.read_text(encoding="utf-8"))["weight_map"].items():
             p = Path(v)
-            # the shard paths are reused under the output folder: nothing absolute, nothing that leaves the model
-            if p.is_absolute() or ".." in p.parts or not (d / p).resolve().is_relative_to(d.resolve()):
+            # the shard paths are reused under the output folder: nothing absolute, nothing that leaves the model.
+            # Checked on the path as written, not on where it resolves to: the files of a Hugging Face snapshot are
+            # symlinks into the cache's blobs/ folder, outside the snapshot, and are read like any other file
+            if p.is_absolute() or p.drive or ".." in p.parts:
                 raise SystemExit(f"{index}: shard path {v!r} is outside the model folder")
             out[k] = d / p
         return out
