@@ -33,6 +33,15 @@ from .prompt import letter_ids, max_options, model_format, render
 from .server import MODES, adapter_refused, adapter_refused_kind, default_mode
 
 GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: --model gives tokenizer and calibration
+MIN_ITEMS = 6  # the latency runs warm up on the first 5 items and time the ones after them
+
+
+def positive(s):
+    """An argparse type: an integer >= 1."""
+    v = int(s)
+    if v < 1:
+        raise argparse.ArgumentTypeError(f"{s}: must be at least 1")
+    return v
 
 
 def build(mode, md, vllm_model=None, gguf=None, ollama_model=None, ollama_url="http://127.0.0.1:11434",
@@ -114,7 +123,7 @@ def reset_memory():
 
 def memory_gb(be):
     """Peak allocated memory (CUDA, MLX, TPU); for MPS the memory held by the Metal driver at the end of the run; NaN
-    for backends without memory tracking (GGUF, Ollama, llama.cpp server, CPU)."""
+    for backends without memory tracking (GGUF, Ollama, llama.cpp server, CPU), written as null by --out."""
     if isinstance(be, MLXBackend):
         return be.mx.get_peak_memory() / 2**30
     if hasattr(be, "memory_gb"):  # TPU: the process-wide HBM peak
@@ -260,8 +269,8 @@ def main():
                          "tpu-fp32")
     ap.add_argument("--questions", nargs="+", default=DEFAULT_QUESTIONS,
                     help="JSONL file(s) with simple items (default: the bundled examples, 44 items)")
-    ap.add_argument("--n", type=int, default=500)
-    ap.add_argument("--lat-n", dest="lat_n", type=int, default=100)
+    ap.add_argument("--n", type=positive, default=500)
+    ap.add_argument("--lat-n", dest="lat_n", type=positive, default=100)
     ap.add_argument("--out", default=None, help="write results as JSON")
     ap.add_argument("--mlx-packed", dest="mlx_packed", action="store_true",
                     help="mlx modes: the packed forward of short Llama groups (basal-serve --mlx-packed)")
@@ -277,6 +286,9 @@ def main():
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)
+    if len(qs) < MIN_ITEMS:  # before any engine is loaded
+        raise SystemExit(f"basal-bench: {len(qs)} simple items with options in --questions (--n {a.n}); at least "
+                         f"{MIN_ITEMS} are needed (5 warm up the latency runs)")
     fmt = model_format(md)
     ref, rows = None, []
     for mode in a.modes:
@@ -286,10 +298,14 @@ def main():
                    a.mlx_forward, adapter)
         load_s = time.time() - t0
         groups = groups_for(be.tok, qs, fmt)
+        if len(groups) < MIN_ITEMS:
+            raise SystemExit(f"basal-bench --modes {mode}: {len(groups)} of the {len(qs)} items fit this model's prompt "
+                             f"format (at most {max_options(fmt)} options); at least {MIN_ITEMS} are needed")
         dec, r = measure(be, groups, min(a.lat_n, len(groups) - 5))
         top = [max(range(len(d)), key=d.__getitem__) for d in dec]
+        mem = memory_gb(be)
         r = dict(mode=mode, reference_mode=a.modes[0], gpu=device_name(be), n=len(groups), load_s=round(load_s, 1),
-                 **r, mem_gb=memory_gb(be))
+                 **r, mem_gb=None if math.isnan(mem) else mem)  # null, not NaN (not JSON), when not measured
         if isinstance(getattr(be, "forward", None), str):  # MLX: which forward ran
             r["forward"] = be.forward
         if all("gold" in g[0] for g in groups):
@@ -306,10 +322,11 @@ def main():
     print(f"\n{'mode':<18}{'lat2 ms':>9}{'lat1 ms':>9}{'dec/s':>8}{'agree':>8}{'acc':>7}{'GB':>6}")
     for r in rows:
         print(f"{r['mode']:<18}{r['lat2_ms']:>9.1f}{r['lat1_ms']:>9.1f}{r['dec_s']:>8.1f}"
-              f"{r.get('agree', float('nan')):>8.3f}{r.get('acc', float('nan')):>7.3f}{r['mem_gb']:>6.1f}")
+              f"{r.get('agree', float('nan')):>8.3f}{r.get('acc', float('nan')):>7.3f}"
+              f"{float('nan') if r['mem_gb'] is None else r['mem_gb']:>6.1f}")
     if a.out:
-        Path(a.out).write_text(json.dumps(rows, indent=1), encoding="utf-8")
+        Path(a.out).write_text(json.dumps(rows, indent=1, allow_nan=False), encoding="utf-8")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())  # the status of --identity (python -m basal.bench, as the Makefile runs it)
