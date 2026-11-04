@@ -1,4 +1,5 @@
 """Regression tests for fix/media-input (Z-1082)."""
+import base64
 import io
 import sys
 import types
@@ -117,3 +118,20 @@ def test_i17_animated_or_multi_page_image_is_refused(fmt):
 @pytest.mark.parametrize("fmt", ["GIF", "TIFF", "PNG"])
 def test_i17_single_frame_image_is_accepted(fmt):
     assert media._image(frames(fmt, 1), 0).size == (16, 16)
+
+
+def b64_png(w, h):
+    b = io.BytesIO()
+    Image.new("RGB", (w, h), (30, 60, 90)).save(b, "PNG")
+    return base64.b64encode(b.getvalue()).decode()
+
+
+@pytest.mark.parametrize("w, h", [(6000, 300), (300, 6000)])
+def test_i18_a_decoded_image_is_at_most_4096_a_side(w, h):
+    (im,), _, _ = media.decode([{"type": "image", "data": b64_png(w, h)}], ("image",))
+    assert max(im.size) == 4096 and abs(im.size[0] / im.size[1] / (w / h) - 1) < 0.05
+
+
+def test_i18_a_small_image_keeps_its_size():
+    (im,), _, _ = media.decode([{"type": "image", "data": b64_png(640, 480)}], ("image",))
+    assert im.size == (640, 480)

@@ -19,6 +19,7 @@ from math import gcd
 MAX_ITEMS = 8
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 50_000_000
+MAX_SIDE = 4096  # a decoded image is kept at most this long a side (the model's soft tokens need far less)
 SAMPLE_RATE = 16000
 DETAIL = {"default": 280, "high": 1120}
 
@@ -68,7 +69,9 @@ def _image(raw, n):
         if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:  # onto white, not onto black
             rgba = im.convert("RGBA")
             im = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
-        return im.convert("RGB")
+        im = im.convert("RGB")
+        im.thumbnail((MAX_SIDE, MAX_SIDE))  # 8 x 50 MP held 1.1 GB RGB per request
+        return im
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError) as e:
         raise ValueError(f"media {n}: not a readable image ({type(e).__name__})") from None
 
