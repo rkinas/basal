@@ -30,6 +30,7 @@ from .engine import (EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, 
                      MPSBackend, OllamaBackend, SGLangBackend, VLLMBackend, resolve)
 from .prompt import letter_ids, max_options, model_format, render
 from .server import MODES, adapter_refused, adapter_refused_kind, default_mode
+from .textio import read_text
 
 GGUF_KINDS = ("gguf", "ollama", "llamacpp")  # the engine serves GGUF weights: --model gives tokenizer and calibration
 
@@ -155,14 +156,18 @@ def load_questions(paths, n, seed=0):
     if isinstance(paths, (str, Path)):
         paths = [paths]
     qs = []
-    for p in paths:
-        for lineno, line in enumerate(Path(p).read_text(encoding="utf-8").splitlines(), 1):
+    for p in paths:  # read_text: a file saved with a BOM (Notepad) or in UTF-16 (PowerShell 5) reads like any other
+        for lineno, line in enumerate(read_text(p).splitlines(), 1):
             if line.strip():
-                q = json.loads(line)
+                try:
+                    q = json.loads(line)
+                except ValueError as e:
+                    raise SystemExit(f"{p}:{lineno}: not JSON ({e})") from None
+                if not isinstance(q, dict):
+                    raise SystemExit(f"{p}:{lineno}: a line must be a JSON object, not {type(q).__name__}")
                 if "options" in q:
-                    if isinstance(q, dict):
-                        q = _Item(q)
-                        q.src = f"{p}:{lineno}"
+                    q = _Item(q)
+                    q.src = f"{p}:{lineno}"
                     qs.append(q)
     random.Random(seed).shuffle(qs)
     return qs[:n]
