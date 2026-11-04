@@ -55,6 +55,35 @@ def replicas_transport(names, ready):
     return httpx.MockTransport(handler)
 
 
+def test_prefix_affinity_keeps_a_growing_state_on_its_replica():
+    """A state that grows (an agent trace, a chat given as a list of messages) goes where its beginning went, step after
+    step, where the hash of the whole state sends the steps all over the ring; a state that shares only a short
+    beginning with another (a letterhead) is routed by its own hash; a busy replica is passed over; off: the ring."""
+    names = [f"http://r{i}" for i in range(4)]
+    rt = R.Router(names, transport=replicas_transport(names, set(names)))
+    rt.ready = set(names)
+    base = "Case log.\n" + "".join(f"step {i}: the agent read file {i} and found nothing new. " for i in range(40))
+    steps = [base + "".join(f" tool call {j} returned {j * 7}." for j in range(k)) for k in range(1, 13)]
+    first, _ = rt.choose(R.request_key({"state": steps[0]}))
+    assert {rt.choose(R.request_key({"state": s})) for s in steps[1:]} == {(first, "prefix")}
+    ring = {rt.rings["main"].pick(R.request_key({"state": s}), {}, rt.ready) for s in steps}
+    assert len(ring) > 1  # (by the whole state's hash they would scatter)
+    chat = [{"role": "user", "content": "Plan the migration of the billing database. " * 12}]
+    home, _ = rt.choose(R.request_key({"state": chat}))
+    for k in range(6):
+        chat = chat + [{"role": "assistant", "content": f"Step {k} done."}, {"role": "user", "content": "Next."}]
+        assert rt.choose(R.request_key({"state": chat})) == (home, "prefix")
+    letter = base[:300] + "An unrelated case. " * 200  # 300 characters shared, 3,800 its own
+    assert rt.choose(R.request_key({"state": letter}))[1] == "state"
+    rt.load = {n: 0 for n in names}
+    rt.load[first] = 20
+    assert rt.choose(R.request_key({"state": steps[-1] + " more"}))[0] != first  # over the bound: the ring decides
+    off = R.Router(names, transport=replicas_transport(names, set(names)), affinity=False)
+    off.ready = set(names)
+    assert [off.choose(R.request_key({"state": s})) for s in steps] == [
+        (off.rings["main"].pick(R.request_key({"state": s}), off.load, off.ready, off.factor), "state") for s in steps]
+
+
 def test_router_routes_by_state_and_reports():
     names = [f"http://r{i}" for i in range(3)]
     rt = R.Router(names, transport=replicas_transport(names, set(names[:2])))

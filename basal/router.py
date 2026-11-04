@@ -83,6 +83,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import OrderedDict
 
 from .metrics import prometheus
 
@@ -90,14 +91,33 @@ LOAD_FACTOR = 1.25
 VNODES = 64
 POLL_S = 2.0
 SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (spawn)
+# --prefix-affinity: a state that begins with one routed before goes to the replica that got it (its state cache holds
+# that beginning: a growing agent trace computes only its new tokens there), found through chained hashes of
+# BLOCK-character blocks of the routing key, at most MAX_BLOCKS per pool (the least recently routed dropped first),
+# while that replica's load stays within PREFIX_FACTOR x --load-factor of the mean
+BLOCK = 256
+MAX_BLOCKS = 1 << 18
+PREFIX_FACTOR = 2.0
 
 
 def request_key(req):
-    """The routing key of a parsed request body: its state with whitespace normalised (None without a state). Split
-    and join give what re.sub(r"\\s+", " ", state.strip()) gave, for every string (str.isspace and re's whitespace
-    class agree on every code point), in a quarter of the time (3.4 -> 0.85 ms on a 64 KB state)."""
+    """The routing key of a parsed request body: its state with whitespace normalised (None without a state); a state
+    given as a list or an object (chat messages, items) by its JSON text. Split and join give what
+    re.sub(r"\\s+", " ", state.strip()) gave, for every string (str.isspace and re's whitespace class agree on every
+    code point), in a quarter of the time (3.4 -> 0.85 ms on a 64 KB state)."""
     state = req.get("state") if isinstance(req, dict) else None
+    if isinstance(state, (list, dict)) and state:
+        state = json.dumps(state, ensure_ascii=False)
     return (" ".join(state.split()) or None) if isinstance(state, str) else None
+
+
+def key_blocks(key):
+    """Chained hashes of the full BLOCK-character blocks of a routing key: the i-th stands for key[: BLOCK * (i + 1)]."""
+    out, h = [], b""
+    for i in range(BLOCK, len(key) + 1, BLOCK):
+        h = hashlib.blake2b(h + key[i - BLOCK: i].encode("utf-8"), digest_size=8).digest()
+        out.append(h)
+    return out
 
 
 def state_key(body):
@@ -311,7 +331,7 @@ class Ring:
 
 class Router:
     def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None,
-                 levels=None, blend=None, blend_weight=1.0, fallback=None):
+                 levels=None, blend=None, blend_weight=1.0, fallback=None, affinity=True):
         """escalate, below: one cascade level; levels: [(URLs, threshold), ...] for levels 2, 3, ... instead;
         blend: [(URLs, weight), ...] asked beside the replicas (weight blend_weight); fallback: {url, model, below,
         timeout, extra} of the LLM after the last level."""
@@ -335,7 +355,9 @@ class Router:
         self.scripts = {}
         self.ready = set()
         self.load = {r: 0 for r in self.replicas}
-        self.routed = {(r, how): 0 for r in self.replicas for how in ("state", "load")}
+        self.routed = {(r, how): 0 for r in self.replicas for how in ("state", "prefix", "load")}
+        self.affinity = affinity  # --prefix-affinity
+        self.index = {}  # pool -> OrderedDict(block hash -> the replica the state with that beginning went to)
         self.failed = {r: 0 for r in self.replicas}
         self.factor = factor
         self.rng = random.Random(seed)
@@ -344,15 +366,43 @@ class Router:
                                         limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
     def choose(self, key, pool="main"):
-        """(replica, how) for a request with routing key key (None: by load), among the replicas of pool."""
+        """(replica, how) for a request with routing key key (None: by load), among the replicas of pool: with
+        --prefix-affinity the replica a state with the same beginning went to ("prefix", _prefix), else the ring's."""
         if key is not None:
-            r = self.rings[pool].pick(key, self.load, self.ready, self.factor)
-            return r, "state"
+            hs = key_blocks(key) if self.affinity else ()
+            r, how = self._prefix(hs, pool, len(key)), "prefix"
+            if r is None:
+                r, how = self.rings[pool].pick(key, self.load, self.ready, self.factor), "state"
+            if hs and r is not None:
+                idx = self.index.setdefault(pool, OrderedDict())
+                for h in hs:
+                    idx[h] = r
+                    idx.move_to_end(h)
+                while len(idx) > MAX_BLOCKS:
+                    idx.popitem(last=False)
+            return r, how
         ready = sorted(self.ready & set(self.pools[pool]))
         if not ready:
             return None, "load"
         a, b = self.rng.choice(ready), self.rng.choice(ready)
         return (a if self.load[a] <= self.load[b] else b), "load"
+
+    def _prefix(self, hs, pool, n):
+        """The replica whose earlier state shares the longest beginning (whole blocks) with a key of n characters,
+        when that beginning is at least as long as the rest (a shared letterhead does not pin unrelated documents)
+        and the replica is ready, with its load within PREFIX_FACTOR x --load-factor of the mean; else None."""
+        idx = self.index.get(pool)
+        hit, m = None, 0
+        for i, h in enumerate(hs if idx else ()):
+            r = idx.get(h)
+            if r is None:
+                break
+            hit, m = r, (i + 1) * BLOCK
+        if hit is None or hit not in self.ready or m < n - m:
+            return None
+        names = [x for x in self.pools[pool] if x in self.ready]
+        cap = math.ceil(PREFIX_FACTOR * self.factor * (sum(self.load.get(x, 0) for x in names) + 1) / len(names))
+        return hit if self.load.get(hit, 0) + 1 <= cap else None
 
     async def poll(self):
         """Readiness of every replica (GET /health: 200 = ready)."""
@@ -799,6 +849,10 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--load-factor", dest="load_factor", type=float, default=LOAD_FACTOR)
+    ap.add_argument("--prefix-affinity", dest="prefix_affinity", choices=["on", "off"], default="on",
+                    help="a state that begins with one routed before (a growing agent trace or chat, an edited "
+                         "document) goes to the replica that got it while its load allows (on); off: by the hash of "
+                         "the whole state, as before 2.5.3")
     ap.add_argument("--escalate", nargs="*", action="append", default=[],
                     help="escalation replicas (a bigger model) for the cascade; repeat for further levels")
     ap.add_argument("--escalate-below", dest="escalate_below", type=float, action="append", default=[],
@@ -850,7 +904,7 @@ def main(argv=None):
             raise SystemExit(f"basal-router: --route {x!r}: SCRIPT=URL[,URL], SCRIPT one of {', '.join(SCRIPTS)}, other")
         routes[k] = v.split(",")
     router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes, blend=blend, blend_weight=first,
-                    fallback=fallback)
+                    fallback=fallback, affinity=a.prefix_affinity == "on")
     ui = None
     if a.ui == "on":  # basal/router_ui.py: the page at /ui, its state at /ui/state
         from .router_ui import RouterUI
