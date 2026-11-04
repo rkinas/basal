@@ -1573,7 +1573,13 @@ class Server:
         cache = getattr(self.backend, "state_cache", None)
         if cache is None:
             return None
-        cut = self.state_cut(q) if getattr(self, "states_cached", True) else None
+        first = None  # the request's first prompt as encode tokenized it, with its question and option order
+        b = branches[0]
+        if (b[0] == 0 and not getattr(self, "iso", False) and not isinstance(b[3][0], str)
+                and getattr(self, "layout", "canonical") == "canonical"):
+            question, options = q["branches"][b[1]]
+            first = (b[3][0], question, [options[c] for c in b[2][0]])
+        cut = self.state_cut(q, first) if getattr(self, "states_cached", True) else None
         if getattr(self.backend, "prefix", False):
             if cut and cache.has(cache.key(branches[0][3][0][:cut])):
                 return cut
@@ -1600,22 +1606,58 @@ class Server:
             n -= 1
         return n or None
 
-    def state_cut(self, q):
+    def state_cut(self, q, first=None):
         """Tokens of the state prefix (chat template up to the end of the state) of a question's prompts, where the
         state cache keys a request; None when it cannot be found (the prompt does not contain the state as rendered).
         The state is found after the user message's header ("State:" / "Stan:"), not where its text first occurs (a
-        short state can also be a word of the system prompt)."""
+        short state can also be a word of the system prompt). first: (token ids, question, options) of one of the
+        request's prompts as encode tokenized it; the cut does not depend on the question, so its ids stand for the
+        whole prompt, and with tokenize-once only the state's last line is tokenized again: ids(text up to the end of
+        the state) = ids(text up to its last newline before a non-space character), the head of the prompt's own ids,
+        + the ids of the rest from that newline on without the newline's own (prompt.tokens_once's property). Without
+        first, or where that property cannot be applied, the prefix is tokenized whole as before."""
         head = FORMATS[self.fmt]["templates"][q["lang"]]["user"].split("{state}")[0]
-        text = render(self.tok, q["state"], q["question"], q["options"], q["lang"], self.fmt)
+        if first is None:
+            text = render(self.tok, q["state"], q["question"], q["options"], q["lang"], self.fmt)
+            full = None
+        else:
+            full, question, options = first
+            text = render(self.tok, q["state"], question, options, q["lang"], self.fmt)
         shown = defang(self.tok, q["state"])  # the state as rendered (special tokens broken)
         i = text.find(head + shown) if q["state"] else -1
         if i < 0:
             return None
-        full = self.tok(text, add_special_tokens=False).input_ids
-        pre = self.tok(text[: i + len(head) + len(shown)], add_special_tokens=False).input_ids
+        end = i + len(head) + len(shown)
+        if full is None:
+            full = self.tok(text, add_special_tokens=False).input_ids
+        else:
+            n = self._spliced_cut(text, end, full)
+            if n is not None:
+                return n or None
+        pre = self.tok(text[:end], add_special_tokens=False).input_ids
         while pre and full[: len(pre)] != pre:  # the last token merges with what follows: end one token earlier
             pre = pre[:-1]
         return len(pre) or None
+
+    def _spliced_cut(self, text, end, full):
+        """state_cut's length from full (the prompt's ids) and the ids of the text from the state's last newline on,
+        or None where tokenize-once's property does not hold here (no such newline, or tails that do not start with the
+        newline's ids)."""
+        nl = getattr(self, "once", None)
+        c = text.rfind("\n", 0, end - 1) if nl else -1  # the last newline before a character that is not whitespace
+        while c >= 0 and text[c + 1].isspace():
+            c = text.rfind("\n", 0, c)
+        if c < 0:
+            return None
+        tail, rest = self.tok([text[c:end], text[c:]], add_special_tokens=False).input_ids
+        k = len(full) - len(rest) + len(nl)  # full = ids(text[:c + 1]) + rest without the newline's own ids
+        if tail[: len(nl)] != nl or rest[: len(nl)] != nl or k < 0 or full[k:] != rest[len(nl):]:
+            return None
+        tail = tail[len(nl):]
+        n = 0
+        while n < len(tail) and k + n < len(full) and tail[n] == full[k + n]:
+            n += 1
+        return k + n
 
     def uncertain(self, q, perms, outs):
         """--orders auto: does a branch get its second option order? Yes/no branches (noul, multi labels, act on a
