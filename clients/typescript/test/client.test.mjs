@@ -251,10 +251,31 @@ describe("presets", () => {
 
   test("guard() and route() decide as the Python functions on the shared cases", () => {
     for (const c of fixture.guard)
-      assert.deepEqual(guard(c.answers, c.policy, c.max_error ?? undefined), c.expect, JSON.stringify(c).slice(0, 80));
+      assert.deepEqual(guard(c.answers, c.policy, c.max_error ?? undefined, c.battery ?? undefined), c.expect,
+        JSON.stringify(c).slice(0, 80));
     assert.deepEqual(POLICIES, fixture.policies);
     for (const c of fixture.route) assert.deepEqual(route(c.answers, 0.6, c.max_error ?? undefined), c.expect);
     assert.throws(() => guard({}, "lax"), /unknown policy/);
+  });
+
+  test("guard() and route() never pass a non-finite or out-of-range probability", () => {
+    const noul = (p) => ({ type: "noul", noul: p, probabilities: { true: p, false: 1 - p }, confidence: 0.9 });
+    const base = () => ({ jailbreak: noul(0), harmful: noul(0), medical: noul(0), self_harm: noul(0),
+      severity: { type: "score", probabilities: { 0: 0.97, 1: 0.01, 2: 0.01, 3: 0.01 }, confidence: 0.97 } });
+    assert.equal(guard(base()).action, "pass");
+    for (const bad of [NaN, Infinity, -Infinity, -0.1, 1.1]) {
+      const a = base();
+      a.harmful = noul(bad);
+      assert.equal(guard(a).action, "review", String(bad));
+      assert.equal(guard(a).checks.harmful.why, "malformed answer");
+      const s = base();
+      s.severity.probabilities = { 0: bad, 1: 0.1 };
+      assert.equal(guard(s).action, "review", String(bad));
+      const comp = { probabilities: { 0: 0.2, 1: 0.8 } };
+      assert.equal(route({ intent: { choice: "billing", confidence: bad }, complexity: comp }).route, "human");
+    }
+    assert.equal(guard({}).action, "review");
+    assert.equal(guard({ harmful: noul(0) }, "strict", undefined, ["harmful"]).action, "pass");
   });
 
   test("guard() asks the battery with max_error and returns the decision with the answers", async () => {

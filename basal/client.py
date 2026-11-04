@@ -222,7 +222,7 @@ class Basal(_Client):
         support, "reason", "checks"} plus "answers". max_error takes the thresholds from the model's calibration."""
         from .presets import guard
         answers = self.preset(state, "guard_" + kind, lang, max_error)
-        return {**guard(answers, policy, max_error), "answers": answers}
+        return {**guard(answers, policy, max_error, expect=kind), "answers": answers}
 
     def route(self, state, lang=None, min_confidence=0.6, max_error=None):
         """Run route_intent on state -> presets.route(): the intent, or "human" on low confidence / abstain."""
@@ -283,7 +283,7 @@ class AsyncBasal(_Client):
     async def guard(self, state, kind="input", policy="strict", lang=None, max_error=None):
         from .presets import guard
         answers = await self.preset(state, "guard_" + kind, lang, max_error)
-        return {**guard(answers, policy, max_error), "answers": answers}
+        return {**guard(answers, policy, max_error, expect=kind), "answers": answers}
 
     async def route(self, state, lang=None, min_confidence=0.6, max_error=None):
         from .presets import route

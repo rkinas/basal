@@ -9,6 +9,7 @@ and edit it for your own rules.
 The guard_input / guard_output / route_intent presets also come with a decision step: `guard(answers, policy)` and
 `route(answers)` turn the answers into pass / review / block / support or an intent route (docs/SERVING.md)."""
 import copy
+import math
 import re
 
 LEVELS = {"pl": ["niska", "średnia", "wysoka"], "en": ["low", "medium", "high"]}  # score levels, lowest first
@@ -170,21 +171,50 @@ def _policy(policy):
     return POLICIES[policy]
 
 
+def _prob(x):
+    """A probability as a float, None when it is not a finite number in [0, 1] (a bool, null, NaN, text)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or not 0 <= x <= 1:
+        return None
+    return float(x)
+
+
 def _level(ans):
-    """The most probable level of a score answer (0 = the first)."""
-    probs = ans["probabilities"]
+    """The most probable level of a score answer (0 = the first), None when its probabilities are not a non-empty
+    {level index: probability} map."""
+    probs = ans.get("probabilities")
+    if not isinstance(probs, dict) or not probs:
+        return None
+    if any(_prob(v) is None or not str(k).isdigit() for k, v in probs.items()):
+        return None
     return int(max(probs, key=probs.get))
 
 
-def guard(answers, policy="strict", max_error=None):
+def battery(kind):
+    """The question names of the guard_input ("input") or guard_output ("output") battery."""
+    if kind not in ("input", "output"):
+        raise ValueError(f"unknown battery {kind!r} (input, output, or a list of question names)")
+    return list(PRESETS["guard_" + kind]["en"])
+
+
+def guard(answers, policy="strict", max_error=None, expect=None):
     """Answers of a guard_input / guard_output battery -> {"action": pass | review | block | support, "reason", "checks"}.
 
-    Precedence (fixed): support > block > review > pass. A missing answer (null, not asked) is a review, never a pass.
-    Hand-picked mode (max_error None): see POLICIES. Certified mode (max_error=0.05; ask the questions with the same
-    `max_error`): a hazard is hit when its probability is 0.5 or more and acts as the policy says, and an answer the
-    server marks `abstain` (below the threshold certified for that error target and type, or none certified) is a
-    review. The thresholds are then those of the model's calibration, not numbers of the policy."""
+    Precedence (fixed): support > block > review > pass. Every question of the battery must be answered: `expect` is
+    "input" or "output" (the built-in batteries), a list of question names (a battery of your own, or an intentional
+    part of one), or None (the built-in battery of the answers: output when they hold policy_break and no jailbreak,
+    else input). A question of the battery that is missing or null, and an answer that is malformed (a yes/no
+    probability that is not a finite number in [0, 1], a severity without a {level: probability} map), is a review,
+    never a pass. Hand-picked mode (max_error None): see POLICIES. Certified mode (max_error=0.05; ask the questions
+    with the same `max_error`): a hazard is hit when its probability is 0.5 or more and acts as the policy says, and an
+    answer the server marks `abstain` (below the threshold certified for that error target and type, or none
+    certified) is a review, as is one without a true / false abstain flag. The thresholds are then those of the model's
+    calibration, not numbers of the policy."""
     pol = _policy(policy)
+    if not isinstance(answers, dict):
+        raise ValueError("answers must be an object of question name -> answer")
+    if expect is None:
+        expect = "output" if "policy_break" in answers and "jailbreak" not in answers else "input"
+    names = battery(expect) if isinstance(expect, str) else [str(x) for x in expect]
     checks, worst = {}, "pass"
 
     def put(name, action, p=None, why=None):
@@ -193,25 +223,31 @@ def guard(answers, policy="strict", max_error=None):
         if PRECEDENCE.index(action) < PRECEDENCE.index(worst):
             worst = action
 
-    for name, ans in answers.items():
+    for name, ans in list(answers.items()) + [(n, None) for n in names if n not in answers]:
         if ans is None or not isinstance(ans, dict):
             put(name, "review", None, "no answer")
             continue
-        if max_error is not None and "abstain" not in ans:
+        if max_error is not None and not isinstance(ans.get("abstain"), bool):
             put(name, "review", None, "no abstain flag: ask with max_error")
             continue
         if name == "severity":
             lvl, sev = _level(ans), pol["severity"]
+            if lvl is None:
+                put(name, "review", None, "malformed answer")
+                continue
             act = "block" if lvl >= sev["block"] else "review" if lvl >= sev["review"] else "pass"
             if max_error is not None and ans["abstain"] and act == "pass":
                 act = "review"
             put(name, act, float(lvl))
             continue
+        p = _prob(ans.get("noul"))
+        if p is None:
+            put(name, "review", None, "malformed answer")
+            continue
         hazard = pol["hazards"].get(name)
         if hazard is None or hazard == "pass":
-            put(name, "pass", float(ans["noul"]))
+            put(name, "pass", p)
             continue
-        p = float(ans["noul"])
         if max_error is not None:
             act = "review" if ans["abstain"] else hazard if p >= 0.5 else "pass"
         else:
@@ -223,19 +259,22 @@ def guard(answers, policy="strict", max_error=None):
 
 def route(answers, min_confidence=0.6, max_error=None):
     """Answers of route_intent -> {"route": <intent> | "human", "complexity": <level name>, "level": int}. Low confidence
-    (below `min_confidence`), an abstain (with max_error) or a missing answer routes to a human."""
+    (below `min_confidence`), an abstain (with max_error; an answer without a true / false abstain flag too), a missing
+    or a malformed answer (a confidence that is not a finite number in [0, 1], complexity without a {level:
+    probability} map) routes to a human."""
     intent, comp = answers.get("intent"), answers.get("complexity")
-    if not intent or not comp:
+    if not intent or not comp or not isinstance(intent, dict) or not isinstance(comp, dict):
         return {"route": "human", "why": "no answer"}
+    lvl, conf = _level(comp), _prob(intent.get("confidence"))
+    if lvl is None or conf is None or not isinstance(intent.get("choice"), str):
+        return {"route": "human", "why": "malformed answer"}
     legend = comp.get("legend") or {}
-    lvl = _level(comp)
-    out = {"route": intent["choice"], "complexity": legend.get(str(lvl)), "level": lvl,
-           "confidence": intent["confidence"]}
+    out = {"route": intent["choice"], "complexity": legend.get(str(lvl)), "level": lvl, "confidence": conf}
     if max_error is not None:
-        if "abstain" not in intent or "abstain" not in comp:
+        if not isinstance(intent.get("abstain"), bool) or not isinstance(comp.get("abstain"), bool):
             return {"route": "human", "why": "no abstain flag: ask with max_error"}
         if intent["abstain"] or comp["abstain"]:
             return {**out, "route": "human", "why": "abstain"}
-    elif intent["confidence"] < min_confidence:
+    elif conf < min_confidence:
         return {**out, "route": "human", "why": "low confidence"}
     return out
