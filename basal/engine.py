@@ -1573,6 +1573,22 @@ class GraphBackend(EagerBackend):
             # compact rows of 12,288 tokens ran out of memory in warm-up (12.5 GB of graph pool, 20 Oct)
             self.COMPACT_LENS = [x for x in self.COMPACT_LENS if x <= self.TOKEN_BUDGET]
 
+    def _prefix_graph_shapes(self):
+        """(rows, branch tokens, root length) of the pass-2 graphs over cached template prefixes (--prefix-cache); Gemma 4:
+        only those whose rows x root fit the key / value buffer, which _fit_grid may have shrunk below them (the Llama
+        buffer holds them all, _kv_tokens)."""
+        out = [(b, S, L) for L in self.LENS if L <= self.PREFIX_ROOT for S in self.PREFIX_SFX for b in self.PREFIX_ROWS
+               if b * S <= self.TOKEN_BUDGET]
+        return [x for x in out if self.gemma is None or x[0] * x[2] <= self._kv_tokens()]
+
+    def _prefix_rows(self):
+        """Most short requests per forward over cached template prefixes: PREFIX_ROWS[-1], and for Gemma 4 no more rows
+        of the longest such root than its key / value buffer holds."""
+        if self.gemma is None:
+            return self.PREFIX_ROWS[-1]
+        L = next((x for x in self.PLAIN_LENS if x >= self.PREFIX_ROOT), self.PREFIX_ROOT)
+        return max(1, min(self.PREFIX_ROWS[-1], self._kv_tokens() // L))
+
     def _kv_tokens(self):
         """Tokens of the key / value buffer: the largest plain graph and the largest captured pass-2 graph's rows over
         its root (_pass2_ok; Gemma 4: within TOKEN_BUDGET, see _fit_grid)."""
@@ -1694,11 +1710,8 @@ class GraphBackend(EagerBackend):
                         if b * S <= self.TOKEN_BUDGET and self._pass2_ok(b, L):
                             self._graph_sfx(b, S, L)
             if self.prefix:  # pass 2 of short requests over a cached template prefix
-                for L in (x for x in self.LENS if x <= self.PREFIX_ROOT):
-                    for S in self.PREFIX_SFX:
-                        for b in self.PREFIX_ROWS:
-                            if b * S <= self.TOKEN_BUDGET:
-                                self._graph_sfx(b, S, L)
+                for b, S, L in self._prefix_graph_shapes():
+                    self._graph_sfx(b, S, L)
             if self.gemma is not None:
                 self._capture_deferred()
                 self._warm_long_sfx()
@@ -2858,7 +2871,7 @@ class GraphBackend(EagerBackend):
                          and len(packs[k][0]) - packs[k][2].index(1) <= self.PREFIX_SFX[-1]]
                 rest = [len(packs[k][0]) - packs[k][2].index(1) for k in short]
                 out += [([short[j] for j in idx], kind) for idx in self._chunks(rest, self.PREFIX_SFX, None,
-                                                                                self.PREFIX_ROWS[-1])]
+                                                                                self._prefix_rows())]
                 tree = [k for k in tree if k not in set(short)]
             roots = [packs[k][2].index(1) for k in tree]
             rest = [len(packs[k][0]) - r for k, r in zip(tree, roots)]
