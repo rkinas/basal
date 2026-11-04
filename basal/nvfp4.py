@@ -16,7 +16,11 @@ to even).
 import torch
 
 BLOCK = 16
-FP4_MAX, E4M3_MAX = 6.0, 448.0
+E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)  # the e2m1 magnitude of each code 0-7 (code bit 3: the sign)
+# rounding to the nearest e2m1 value: the midpoints between neighbouring codes, a value at a midpoint to the even code
+# (ties to even): from code k to k + 1 above the midpoint (>) when k is even, at or above it (>=) when k is odd
+CUTS = tuple(((a + b) / 2, k % 2 == 1) for k, (a, b) in enumerate(zip(E2M1, E2M1[1:])))
+FP4_MAX, E4M3_MAX = E2M1[-1], 448.0
 E4M3 = torch.float8_e4m3fn
 MARGIN = 2.0   # activations: the global scale covers 2 x the calibrated amax (values past it are clipped)
 CANDIDATES = tuple(1.0 - 0.04 * j for j in range(8))
@@ -30,18 +34,15 @@ def fits(lin):
 
 
 def _codes(u):
-    """fp32 values in units of their block scale -> e2m1 codes (sign bit 8), round to nearest, ties to even."""
+    """fp32 values in units of their block scale -> e2m1 codes (sign bit 8), round to nearest, ties to even (CUTS;
+    the activation kernel in _build compares with the same cuts)."""
     a = u.abs()
-    c = ((a > 0.25).int() + (a >= 0.75).int() + (a > 1.25).int() + (a >= 1.75).int() + (a > 2.5).int()
-         + (a >= 3.5).int() + (a > 5.0).int())
+    c = sum(((a >= t) if odd else (a > t)).int() for t, odd in CUTS)
     return (c | ((u < 0).int() << 3)).to(torch.uint8)
 
 
-_E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
-
-
 def _values(c):
-    v = torch.tensor(_E2M1, device=c.device)[(c & 7).long()]
+    v = torch.tensor(E2M1, device=c.device)[(c & 7).long()]
     return torch.where(c >= 8, -v, v)
 
 
@@ -129,6 +130,7 @@ def _build():
         scf = sc.to(tl.float32)
         u = tl.where(scf[:, :, None] > 0, tl.math.div_rn(v, tl.broadcast_to(scf[:, :, None], (BM, 4, 16))), 0.0)
         a = tl.abs(u)
+        # (CUTS, written out: a Triton kernel cannot loop over a Python table; test_nvfp4 checks them against it)
         c = ((a > 0.25).to(tl.int32) + (a >= 0.75).to(tl.int32) + (a > 1.25).to(tl.int32) + (a >= 1.75).to(tl.int32)
              + (a > 2.5).to(tl.int32) + (a >= 3.5).to(tl.int32) + (a > 5.0).to(tl.int32))
         c = c | ((u < 0).to(tl.int32) << 3)

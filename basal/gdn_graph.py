@@ -44,6 +44,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from . import adapter as adapter_module
+from .blockquant import fuse
 from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, _varlen_attention, compact_refused,
                      graph_memory_bytes, persist_compile_cache, set_attention, torch_varlen_available)
 
@@ -460,16 +461,6 @@ def _att_out(h, o, gate, o_w):
     return h + F.linear(o.transpose(1, 2).reshape(b, T, -1) * torch.sigmoid(gate), o_w)
 
 
-def _merged(mods):
-    """One weight for several Linear layers of one input (no bias), the layers' weights then views of it (no copy kept
-    beside them, and the transformers forward reads the same values) -> (weight, output sizes)."""
-    w = torch.cat([m.weight.detach() for m in mods])
-    sizes = [m.weight.shape[0] for m in mods]
-    for m, part in zip(mods, w.split(sizes)):
-        m.weight = torch.nn.Parameter(part, requires_grad=False)
-    return w, sizes
-
-
 class Qwen35Graph:
     """The forward of a Qwen3.5 decoder for GDNGraphBackend, layer by layer as transformers' Qwen3_5DecoderLayer (its
     modules' weights and maths; the projections that read one input are one GEMM):
@@ -497,17 +488,17 @@ class Qwen35Graph:
         self.rule = (fla_rule() if cuda else None) or inspect.unwrap(q35.torch_chunk_gated_delta_rule)
         self.args = []  # per layer: its weights and sizes for the functions above
         for lay, kind in zip(self.layers, self.kinds):
-            mlp = (lay.post_attention_layernorm.weight, _merged([lay.mlp.gate_proj, lay.mlp.up_proj])[0],
+            mlp = (lay.post_attention_layernorm.weight, fuse([lay.mlp.gate_proj, lay.mlp.up_proj])[0],
                    lay.mlp.down_proj.weight)
             if kind == "linear_attention":
                 a = lay.linear_attn
                 if a.conv1d.bias is not None:
                     raise ValueError("a Gated DeltaNet convolution with a bias (not in Qwen3.5)")
-                w_in, sizes = _merged([a.in_proj_qkv, a.in_proj_z, a.in_proj_b, a.in_proj_a])
+                w_in, sizes = fuse([a.in_proj_qkv, a.in_proj_z, a.in_proj_b, a.in_proj_a])
                 self.args.append(dict(a=a, nw=lay.input_layernorm.weight, w_in=w_in, sizes=sizes, mlp=mlp))
             else:
                 a = lay.self_attn
-                w_qkv, sizes = _merged([a.q_proj, a.k_proj, a.v_proj])
+                w_qkv, sizes = fuse([a.q_proj, a.k_proj, a.v_proj])
                 self.args.append(dict(a=a, nw=lay.input_layernorm.weight, w_qkv=w_qkv, sizes=sizes, mlp=mlp))
         att = [x["a"] for x, k in zip(self.args, self.kinds) if k == "full_attention"]
         gdn = [x["a"] for x, k in zip(self.args, self.kinds) if k == "linear_attention"]

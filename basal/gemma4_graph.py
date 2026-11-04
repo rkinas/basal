@@ -297,17 +297,13 @@ class Gemma4Graph:
 
     @staticmethod
     def _fuse(mods):
-        """One linear for several that read the same input: their weights concatenated into a new tensor, and the
-        modules' own weights become views of it (transformers' forward of the same model still runs; no second
-        copy). -> (linear, output sizes)."""
-        w = torch.cat([x.weight.detach() for x in mods])
+        """One linear for several that read the same input (blockquant.fuse: the modules' own weights become views of
+        its weight) -> (linear, output sizes)."""
+        from .blockquant import fuse
+        w, sizes = fuse(mods)
         lin = torch.nn.Linear(w.shape[1], w.shape[0], bias=False, device="meta", dtype=w.dtype)
         lin.weight = torch.nn.Parameter(w, requires_grad=False)
-        o = 0
-        for x in mods:
-            x.weight = torch.nn.Parameter(w[o: o + x.out_features], requires_grad=False)
-            o += x.out_features
-        return lin, [x.out_features for x in mods]
+        return lin, sizes
 
     @torch.no_grad()
     def _merge(self, layers=None):
