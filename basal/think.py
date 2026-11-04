@@ -220,7 +220,7 @@ class ThinkServer(Server):
             if body.get("facts") == "auto":  # the state readout 1 saw
                 state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
             todo = [q for q in to_items(state, body["questions"], self.max_options, force_lang=body.get("lang"))
-                    if self.routed(q, out["answers"][q["name"]], mode)]
+                    if out["answers"].get(q["name"]) is not None and self.routed(q, out["answers"][q["name"]], mode)]
         n_think = 0
         for q, (res, why) in zip(todo, await asyncio.gather(*(self.think_one(q) for q in todo))):
             old = out["answers"][q["name"]]
@@ -241,6 +241,8 @@ class ThinkServer(Server):
             n_think += 1
         out["usage"]["think_questions"] = n_think
         for a in out["answers"].values():  # every answer of a think server says whether it used the reasoning
+            if a is None:  # a question skipped by its ask_if
+                continue
             th = a.get("think") or {}
             a.setdefault("meta", {})["think"] = {"used": "tokens" in th, "tokens": th.get("tokens", 0)}
         out["usage"]["latency_ms"] = round(out["usage"]["latency_ms"] + (time.perf_counter() - t0) * 1000, 2)

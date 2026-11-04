@@ -5,8 +5,9 @@ import asyncio
 import threading
 from types import SimpleNamespace
 
+import pytest
 
-from basal import evidence
+from basal import evidence, server, think
 from basal.server import Server, to_items
 from tests.test_server import Tok
 
@@ -154,3 +155,29 @@ def test_forward_fails_the_requests_a_short_backend_result_does_not_cover():
         return [f.done() for f in futs]
     assert asyncio.run(run(2)) == [True, True]          # control: the contract is kept
     assert asyncio.run(run(1)) == [True, True]          # one group too few: both requests are settled (result or error)
+
+
+# Q30: a skipped (null) child crashed think
+def _think_server(monkeypatch, answers):
+    srv = think.ThinkServer.__new__(think.ThinkServer)
+    srv.think, srv.max_options, srv.cal, srv.think_cal, srv.think_cal_name, srv.think_log = "auto", 10, {}, {}, "off", None
+
+    async def decide(self, body):
+        return {"answers": answers, "usage": {"output_tokens": 0, "latency_ms": 0.0}}
+
+    async def think_one(q):
+        return ([0.6, 0.4][:len(q["keys"])], "notes", 3, 1.0), None
+    monkeypatch.setattr(server.Server, "decide", decide)
+    srv.think_one = think_one
+    return srv
+
+
+@pytest.mark.parametrize("mode", ["off", "force"])
+def test_think_skips_a_null_answer_of_a_skipped_child(monkeypatch, mode):
+    plain = {"type": "choice", "choice": "a", "probabilities": {"a": .9, "b": .1}, "confidence": .9}
+    srv = _think_server(monkeypatch, {"q": dict(plain), "child": None})
+    body = {"state": "s", "think": mode, "questions": {
+        "q": {"type": "choice", "criteria": {"a": "A", "b": "B"}},
+        "child": {"type": "choice", "criteria": {"a": "A", "b": "B"}, "ask_if": {"q": ["b"]}}}}
+    out = asyncio.run(srv.decide(body))["answers"]
+    assert out["child"] is None and out["q"]["meta"]["think"]["used"] is (mode == "force")
