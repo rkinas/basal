@@ -7,8 +7,9 @@ import json
 
 import pytest
 
+from basal import server
 from basal.calibrate import main
-from basal.server import Server, calibration_mismatch, load_calibration, parser, unvalidated_reason
+from basal.server import Server, calibration_mismatch, load_calibration, parser
 from tests.test_calibrate import engine  # noqa: F401 (fixture)
 
 CAL = {"prompt": 1, "temperature_per_prim": {"choice": 1.0, "noul": 1.0, "score": 1.0},
@@ -40,11 +41,15 @@ def test_a_file_of_another_model_certifies_nothing(tmp_path, engine, capsys):  #
     assert own.cal_mismatch is None and own.cal_unvalidated is None
     a = ask(own, {"state": "x", "questions": {"q": NOUL}})["q"]
     assert a["abstain"] is False and "calibration" not in a        # the same model: certified at 0.6
+    cls = {"type": "classify", "labels": {"a": "Alpha ~0.9", "b": "Beta ~0.1"}, "max_error": 0.05}
+    assert ask(own, {"state": "x", "questions": {"c": cls}})["c"]["automated"] == {"0.05": True}
     srv = serve(f, "Remek/basal-omni-1.1-max")
     assert "fitted on Remek/basal-omni-1.0-max" in srv.cal_mismatch
     assert "they are not applied" in capsys.readouterr().out
     assert srv.cal["temperature_per_prim"] == CAL["temperature_per_prim"]
     assert not {"thresholds", "task_thresholds", "conformal", "multi"} & set(srv.cal)
+    assert server.certified_table(srv.cal) == {}                   # GET /v1/models and the answers agree: nothing
+    assert ask(srv, {"state": "x", "questions": {"c": cls}})["c"]["automated"] == {"0.05": None}
     act = dict(NOUL, type="act", costs={"wrong": 2, "defer": 1})
     ans = ask(srv, {"state": "x", "questions": {"q": NOUL, "s": dict(NOUL, coverage=0.9), "a": act}})
     assert ans["q"]["abstain"] is True and ans["q"]["calibration"] == "unvalidated"
@@ -72,7 +77,7 @@ def test_load_calibration_and_the_shared_rule_agree(tmp_path):
                                       ({"orders": 1}, 1, "canonical", None)):
         f.write_text(json.dumps(dict(CAL, **data)), encoding="utf-8")
         _, _, got = load_calibration(tmp_path, "eager", f, None, orders, layout=layout)
-        assert got == unvalidated_reason(dict(CAL, **data), "C.json", orders, layout)
+        assert got == server.unvalidated_reason(dict(CAL, **data), "C.json", orders, layout)
         assert (got is None) == (why is None) and (why is None or why in got)
 
 
