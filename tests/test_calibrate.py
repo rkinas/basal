@@ -203,7 +203,7 @@ def test_calibrate_end_to_end_round_trips_through_the_server(tmp_path, engine, c
     assert pooled is not None and cal["thresholds"]["0.05"]["fit_upper95"] <= 0.05
     thr = certified(cal, 0.05, "noul")                 # the threshold basal-serve applies: the type's own, or none
 
-    srv = Server(parser().parse_args(["--mode", "eager", "--calibration", str(out)]))  # basal-serve's loader
+    srv = Server(parser().parse_args(["--mode", "eager", "--model", "stub", "--calibration", str(out)]))  # as served
     assert srv.cal == cal and srv.temps == cal["temperature_per_prim"]
 
     async def decide(body):

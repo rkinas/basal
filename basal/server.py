@@ -1019,7 +1019,10 @@ def calibration_mismatch(cal, name, md, adapter=None):
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return None
     model, rev = model_identity(name, md)
-    key = lambda s: Path(str(s)).name.lower()  # a repo id, a local copy or a served name
+    # both Hugging Face snapshots (a revision on each side): the whole repo id, so OrgA/x is not OrgB/x; otherwise the
+    # last part of the path, so a local copy matches its repo id
+    full = bool(fitted.get("revision") and rev)
+    key = lambda s: (str(s) if full else Path(str(s)).name).lower()
     if key(fitted["model"]) != key(model):
         return f"it was fitted on {fitted['model']}, the served model is {model}"
     if fitted.get("revision") and rev and fitted["revision"] != rev:
@@ -1030,8 +1033,22 @@ def calibration_mismatch(cal, name, md, adapter=None):
     return None
 
 
-# the parts of a file fitted on other option orders or another layout that do not hold for the served ones
+# the parts of a file fitted on other option orders, another layout or another model that do not hold for the served
+# ones
 UNVALIDATED_OUT = ("thresholds", "multi", "task_thresholds", "conformal")
+
+
+def unvalidated_reason(data, name, orders, layout="canonical"):
+    """Why the thresholds of calibration `data` (file `name`) do not hold for the served option orders and layout, None
+    when they do (or the file does not say): the rule of load_calibration, shared with basal-calibrate --from-rows."""
+    if not data:
+        return None
+    if calibration_layout(data) != (layout or "canonical"):  # another layout's thresholds do not hold here (2.4.1)
+        return f"{name} was fitted on the {calibration_layout(data)} layout, served with --layout {layout or 'canonical'}"
+    fitted = calibration_orders(data)
+    if fitted is not None and orders is not None and fitted != orders:
+        return f"{name} was fitted on {fitted} option order(s), served with {orders}"
+    return None
 
 
 def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layout="canonical", adapter=None):
@@ -1050,16 +1067,13 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     if data and adapter and not path and cal.parent != adapter.path:
         why = f"{cal.name} belongs to the base model, served with --adapter {adapter.name}"
         return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
-    if data and calibration_layout(data) != layout:  # another layout's thresholds do not hold here (2.4.1)
-        why = f"{cal.name} was fitted on the {calibration_layout(data)} layout, served with --layout {layout}"
-        return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
     fitted = calibration_orders(data)
     alt = cal.with_name(f"{cal.stem}.o{orders}{cal.suffix}")
-    if fitted is not None and fitted != orders and not path and alt.exists():
+    if calibration_layout(data) == layout and fitted is not None and fitted != orders and not path and alt.exists():
         return load_calibration(md, kind, alt, quant, orders, off, preset, layout, adapter)
-    if fitted is None or fitted == orders:
+    why = unvalidated_reason(data, cal.name, orders, layout)
+    if why is None:
         return data, cal, None
-    why = f"{cal.name} was fitted on {fitted} option order(s), served with {orders}"
     return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
 
 
@@ -1357,12 +1371,17 @@ class Server:
         own = a.calibration or (bool(self.adapter) and cal.parent == self.adapter.path)
         self.cal_mismatch = calibration_mismatch(self.cal, a.model, md, self.adapter) if own and not a.no_calibration \
             else None
+        unvalidated = self.cal_unvalidated
         if self.cal_mismatch:
             if getattr(a, "strict_calibration", False):
                 raise SystemExit(f"{cal}: {self.cal_mismatch} (--strict-calibration)")
-            print(f"basal: warning: {cal.name}: {self.cal_mismatch}; its thresholds were certified on that model "
+            # its thresholds were certified on that model: kept for the temperatures only, as a file of other orders
+            self.cal = {k: v for k, v in self.cal.items() if k not in UNVALIDATED_OUT}
+            self.cal_unvalidated = unvalidated or f"{cal.name}: {self.cal_mismatch}"
+            print(f"basal: warning: {cal.name}: {self.cal_mismatch}; its thresholds were certified on that model, so "
+                  "they are not applied: max_error defers and the answers are marked \"calibration\": \"unvalidated\" "
                   "(refit with basal-calibrate, or --strict-calibration to refuse such a file)", flush=True)
-        if self.cal_unvalidated:
+        if unvalidated:
             base_file = self.adapter and not a.calibration and cal.parent != self.adapter.path
             print(f"basal: warning: {self.cal_unvalidated}; its answers are marked \"calibration\": \"unvalidated\" "
                   "and max_error defers (" + ("fit a file for the adapter with basal-calibrate --adapter and put it in "
@@ -2364,7 +2383,7 @@ def parser():
                          "CALIBRATION.json; fit your own with basal-calibrate)")
     ap.add_argument("--strict-calibration", dest="strict_calibration", action="store_true",
                     help="refuse to start when the --calibration file was fitted on another model or revision "
-                         "(default: a warning)")
+                         "(default: a warning, and its thresholds are not applied)")
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
     ap.add_argument("--rank-max-candidates", dest="rank_max_candidates", type=int, default=rank.MAX_CANDIDATES,
                     metavar="N", help="rank questions (experimental): at most N candidates per request, all its rank "
