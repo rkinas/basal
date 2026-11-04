@@ -62,6 +62,9 @@ def _image(raw, n):
         if w * h > MAX_PIXELS:
             raise ValueError(f"media {n}: {w}x{h} pixels, more than {MAX_PIXELS:,}")
         im.load()
+        if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:  # onto white, not onto black
+            rgba = im.convert("RGBA")
+            im = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
         return im.convert("RGB")
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError) as e:
         raise ValueError(f"media {n}: not a readable image ({type(e).__name__})") from None
