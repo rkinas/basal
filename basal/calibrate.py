@@ -15,7 +15,7 @@ Input (JSONL): one /v1/systemone request per line, every question with its corre
                  "late": {"type": "noul", "instructions": "...", "gold": "yes"},
                  "urg":  {"type": "score", "instructions": "...", "criteria": ["low", "mid", "high"], "gold": 2}}}
   gold    choice: an option key or its description; noul: "yes" / "no" (true / false); score: the level index
-          (0 = first level), key or text; act: an outcome, as for choice (yes / no for true / false outcomes);
+          (0 = first level; an integer is always the index), key or text; act: an outcome, as for choice (yes / no for true / false outcomes);
           multi: the list of labels that apply (keys or descriptions; [] = none)
   group   optional, on the line or on a question: decisions of one group (twins, duplicates, one customer) stay on
           the same side of the FIT / CERT split; default: one group per line (its questions share the state). The
@@ -145,10 +145,13 @@ def gold_index(q, item):
             return 0 if s in YES else 1
         raise ValueError(f'gold must be "yes" or "no" (or true / false), got {g!r}')
     crit = q.get("criteria") or q.get("levels") or []
-    if isinstance(g, int) and not isinstance(g, bool) and item["type"] == "score" and isinstance(crit, list):
-        if 0 <= g < len(keys):
-            return g
-        raise ValueError(f"gold level {g} is out of range 0..{len(keys) - 1}")
+    if isinstance(g, int) and not isinstance(g, bool) and item["type"] == "score":  # an integer is the level index
+        if not 0 <= g < len(keys):
+            raise ValueError(f"gold level {g} is out of range 0..{len(keys) - 1}")
+        if str(g) in keys and keys.index(str(g)) != g:
+            raise ValueError(f"gold {g} is ambiguous: level index {g} is key {keys[g]!r}, while key {str(g)!r} is "
+                             f"level {keys.index(str(g))}; give the key as a string")
+        return g
     if not isinstance(g, (dict, list)) and str(g) in keys:
         return keys.index(str(g))
     texts = list(crit.values()) if isinstance(crit, dict) else list(crit)
@@ -291,6 +294,17 @@ def task_units(name, q, gold, state):
     return out
 
 
+# a labelled question is asked whatever the answers of the others: its gold is its answer (and a condition can name a
+# question of the other request, decisions or tasks)
+CONDITIONAL = ("ask_if", "depends_on")
+
+
+def group_of(q, rec, n):
+    """The split group of a labelled question: its own "group", else the line's "group", else the line's "id", else the
+    line number; null counts as not given (not one group "None" for every such line)."""
+    return str(next((x for x in (q.get("group"), rec.get("group"), rec.get("id")) if x is not None), n))
+
+
 def load(path):
     """Labelled JSONL -> (requests to send, decisions): the decision questions only (read() also returns the task
     questions). Raises InputError listing every problem with its line."""
@@ -336,14 +350,14 @@ def read(path):
                 if "gold" not in q:
                     errors.append(f'{at}: no "gold" answer')
                     continue
-                clean = {k: v for k, v in q.items() if k not in ("gold", "group", "family")}
+                clean = {k: v for k, v in q.items() if k not in ("gold", "group", "family") + CONDITIONAL}
                 try:
                     labelled = task_units(name, clean, q["gold"], rec["state"])
                 except (ValueError, KeyError, TypeError) as e:
                     errors.append(f"{at}: {str(e).removeprefix(f'question {name!r}: ')}")
                     continue
                 task_body["questions"][name] = clean
-                group = str(q.get("group", rec.get("group", rec.get("id", n))))
+                group = group_of(q, rec, n)
                 units += [dict(line=n, req=len(task_bodies), name=name, task=t, part=part, gold=g, group=group)
                           for part, g in labelled]
                 continue
@@ -359,7 +373,7 @@ def read(path):
                 errors.append(f'{at}: no "gold" answer')
                 continue
             clean = {k: v for k, v in q.items()
-                     if k not in ("gold", "group", "family", "evidence", "fallback_threshold")}
+                     if k not in ("gold", "group", "family", "evidence", "fallback_threshold") + CONDITIONAL}
             try:
                 item = to_items(rec["state"], {name: clean}, max_options(2))[0]  # the model's limit: when served
                 gold = gold_set(q, item) if t == "multi" else gold_index(q, item)
@@ -367,10 +381,9 @@ def read(path):
                 errors.append(f"{at}: {str(e).removeprefix(f'question {name!r}: ')}")
                 continue
             body["questions"][name] = clean
-            group = q.get("group", rec.get("group", rec.get("id", n)))
             d = dict(line=n, req=len(bodies), name=name, prim=item.get("base", t), gold=gold,
-                     keys=[str(k) for k in item["keys"]], group=str(group),
-                     family=str(q.get("family", rec.get("family", name))))
+                     keys=[str(k) for k in item["keys"]], group=group_of(q, rec, n),
+                     family=str(next((x for x in (q.get("family"), rec.get("family")) if x is not None), name)))
             if t == "multi":
                 d.update(prim="multi", set=dict(
                     id=label_set_id(item["keys"], item["labels"], item["fallback"]), objective=item["objective"],
@@ -470,8 +483,12 @@ def raw_rows(decisions, responses):
         if isinstance(r, Exception):
             failed[d["req"]] = f"line {d['line']}: {r}"
             continue
-        p = r["answers"][d["name"]]["probabilities"]
-        rows.append(dict(d, p=[float(p[k]) for k in d["keys"]]))
+        a = (r.get("answers") or {}).get(d["name"])
+        if not isinstance(a, dict) or not isinstance(a.get("probabilities"), dict):
+            failed[(d["req"], d["name"])] = f"line {d['line']}, question {d['name']!r}: no answer"
+            continue
+        p = a["probabilities"]
+        rows.append(dict(d, p=[float(p[k]) if isinstance(p.get(k), (int, float)) else math.nan for k in d["keys"]]))
     return rows, list(failed.values())
 
 
@@ -968,10 +985,35 @@ def fit_conformal(fit_rows, cert_rows, temps, buckets, levels):
     return dict(method=CONFORMAL_METHOD, levels=out)
 
 
+def row_problem(r):
+    """Why a row (an engine readout, or a line of a --save-rows file) cannot enter the fit, None when it can: its
+    probabilities must be finite numbers in [0, 1], one per option (at least two; multi: one per label), and its gold
+    an option index (multi: a list of label indices)."""
+    if not isinstance(r, dict) or r.get("prim") not in PRIMS + ("multi",):
+        return "not a row of a decision type"
+    p, g = r.get("p"), r.get("gold")
+    if not isinstance(p, list) or len(p) < (1 if r["prim"] == "multi" else 2) or any(isinstance(x, bool) or not isinstance(x, (int, float))
+                                                    or not 0 <= x <= 1 for x in p):  # NaN fails 0 <= x
+        return "probabilities that are not finite numbers in [0, 1]"
+    if r.get("keys") is not None and len(r["keys"]) != len(p):
+        return f"{len(p)} probabilities for {len(r['keys'])} options"
+    golds = g if r["prim"] == "multi" and isinstance(g, list) else [g]
+    if r["prim"] != "multi" and isinstance(g, list) or any(isinstance(x, bool) or not isinstance(x, int)
+                                                           or not 0 <= x < len(p) for x in golds):
+        return f"gold {g!r} is not an option index"
+    return None
+
+
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
         min_blend=MIN_BLEND, conformal=()):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
-    with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set."""
+    with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set.
+    Rows that cannot enter the fit (row_problem: NaN probabilities, a gold out of range) are left out and reported."""
+    dropped = [f"line {r.get('line', '?') if isinstance(r, dict) else '?'}: {why}"
+               for r in rows if (why := row_problem(r))]
+    rows = [r for r in rows if not row_problem(r)]
+    if not rows:
+        raise SystemExit("no decisions to fit: " + "; ".join(dropped[:3]))
     sets = [r for r in rows if r["prim"] == "multi"]
     rows = [r for r in rows if r["prim"] != "multi"]
     fit_rows = [r for r in rows if not is_cert(r["group"])]
@@ -981,7 +1023,8 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     temps, source, buckets, bsource = fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend)
     cs_fit, cs_cert = served(fit_rows, temps, buckets), served(cert_rows, temps, buckets)
     shipped_cert = served(cert_rows, shipped_T, shipped_B)
-    thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={})
+    thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={},
+                                  dropped=dropped)
     automated, automated_pooled, automated_error = {}, {}, {}
     for risk in targets:
         thr = threshold(cs_fit, risk)
@@ -1085,7 +1128,10 @@ def task_rows(units, responses):
         if isinstance(r, Exception):
             failed[u["req"]] = f"line {u['line']}: {r}"
             continue
-        a = r["answers"][u["name"]]
+        a = (r.get("answers") or {}).get(u["name"])
+        if not isinstance(a, dict):
+            failed[(u["req"], u["name"])] = f"line {u['line']}, question {u['name']!r}: no answer"
+            continue
         if u["task"] == "classify":
             conf, ok = a["confidence"], a["label"] == u["gold"]
         elif u["task"] == "verify":
@@ -1097,6 +1143,9 @@ def task_rows(units, responses):
                 continue
             kind, gold = u["gold"]
             conf, ok = f["confidence"], field_correct(kind, f["value"], gold)
+        if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0 <= conf <= 1:  # NaN is not in [0, 1]
+            failed[(u["req"], u["name"], u["part"])] = f"line {u['line']}, question {u['name']!r}: confidence {conf!r}"
+            continue
         rows.append(dict(task=u["task"], group=u["group"], c=float(conf), ok=bool(ok)))
     return rows, list(failed.values())
 
@@ -1302,6 +1351,8 @@ def warnings(report, targets):
         out.append(f"only {n} labelled decisions: the bounds are loose (a few hundred usually certify 5%)")
     if not report["n_fit"] or not report["n_cert"]:
         out.append("one side of the FIT / CERT split is empty: use more groups")
+    if report.get("dropped"):
+        out.append(f"{len(report['dropped'])} row(s) left out of the fit: " + "; ".join(report["dropped"][:3]))
     for t, r in report["types"].items():
         if clustered(t, r["n_fit"], r.get("fit_groups")):
             out.append(clustered(t, r["n_fit"], r.get("fit_groups")))

@@ -69,12 +69,16 @@ One `/v1/systemone` request per line; every question carries its correct answer 
 |---|---|
 | `gold` (choice) | an option key, or its description |
 | `gold` (noul) | `"yes"` / `"no"` (or `true` / `false`) |
-| `gold` (score) | the level index (0 = first level), its key, or its text |
+| `gold` (score) | the level index (0 = first level), its key, or its text; an integer is always the index, and is refused when a numeric key names another level (`{"1": ..., "2": ..., "3": ...}` with `"gold": 2`: give `"2"`) |
 | `gold` (act) | an outcome, as for choice (`"yes"` / `"no"` for `true` / `false` outcomes); `act` counts as its base type |
 | `gold` (multi) | the list of labels that apply: keys or descriptions, with `[]` for none (see [below](#multi-the-fallback-threshold-of-a-label-set)) |
-| `group` | optional, on the line or on a question: decisions of one group (twins, duplicates, one customer) stay on the same side of the split; default: one group per line, since the questions of a request share its state. The bound of a threshold counts every decision as independent: when a type or task has more FIT decisions than groups (the claims of one document, the fields of one form), errors shared within a group make it optimistic, and the report warns with the decisions per group |
+| `group` | optional, on the line or on a question: decisions of one group (twins, duplicates, one customer) stay on the same side of the split; default: one group per line, since the questions of a request share its state (`null` counts as not given, as for `id`). The bound of a threshold counts every decision as independent: when a type or task has more FIT decisions than groups (the claims of one document, the fields of one form), errors shared within a group make it optimistic, and the report warns with the decisions per group |
 | `family` | optional, on the line or on a question: the task family of the leave-one-family-out ECE (one kind of decision: a routing question, a document check); default: the question name |
 | `id` | optional, used in messages |
+
+A question's `ask_if` / `depends_on` is dropped: every labelled question is asked, whatever the answers of the others.
+Rows whose probabilities are not finite numbers in [0, 1], or whose gold is not an option, are left out of the fit
+and reported (also from `--from-rows` files).
 
 Task questions (`classify`, `verify`, `extract`, see [TASKS.md](TASKS.md)) carry `"gold"` too, and certify the
 `automated` flag of their answers ([below](#tasks-classify-verify-extract)):
