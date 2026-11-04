@@ -24,6 +24,8 @@ the tokenizer splits.
 import argparse
 import datetime
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -85,8 +87,18 @@ def attach(base, out, fmt=1, chat_template=None, revision=None, force=False):
             continue
         link = out / f.name
         if link.is_symlink() or link.exists():
-            link.unlink()
-        link.symlink_to(f.resolve() if f.is_symlink() else f.absolute())
+            shutil.rmtree(link) if link.is_dir() and not link.is_symlink() else link.unlink()
+        target = f.resolve() if f.is_symlink() else f.absolute()
+        try:
+            link.symlink_to(target, target_is_directory=target.is_dir())
+        except OSError:
+            if target.is_dir():
+                shutil.copytree(target, link)
+            else:
+                try:
+                    os.link(target, link)
+                except OSError:
+                    shutil.copy2(target, link)
     tok = AutoTokenizer.from_pretrained(out)
     template = None
     if chat_template or not getattr(tok, "chat_template", None):

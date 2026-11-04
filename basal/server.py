@@ -1006,7 +1006,7 @@ def calibration_mismatch(cal, name, md, adapter=None):
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return None
     model, rev = model_identity(name, md)
-    key = lambda s: str(s).rstrip("/").split("/")[-1].lower()  # a repo id, a local copy or a served name
+    key = lambda s: Path(str(s)).name.lower()  # a repo id, a local copy or a served name
     if key(fitted["model"]) != key(model):
         return f"it was fitted on {fitted['model']}, the served model is {model}"
     if fitted.get("revision") and rev and fitted["revision"] != rev:
@@ -1240,7 +1240,7 @@ class Server:
         if why:
             raise SystemExit(why)
         shared = self.orders != 1 or self.soam  # prefix sharing: option orders, or the questions of a request
-        base = a.model.rstrip("/").split("/")[-1]
+        base = Path(a.model).name or Path(a.model).resolve().name  # --model . : the directory's name
         self.name = a.name or (f"{base}+{self.adapter.name}" if self.adapter else base)
         quant = a.quant or quant
         why = nvfp4_calibration_refused(md, kind, quant, a)

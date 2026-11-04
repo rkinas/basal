@@ -68,7 +68,8 @@ def test_save_and_load(tmp_path, monkeypatch):
 
     import basal
     calls = {}
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for var in ("HOME", "USERPROFILE"):
+        monkeypatch.setenv(var, str(tmp_path / "home"))
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", default_cache_dir())  # as Inductor sets it on import
     # basal-serve's case: nothing given before basal was imported (a test that loads Triton first sets the default)
     monkeypatch.setattr(basal, "INDUCTOR_CACHE_DIR_GIVEN", False)

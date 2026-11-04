@@ -379,6 +379,14 @@ def serve(md, *args):
     return Server(a), a
 
 
+def test_a_model_given_as_the_current_directory_keeps_a_name(served, monkeypatch):
+    """--model . (or ./): the served name is the directory's; Path(".").name is empty."""
+    md, _ = served
+    monkeypatch.chdir(md)
+    for given in (".", "./", str(md) + "/"):
+        assert serve(given)[0].name == "model"
+
+
 def test_the_adapters_calibration_file_is_served_with_its_name(served):
     md, ad = served
     ident = adapter_module.identity(ad)

@@ -107,7 +107,7 @@ def test_sharded(tmp_path, subdir):
     out = interpolate(old, new, 0.5, tmp_path / "o")
     index = json.loads((out / "model.safetensors.index.json").read_text())
     assert all((out / f).is_file() for f in index["weight_map"].values())  # the index finds every shard
-    assert sorted(str(p.relative_to(out)) for p in out.rglob("*.safetensors")) == [
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*.safetensors")) == [
         f"{subdir}model-00001-of-00002.safetensors", f"{subdir}model-00002-of-00002.safetensors"]
     r = load_dir(out)
     assert torch.equal(r["a.weight"], ((to["a.weight"].float() + tn["a.weight"].float()) / 2).to(torch.bfloat16))

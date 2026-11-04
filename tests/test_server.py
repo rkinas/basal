@@ -671,7 +671,9 @@ def test_config_probes_warn_on_a_real_config_that_cannot_be_read(tmp_path, capsy
             pytest.skip("root reads a file without permissions")
     assert getattr(server_module, probe)(str(tmp_path)) == default
     err = capsys.readouterr().err
-    assert f"basal: warning: {probe}" in err and str(tmp_path) in err and error in err
+    errors = (error, "PermissionError") if damage == "directory" and sys.platform == "win32" else (error,)
+    # Windows refuses to open a directory with PermissionError, POSIX with IsADirectoryError
+    assert f"basal: warning: {probe}" in err and str(tmp_path) in err and any(e in err for e in errors)
 
 
 @pytest.mark.parametrize("probe, default", [("_gemma4", False), ("_recurrent", None), ("_gdn", False)])

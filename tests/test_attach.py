@@ -3,6 +3,7 @@ Gemma 4 models with a character-level tokenizer, CPU): the directory it writes, 
 basal-serve answering with it and basal-calibrate fitting its calibration."""
 import asyncio
 import json
+import os
 import string
 
 import pytest
@@ -92,7 +93,8 @@ def test_attach_and_serve(tmp_path, build):
     assert meta["attached"]["chat_template"] == "the base's" and meta["attached"]["model_type"].startswith(
         "qwen3" if build is qwen else "gemma4")
     assert json.loads((out / "basal.json").read_text()) == meta
-    assert (out / "config.json").is_symlink() and (out / "model.safetensors").is_symlink()
+    assert os.path.samefile(out / "config.json", base / "config.json") and os.path.samefile(
+        out / "model.safetensors", base / "model.safetensors")
     tok = PreTrainedTokenizerFast.from_pretrained(out)
     assert meta["readout"]["ids"] == [tok.convert_tokens_to_ids(c) for c in "ABCDEFGHIJ"]
     cal = json.loads((out / "CALIBRATION.json").read_text())
