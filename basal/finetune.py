@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from . import __version__
 from .calibrate import InputError, load
 from .engine import default_device, resolve
+from .textio import read_text
 from .facts import inject as inject_facts
 from .prompt import letter_ids, max_options, model_format, model_layout, render
 from .server import to_items
@@ -48,7 +49,7 @@ def split(path, holdout=0.25, seed=0):
     """Labelled JSONL -> (train decisions with their bodies, held-out line texts, skipped counts). A line goes with the
     group of its first decision."""
     bodies, decisions = load(path)
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    lines = read_text(path).splitlines()
     side = {}
     for d in decisions:
         side.setdefault(d["line"], in_holdout(d["group"], holdout, seed))

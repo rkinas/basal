@@ -43,6 +43,7 @@ import time
 
 from .prompt import lang_of
 from .rank import chunks
+from .textio import read_text
 
 LABELS = {
     "en": {"topic": ("Topic", "Topics"), "page": ("Page", "Pages"), "section": ("Section", "Sections"),
@@ -113,8 +114,7 @@ class Tree:
 
     @classmethod
     def load(cls, path):
-        with open(path, encoding="utf-8") as f:
-            return cls(json.loads(line) for line in f if line.strip())
+        return cls(json.loads(line.rstrip("\r")) for line in read_text(path).split("\n") if line.strip())  # not splitlines: U+2028 stands raw in a JSON string
 
     def save(self, path):
         with open(path, "w", encoding="utf-8") as f:
@@ -445,16 +445,15 @@ def main(argv=None):
                 print(f"{n:>3}  {h['score']:.3f}  {h['id']}  {h['text'][:100]}")
             print(f"{r['latency_ms']:.0f} ms, {sum(s['requests'] for s in r['stages'])} requests", file=sys.stderr)
             return
-        with open(a.queries, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                q = json.loads(line)
-                r = nav.search(q.get("turns") or q["query"], k=a.k, pin=q.get("pin", ()), extra=q.get("extra", ()))
-                print(json.dumps({"id": q.get("id"), "passages": [h["id"] for h in r["passages"]],
-                                  "scores": [h["score"] for h in r["passages"]], "latency_ms": r["latency_ms"],
-                                  "stages": [{k: v for k, v in s.items() if k != "kept"} for s in r["stages"]]},
-                                 ensure_ascii=False), flush=True)
+        for line in read_text(a.queries).split("\n"):  # not splitlines: U+2028 stands raw in a JSON string
+            if not line.strip():
+                continue
+            q = json.loads(line.rstrip("\r"))
+            r = nav.search(q.get("turns") or q["query"], k=a.k, pin=q.get("pin", ()), extra=q.get("extra", ()))
+            print(json.dumps({"id": q.get("id"), "passages": [h["id"] for h in r["passages"]],
+                              "scores": [h["score"] for h in r["passages"]], "latency_ms": r["latency_ms"],
+                              "stages": [{k: v for k, v in s.items() if k != "kept"} for s in r["stages"]]},
+                             ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

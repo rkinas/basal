@@ -44,6 +44,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .textio import read_text
+
 ADDED_TOKEN_SCORE = -1000.0  # llama.cpp's converter scores the added tokens so; the -GGUF files keep it
 
 SYSTEMONE_TYPE = "openjev"  # llama.cpp's decision encoding that reads basal's prompt format 2 (codes A-Z)
@@ -307,7 +309,7 @@ def systemone_metadata(model_dir, calibration=None):
     template = systemone_template(*chat_frame(tok), specials=special_names(tok))
     check_systemone(tok, template)
     cal_path = systemone_calibration(model_dir, calibration)
-    temps = systemone_temperatures(json.loads(cal_path.read_text(encoding="utf-8")))
+    temps = systemone_temperatures(json.loads(read_text(cal_path)))
     meta = {"decision.type": ("string", SYSTEMONE_TYPE), SYSTEMONE_TEMPLATE: ("string", template)}
     meta.update({f"decision.temperature.{k}": ("float32", t) for k, t in temps.items()})
     return meta, cal_path

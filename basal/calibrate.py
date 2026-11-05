@@ -98,6 +98,7 @@ from .server import (MODES, Server, _text, add_engine_args, answer_set, calibrat
                      temper, temperature, to_items)
 from .sets import label_set_id
 from .sets import select as select_set
+from .textio import read_text
 
 PRIMS = ("choice", "noul", "score")
 BUCKETS = (("2-10", 2, 10), ("11-26", 11, 26), ("27-255", 27, 255))  # option-count buckets of calibration file 2
@@ -1018,7 +1019,7 @@ def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"
         return {}, None
     if orders is None:  # a server that does not report its orders: the file as it is
         f = calibration_file(md, kind, path, quant, preset, layout)
-        return (json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}), f
+        return (json.loads(read_text(f)) if f.exists() else {}), f
     data, f, why = load_calibration(md, kind, path, quant, orders, preset=preset, layout=layout, adapter=adapter)
     if why:
         print(f"warning: {why}: its thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
@@ -1097,7 +1098,7 @@ def reference_values(ref):
     p = Path(ref)
     if not p.exists():
         raise SystemExit(f"--reference {ref}: not {' or '.join(REFERENCE)} and no such file")
-    lf = (json.loads(p.read_text(encoding="utf-8")).get("gates") or {}).get("ece_lofo") or {}
+    lf = (json.loads(read_text(p)).get("gates") or {}).get("ece_lofo") or {}
     vals = {t: v["mean"] for t, v in lf.items() if isinstance(v, dict) and v.get("mean") is not None}
     if not vals:
         raise SystemExit(f"--reference {ref}: the file has no gates.ece_lofo means")
@@ -1325,7 +1326,7 @@ def refit(a, targets, reference, reference_name):
         print(f"warning: {w}", file=sys.stderr)
     base_file = None if a.no_calibration else (
         Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None))
-    baseline = json.loads(base_file.read_text(encoding="utf-8")) if base_file is not None and base_file.exists() else {}
+    baseline = json.loads(read_text(base_file)) if base_file is not None and base_file.exists() else {}
     fo = calibration_orders(baseline)
     if baseline and fo is not None and head.get("orders") is not None and fo != head["orders"]:  # as basal-serve
         print(f"warning: {base_file.name} was fitted on {fo} option order(s), the rows on {head['orders']}: its "
