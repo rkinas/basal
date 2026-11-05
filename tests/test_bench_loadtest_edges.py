@@ -1,0 +1,161 @@
+"""Regression tests for fix/bench-loadtest-edges (Z-1082)."""
+import argparse
+import asyncio
+import contextlib
+import io
+import json
+import sys
+import threading
+
+import pytest
+
+from basal import agree
+from basal import bench
+from basal import loadtest as lt
+from basal import metrics
+
+
+def test_h5_a_gold_that_is_not_an_option_index_is_left_out_and_said(capsys):
+    qs = [dict(gold=True, options=["a", "b"]), dict(gold=1, options=["a", "b"]), dict(gold=-1, options=["a", "b"]),
+          dict(gold=7, options=["a", "b"]), dict(gold="1", options=["a", "b"]), dict(options=["a", "b"])]
+    assert agree.gold_items(qs, 10) == [(11, 1)]
+    assert "4 item(s)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("gold", [7, -1, True, False, "B"])
+def test_bg_a_gold_that_is_not_an_option_index_stops_the_bench(tmp_path, gold):
+    path = tmp_path / "q.jsonl"
+    path.write_text("\n".join(json.dumps(dict(state="s", question="q", options=["a", "b"], gold=g))
+                              for g in [0] * 19 + [gold]), encoding="utf-8")
+    qs = bench.load_questions(str(path), 50)  # the shared reader does not judge the gold
+    assert len(qs) == 20
+    with pytest.raises(SystemExit, match="option index"):
+        bench.check_gold(qs)
+
+
+def test_bg_valid_golds_and_questions_without_a_gold_are_loaded(tmp_path):
+    path = tmp_path / "q.jsonl"
+    path.write_text(json.dumps(dict(state="s", question="q", options=["a", "b"], gold=1)) + "\n"
+                    + json.dumps(dict(state="s", question="q", options=["a", "b"])), encoding="utf-8")
+    qs = bench.load_questions(str(path), 50)
+    bench.check_gold(qs)
+    assert len(qs) == 2
+
+
+def test_bg_options_that_are_not_a_list_stop_the_bench_with_file_and_line(tmp_path):
+    path = tmp_path / "q.jsonl"
+    path.write_text(json.dumps(dict(state="s", question="q", options=["a", "b"], gold=0)) + "\n"
+                    + json.dumps(dict(state="s", question="q", options=5, gold=1)), encoding="utf-8")
+    qs = bench.load_questions(str(path), 50)
+    with pytest.raises(SystemExit, match=r"q\.jsonl:2: options must be a list, not int"):
+        bench.check_gold(qs)
+
+
+def test_bg_the_gold_message_names_file_and_line(tmp_path):
+    path = tmp_path / "q.jsonl"
+    path.write_text(json.dumps(dict(state="s", question="q", options=["a", "b"], gold=0)) + "\n"
+                    + json.dumps(dict(state="s", question="q", options=["a", "b"], gold="B")), encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"q\.jsonl:2: gold 'B'"):
+        bench.check_gold(bench.load_questions(str(path), 50))
+
+
+class Reply:
+    status_code = 200
+
+    def __init__(self, n_answers=2):
+        self.n = n_answers
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"answers": {f"q{i}": {"probabilities": {"a": .5, "b": .5}} for i in range(self.n)}}
+
+
+class Client:
+    hook = staticmethod(lambda count: Reply())
+    count = 0
+
+    def __init__(self, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None):
+        Client.count += 1
+        return Client.hook(Client.count)
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    Client.count, Client.hook = 0, staticmethod(lambda count: Reply())
+    monkeypatch.setattr(lt.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(lt, "load_questions", lambda p, n: [dict(state="s", question="q", options=["a", "b"])] * n)
+    return Client
+
+
+def ns(**kw):
+    d = dict(url="http://x", questions=[], synthetic=None, long_frac=0.0, seed=0, questions_per_request=1,
+             n_seq=3, n_conc=2, concurrency=4, early_exit=None, out=None, determinism=0)
+    d.update(kw)
+    return argparse.Namespace(**d)
+
+
+def within(fn, seconds=3):
+    """fn() in a daemon thread: ('hang',) when it does not return in time (main loops forever on these inputs)."""
+    box = []
+
+    def target():
+        try:
+            box.append(("done", fn()))
+        except SystemExit as e:
+            box.append(("exit", e.code))
+        except BaseException as e:  # noqa: BLE001
+            box.append(("raised", repr(e)))
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(seconds)
+    return box[0] if box else ("hang",)
+
+
+def test_h6b_determinism_warns_when_the_mixed_pass_repeats_the_probe(fake_http, monkeypatch):
+    seen = {}
+
+    async def fake_determinism(a, bodies):
+        seen["same"] = bodies[:a.determinism] == bodies[a.determinism:2 * a.determinism]
+    monkeypatch.setattr(lt, "determinism", fake_determinism)
+    monkeypatch.setattr(sys, "argv", ["lt", "--determinism", "4"])
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        lt.main()
+    assert not seen["same"] or "distinct" in err.getvalue()
+
+
+def test_n2_a_question_file_without_a_usable_question_fails_fast(fake_http, monkeypatch):
+    monkeypatch.setattr(lt, "load_questions", lambda p, n: [])
+    assert within(lambda: asyncio.run(lt.run(ns())))[0] == "exit"
+
+
+def determinism_report(capsys, answers_for):
+    Client.count, Client.hook = 0, staticmethod(answers_for)
+    body = lt.body(dict(state="s", question="q", options=["a", "b"]))
+    asyncio.run(lt.determinism(ns(determinism=4, concurrency=2), [body] * 8))
+    return json.loads(capsys.readouterr().out)["determinism"]
+
+
+def test_d2_an_answer_that_vanishes_under_load_is_not_identical(fake_http, capsys):
+    # the first 4 calls are the sequential "alone" pass, the rest run under load and lose an answer
+    assert determinism_report(capsys, lambda c: Reply(2 if c <= 4 else 1))["identical"] < 4
+
+
+def test_d2_equal_answers_are_identical(fake_http, capsys):
+    assert determinism_report(capsys, lambda c: Reply(2))["identical"] == 4
+
+
+def test_h7_help_text_is_escaped_like_a_label_value():
+    out = metrics.prometheus([("basal_x", "a\\b\nc", "gauge", [({}, 1)])])
+    assert out.count("\n") == 3 and "a\\\\b\\nc" in out

@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -238,6 +239,16 @@ def backend_factory(spec, md, a, fmt):
 PROBE = "Stan: zażalenie złożono 3 marca 2026 r. State: 12.50 EUR"
 
 
+def gold_items(qs, offset):
+    """(item index, gold) of the questions whose gold is an option index; the others are left out, and said."""
+    gold = [(offset + i, q["gold"]) for i, q in enumerate(qs)
+            if isinstance(q.get("gold"), int) and not isinstance(q["gold"], bool) and 0 <= q["gold"] < len(q["options"])]
+    if sum("gold" in q for q in qs) != len(gold):
+        print(f"warning: {sum('gold' in q for q in qs) - len(gold)} item(s) with a gold that is not an option index "
+              "are left out of the accuracy", file=sys.stderr)
+    return gold
+
+
 def main(argv=None):
     import sys
     argv = sys.argv[1:] if argv is None else argv
@@ -285,7 +296,7 @@ def main(argv=None):
         qs = [q for q in qs if "options" in q and 2 <= len(q["options"]) <= (255 if fmt == 2 else 10)][: a.n_questions]
     single, multi, long = build(tok, fmt, a.n_single, a.n_multi, a.n_long, a.seed, qs)
     sets = {"single": single, "multi": multi, "long": long}
-    gold = [(a.n_single + i, q["gold"]) for i, q in enumerate(qs) if isinstance(q.get("gold"), int)]
+    gold = gold_items(qs, a.n_single)
     model, revision = model_identity(a.model, md)
     key = cache_key(model, revision, __version__, a.reference, sets, reference_weights(a))
     path = Path(a.cache) / f"{key}.json" if a.cache else None

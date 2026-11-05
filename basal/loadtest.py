@@ -12,6 +12,7 @@ import asyncio
 import json
 import math
 import statistics
+import sys
 import time
 from pathlib import Path
 
@@ -45,6 +46,8 @@ async def run(a):
     n = 10 + a.n_seq + a.n_conc
     qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else load_questions(a.questions, n)
     bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
+    if not bodies:
+        raise SystemExit("no questions with options in --questions")
     while len(bodies) < n:  # small question files are reused
         bodies += bodies
     async with httpx.AsyncClient(timeout=300) as c:
@@ -100,7 +103,8 @@ async def determinism(a, bodies):
         mixed = [x for pair in zip(probe, other) for x in pair]
         res = await asyncio.gather(*[one(b) for b in mixed])
     loaded = [probs(r) for r in res[::2]]
-    diffs = [max(abs(x - y) for pa, qa in zip(p, q) for x, y in zip(pa, qa)) for p, q in zip(alone, loaded)]
+    diffs = [1.0 if [len(pa) for pa in p] != [len(qa) for qa in q] else  # an answer that vanished under load: the largest |dp|
+             max(abs(x - y) for pa, qa in zip(p, q) for x, y in zip(pa, qa)) for p, q in zip(alone, loaded)]
     top = lambda ps: max(range(len(ps)), key=ps.__getitem__)  # noqa: E731
     flips = sum(top(pa) != top(qa) for p, q in zip(alone, loaded) for pa, qa in zip(p, q))
     out = dict(url=a.url, determinism=dict(requests=n, identical=sum(d == 0.0 for d in diffs), max_abs_diff=max(diffs),
@@ -138,8 +142,13 @@ def main():
         qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic \
             else load_questions(a.questions, n)
         bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
+        if not bodies:
+            raise SystemExit("no questions with options in --questions")
         while len(bodies) < n:
             bodies += bodies
+        if len({json.dumps(b, sort_keys=True) for b in bodies[:n]} | {json.dumps(b, sort_keys=True) for b in bodies[n:2 * n]}) < 2 * n:
+            print("warning: fewer than 2 x N distinct requests: the mixed pass repeats requests of the probe "
+                  "(a weaker test; give more questions or --synthetic)", file=sys.stderr)
         return asyncio.run(determinism(a, bodies))
     asyncio.run(run(a))
 

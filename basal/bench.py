@@ -144,15 +144,44 @@ EXAMPLES = Path(__file__).resolve().parent / "examples"  # installed with the pa
 DEFAULT_QUESTIONS = [str(EXAMPLES / f) for f in ("questions.jsonl", "choice.jsonl", "noul.jsonl", "score.jsonl")]
 
 
+class _Item(dict):
+    """A question as read from a file; src is "file:line", for the message of a check made later (check_gold)."""
+    src = ""
+
+
 def load_questions(paths, n, seed=0):
     """Simple-format items {"state", "question", "options", "gold"?} from one or more JSONL files (full-request lines
     with "questions" are skipped)."""
     if isinstance(paths, (str, Path)):
         paths = [paths]
-    qs = [json.loads(line) for p in paths for line in Path(p).read_text(encoding="utf-8").splitlines() if line.strip()]
-    qs = [q for q in qs if "options" in q]
+    qs = []
+    for p in paths:
+        for lineno, line in enumerate(Path(p).read_text(encoding="utf-8").splitlines(), 1):
+            if line.strip():
+                q = json.loads(line)
+                if "options" in q:
+                    if isinstance(q, dict):
+                        q = _Item(q)
+                        q.src = f"{p}:{lineno}"
+                    qs.append(q)
     random.Random(seed).shuffle(qs)
     return qs[:n]
+
+
+def check_gold(qs):
+    """basal-bench scores against gold, so a gold that is not an option index stops it (a wrong gold reads as option 0 and
+    shows an accuracy of 0.9 or 1.0 in silence). Only the bench calls this: loadtest and ordercheck never read gold and
+    take such a file as they always did."""
+    for q in qs:
+        where = getattr(q, "src", "") or "a question"
+        opts = q.get("options")
+        if "gold" not in q:
+            continue
+        if not isinstance(opts, list):
+            raise SystemExit(f"{where}: options must be a list, not {type(opts).__name__}")
+        g = q["gold"]
+        if not (isinstance(g, int) and not isinstance(g, bool) and 0 <= g < len(opts)):
+            raise SystemExit(f"{where}: gold {g!r} of {str(q.get('question', ''))[:40]!r} is not an option index 0..{len(opts) - 1}")
 
 
 def groups_for(tok, qs, fmt=1):
@@ -276,6 +305,7 @@ def main():
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
     qs = load_questions(a.questions, a.n)
+    check_gold(qs)
     fmt = model_format(md)
     ref, rows = None, []
     for mode in a.modes:
