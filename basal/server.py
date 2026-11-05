@@ -2848,6 +2848,11 @@ def parser():
     ap.add_argument("--api-keys", default=None, metavar="PATH",
                     help="JSON API key file; when set, require a key for every endpoint except GET and HEAD /health")
     ap.add_argument("--cors-origins", default="", help="comma-separated browser origins allowed by CORS")
+    ap.add_argument("--allowed-hosts", dest="allowed_hosts", default=None, metavar="H[,H...]",
+                    help="the Host names a request may give (and the hosts of web pages that may call it), besides "
+                         "localhost / 127.0.0.1 / ::1; others answer 403. Default: checked only when bound to a "
+                         "loopback --host without --api-keys (a web page cannot reach the server through DNS "
+                         "rebinding); \"*\": never checked")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--error-format", dest="error_format", choices=["basal", "openai"], default="basal",
@@ -3117,6 +3122,21 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                      middleware=limit)
 
 
+def served_app(srv, a, mcp=None, ui=None):
+    """The ASGI app basal-serve runs: http_app behind the API keys (protect), request ids, the UI page and, when
+    auth.allowed_hosts says so (a loopback --host without --api-keys, or --allowed-hosts), the Host / Origin check."""
+    from .auth import ApiKeys, allowed_hosts, host_check, protect, request_ids
+    origins = [origin.strip() for origin in a.cors_origins.split(",") if origin.strip()]
+    app = protect(http_app(srv, a.mode, mcp, a.error_format, ui), ApiKeys(a.api_keys) if a.api_keys else None, origins)
+    app = request_ids(ui.page(app) if ui is not None else app)
+    hosts = allowed_hosts(a.host, getattr(a, "allowed_hosts", None), a.api_keys)
+    if hosts is not None:  # (outermost: a request from a page of another site is refused before anything reads it)
+        app = host_check(app, hosts, origins)
+        print(f"basal: requests must name {', '.join(sorted(hosts))} as their host (--allowed-hosts to widen)",
+              flush=True)
+    return app
+
+
 def main():
     exit_on_sigterm()  # SIGTERM (kill, docker stop) runs the exit handlers: the merged adapter copy, the vLLM sidecar
     a = parser().parse_args()
@@ -3177,10 +3197,7 @@ def main():
         print(f"basal: web UI at http://{a.host}:{a.port}/ui" + (" (/ui/state needs an API key)" if a.api_keys else
               " (open to whoever reaches this port; --api-keys to require a key)")
               + ("; --ui full keeps the last 200 requests' text in memory for it" if a.ui == "full" else ""), flush=True)
-    from .auth import ApiKeys, protect, request_ids
-    origins = [origin.strip() for origin in a.cors_origins.split(",") if origin.strip()]
-    app = protect(http_app(srv, a.mode, mcp, a.error_format, ui), ApiKeys(a.api_keys) if a.api_keys else None, origins)
-    app = request_ids(ui.page(app) if ui is not None else app)
+    app = served_app(srv, a, mcp, ui)
     try:  # uvloop + httptools when available (uvicorn[standard]); plain asyncio otherwise
         import httptools  # noqa: F401
         import uvloop  # noqa: F401

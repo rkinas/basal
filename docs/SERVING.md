@@ -591,6 +591,14 @@ basal-serve --model Remek/basal-2.0-mini --api-keys ./api-keys.json --cors-origi
 Without `--api-keys` there is no authentication and `GET /v1/keys` is not served: bind `--host 127.0.0.1` or put a
 gateway in front.
 
+A server bound to a loopback host (`--host 127.0.0.1`, `localhost`, `::1`) without `--api-keys` answers only requests
+whose `Host` names a loopback host and that no other site's web page sent (an `Origin` other than a loopback page or
+one of `--cors-origins`); others answer 403 before they are read. A web page you open cannot then reach the server
+through DNS rebinding (its own name made to point at 127.0.0.1), nor read `/ui/request/<id>`. `GET /health` stays
+open. A local reverse proxy that passes the public `Host` on needs `--allowed-hosts basal.example` (a comma-separated
+list; `*` turns the check off). A server bound to the network (`--host 0.0.0.0`, the default) or with `--api-keys` is
+not checked unless `--allowed-hosts` is given. basal-router, bound to 127.0.0.1 by default, checks the same way.
+
 basal-router passes a client's `Authorization` / `X-API-Key` header on, as it came, to every replica the request
 reaches (`--replicas`, `--escalate`, `--blend`, `--route`; never to the `--fallback` LLM, which gets
 `BASAL_FALLBACK_API_KEY` if set). Give every replica the same `--api-keys` file (with `--gpus`, after `--`). The router

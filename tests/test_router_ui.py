@@ -209,7 +209,7 @@ def test_main_with_ui_serves_the_page_and_redacts_its_options(monkeypatch):
     monkeypatch.setattr(R.signal, "signal", lambda *a: None)
     R.main(["--replicas", "http://127.0.0.1:9", "--ui", "on", "--fallback", "http://user:pw@llm:8100/v1?token=t",
             "--fallback-model", "m", "--fallback-extra", '{"api_key": "sk-secret"}'])
-    with TestClient(seen["app"]) as c:
+    with TestClient(seen["app"], base_url="http://127.0.0.1:8000") as c:  # (bound to 127.0.0.1: Host checked)
         assert c.get("/ui").status_code == 200
         d = c.get("/ui/state").json()
     opts = {k: (v, changed) for k, v, changed in d["config"]["options"]}
@@ -229,7 +229,7 @@ def test_route_urls_are_redacted_like_the_others(monkeypatch):
     monkeypatch.setattr(R.signal, "signal", lambda *a: None)
     R.main(["--replicas", "http://127.0.0.1:9", "--ui", "on",
             "--route", "cyrillic=http://user:s3cret@127.0.0.1:10/?token=t,http://u2:p2@127.0.0.1:11"])
-    with TestClient(seen["app"]) as c:
+    with TestClient(seen["app"], base_url="http://127.0.0.1:8000") as c:  # (bound to 127.0.0.1: Host checked)
         d = c.get("/ui/state").json()
     opts = {k: v for k, v, _ in d["config"]["options"]}
     assert opts["route"] == ["cyrillic=http://127.0.0.1:10/,http://127.0.0.1:11"]

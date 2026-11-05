@@ -727,10 +727,11 @@ class Router:
 
 
 def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signal.SIGTERM), on_stop=None, ui=None,
-        max_body=MAX_BODY_BYTES):
+        max_body=MAX_BODY_BYTES, hosts=None):
     """The router's app. procs: the replicas it started (--gpus); on_stop: called at shutdown (main: Replicas.stop);
     ui: the basal.router_ui.RouterUI of --ui on (its decision routes recorded, GET /ui/state, and the page at /ui);
-    max_body: --max-body-mb in bytes (a larger body answers 413 before the router reads it whole, as basal-serve)."""
+    max_body: --max-body-mb in bytes (a larger body answers 413 before the router reads it whole, as basal-serve);
+    hosts: the Host names a request may give (auth.allowed_hosts; None: not checked)."""
     from contextlib import asynccontextmanager
     poll_s = POLL_S if poll_s is None else poll_s
 
@@ -801,9 +802,11 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
 
     from starlette.middleware import Middleware
 
-    from .auth import request_ids
+    from .auth import host_check, request_ids
     ids = [Middleware(request_ids),  # x-request-id on every response, passed on to the replicas
            Middleware(limit_body, max_body)]  # (413 before a body is read whole)
+    if hosts is not None:  # (outermost: DNS rebinding and other sites' pages are refused first)
+        ids.insert(0, Middleware(host_check, hosts))
     routes = [Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
               Route("/v1/decisions", post, methods=["POST"]),
               Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)]
@@ -979,6 +982,9 @@ def main(argv=None):
                     "with CUDA_VISIBLE_DEVICES set, indexes of the GPUs it lists")
     ap.add_argument("--replica-port", dest="replica_port", type=int, default=8001)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--allowed-hosts", dest="allowed_hosts", default=None, metavar="H[,H...]",
+                    help="the Host names a request may give besides localhost / 127.0.0.1 / ::1 (others: 403); "
+                         "checked by default when bound to a loopback --host (DNS rebinding); \"*\": never checked")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--load-factor", dest="load_factor", type=float, default=LOAD_FACTOR)
     ap.add_argument("--escalate", nargs="*", action="append", default=[],
@@ -1061,8 +1067,10 @@ def main(argv=None):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), ended)
     try:
-        uvicorn.run(app(router, procs=procs, on_stop=replicas.stop, ui=ui, max_body=int(a.max_body_mb * 2**20)),
-                    host=a.host, port=a.port, log_level="warning")
+        from .auth import allowed_hosts
+        hosts = allowed_hosts(a.host, a.allowed_hosts)
+        uvicorn.run(app(router, procs=procs, on_stop=replicas.stop, ui=ui, max_body=int(a.max_body_mb * 2**20),
+                        hosts=hosts), host=a.host, port=a.port, log_level="warning")
     finally:
         replicas.stop()
     if router.dead:

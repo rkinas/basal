@@ -128,3 +128,68 @@ def request_ids(app):
             await send(message)
         await app(scope, receive, send_with_id)
     return with_request_id
+
+
+LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
+
+
+def loopback(host):
+    """A loopback host: localhost or an address of 127.0.0.0/8 / ::1."""
+    import ipaddress
+    host = (host or "").strip().strip("[]").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def allowed_hosts(bind, allowed=None, api_keys=None):
+    """The Host names a request may give (host_check), or None for no check. --allowed-hosts "*": none; a list: those
+    and the loopback names; without it, the loopback names when the server is bound to a loopback host and has no
+    --api-keys (a web page cannot then reach it through DNS rebinding), else no check (a server bound to the network
+    is reached by name or address; one with --api-keys needs a key a page does not have)."""
+    if allowed is not None:
+        names = [h.strip().lower() for h in allowed.split(",") if h.strip()]
+        return None if "*" in names else set(names) | set(LOOPBACK_NAMES)
+    return set(LOOPBACK_NAMES) if loopback(bind) and not api_keys else None
+
+
+def _host_of(value):
+    """The host part of a Host header value ("127.0.0.1:8000", "[::1]:8000", "localhost")."""
+    value = value.strip().lower()
+    if value.startswith("["):
+        return value[1:value.find("]")] if "]" in value else value[1:]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def host_check(app, hosts, cors_origins=()):
+    """ASGI: a request whose Host header names a host outside `hosts`, or that comes from a web page of another origin
+    (an Origin header outside `hosts` and --cors-origins), answers 403 before the app reads it: a page cannot reach a
+    loopback server through DNS rebinding, nor send it requests from another site. GET /health stays open."""
+    from urllib.parse import urlsplit
+    origins = {o.rstrip("/").lower() for o in cors_origins}
+
+    async def checked(scope, receive, send):
+        if scope["type"] != "http" or (scope["path"] == "/health" and scope["method"] == "GET"):
+            await app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", ()))
+        host = headers.get(b"host", b"").decode("latin1")
+        origin = headers.get(b"origin", b"").decode("latin1").strip()
+        why = None
+        if host and _host_of(host) not in hosts:
+            why = f"Host {host!r} is not one this server answers (--allowed-hosts)"
+        elif origin and origin.rstrip("/").lower() not in origins:
+            try:
+                name = urlsplit(origin).hostname
+            except ValueError:
+                name = None
+            if name is None or name.lower() not in hosts:
+                why = f"Origin {origin!r} is not allowed (--allowed-hosts, --cors-origins)"
+        if why is not None:
+            await _json(send, 403, {"error": why, "code": "FORBIDDEN"})
+            return
+        await app(scope, receive, send)
+    return checked
