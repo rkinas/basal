@@ -1179,12 +1179,18 @@ class StateCache:
         return (best[0], self._unpack(best[1]), best[2], best[3])
 
     def _shapes(self, kv):
-        """A stored entry as usable() reads it: its tensors (16 bits), or stand-ins with their shapes only (8 / 4 bits:
-        kv_quant keeps the shape)."""
+        """A stored entry as usable() reads it: its tensors (16 bits), or stand-ins with each layer's shapes only (8 / 4
+        bits: kv_quant keeps the shape of a stack, layers of one stack alike)."""
         if self.bits == 16:
             return kv
         from types import SimpleNamespace
-        return [(SimpleNamespace(shape=k[3]), SimpleNamespace(shape=v[3])) for k, v in kv]
+        n, stacks = kv
+        out = [None] * n
+        for idx, kq, vq in stacks:
+            k, v = (SimpleNamespace(shape=(s[0] // len(idx), *s[1:])) for s in (kq[3], vq[3]))
+            for i in idx:
+                out[i] = (k, v)
+        return out
 
     def _drop(self, key):
         """Removes an entry and its blocks from the index (lock held)."""

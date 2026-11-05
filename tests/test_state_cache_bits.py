@@ -43,7 +43,7 @@ def test_an_entry_comes_back_as_each_layer_quantised_alone(bits, T, chunk, monke
     """The cache quantises the layers of one shape together (one call per KV_STACK_BYTES, not 16-18 kernels per
     tensor and layer); every layer it gives back, all of them, equals that layer's own kv_quant / kv_dequant round
     trip, with layers of two shapes (Gemma 4's layer types) interleaved, in one chunk per shape or (chunk 1: a limit
-    of one layer and a half) in several."""
+    of one layer and a half) in several; and longest()'s usable() check reads each layer's own shape."""
     import basal.engine as E
     torch.manual_seed(0)
     shapes = [(2, T, 128), (1, T // 2 + 1, 64)] * 3
@@ -59,6 +59,10 @@ def test_an_entry_comes_back_as_each_layer_quantised_alone(bits, T, chunk, monke
         assert torch.equal(gv, kv_dequant(kv_quant(v, bits, False), bits, False))
     if chunk:
         assert len(c.entries[b"k"][0][1]) > 2  # more chunks than shapes
+    seen, c.BLOCK = [], 4
+    c.put(b"t", kv, tokens=list(range(T)))
+    c.longest(list(range(T)) + [0], usable=lambda kv, m, n: seen.append([(k.shape, v.shape) for k, v in kv]) or True)
+    assert seen == [[(tuple(k.shape), tuple(v.shape)) for k, v in kv]]
 
 
 def test_low_bit_entries_take_less_of_the_budget():
