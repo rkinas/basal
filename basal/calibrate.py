@@ -359,10 +359,10 @@ def read(path):
                 errors.append(f"{at}: {str(e).removeprefix(f'question {name!r}: ')}")
                 continue
             body["questions"][name] = clean
-            group = q.get("group", rec.get("group", rec.get("id", n)))
+            group = next((v for v in (q.get("group"), rec.get("group"), rec.get("id")) if v is not None), n)
             d = dict(line=n, req=len(bodies), name=name, prim=item.get("base", t), gold=gold,
                      keys=[str(k) for k in item["keys"]], group=str(group),
-                     family=str(q.get("family", rec.get("family", name))))
+                     family=str(next((v for v in (q.get("family"), rec.get("family")) if v is not None), name)))
             if t == "multi":
                 d.update(prim="multi", set=dict(
                     id=label_set_id(item["keys"], item["labels"], item["fallback"]), objective=item["objective"],
@@ -467,6 +467,13 @@ def raw_rows(decisions, responses):
     return rows, list(failed.values())
 
 
+def finite_rows(rows):
+    """Rows whose probabilities are all finite -> (those rows, the number left out). A NaN or inf probability (a server
+    that overflowed, a hand-edited rows file) must not enter the fit, the ECE or the certification: np.clip passes NaN."""
+    keep = [r for r in rows if np.isfinite(r["p"]).all()]
+    return keep, len(rows) - len(keep)
+
+
 # -- method ----------------------------------------------------------------------------------------------------------
 def is_cert(group):
     """FIT / CERT split by group: 30% of the groups certify (the hash the shipped files used)."""
@@ -475,6 +482,9 @@ def is_cert(group):
 
 def fit_temperature(rows):
     """Temperature minimising the NLL of the gold answers on a log grid over T_GRID."""
+    rows = [r for r in rows if np.isfinite(r["p"]).all()]  # np.clip passes NaN, np.argmin then picks the first NaN: T_GRID[0]
+    if not rows:
+        raise ValueError("no row with finite probabilities to fit a temperature on")
     K = max(len(r["p"]) for r in rows)
     L = np.full((len(rows), K), -np.inf)
     for i, r in enumerate(rows):
@@ -920,9 +930,14 @@ def fit_conformal(fit_rows, cert_rows, temps, buckets, levels):
 
 
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
-        min_blend=MIN_BLEND, conformal=()):
+        min_blend=MIN_BLEND, conformal=(), nonfinite=0):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
-    with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set."""
+    with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set.
+    nonfinite: rows already left out by the caller (read), counted in the report with those left out here."""
+    rows, more = finite_rows(rows)
+    nonfinite += more
+    if nonfinite and not rows:
+        raise InputError("no row with finite probabilities to fit on")
     sets = [r for r in rows if r["prim"] == "multi"]
     rows = [r for r in rows if r["prim"] != "multi"]
     fit_rows = [r for r in rows if not is_cert(r["group"])]
@@ -932,7 +947,8 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     temps, source, buckets, bsource = fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend)
     cs_fit, cs_cert = served(fit_rows, temps, buckets), served(cert_rows, temps, buckets)
     shipped_cert = served(cert_rows, shipped_T, shipped_B)
-    thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={})
+    thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={},
+                             n_nonfinite=nonfinite)
     automated, automated_pooled, automated_error = {}, {}, {}
     for risk in targets:
         thr = threshold(cs_fit, risk)
@@ -1236,6 +1252,9 @@ def task_warnings(report, dropped=()):
 def warnings(report, targets):
     out = []
     n = report["n_fit"] + report["n_cert"]
+    if report.get("n_nonfinite"):
+        out.append(f"{report['n_nonfinite']} row(s) with a NaN or infinite probability were left out of the fit, the "
+                   f"ECE and the certification ({n} decisions used)")
     if n < RECOMMENDED:
         out.append(f"only {n} labelled decisions: the bounds are loose (a few hundred usually certify 5%)")
     if not report["n_fit"] or not report["n_cert"]:
@@ -1244,6 +1263,11 @@ def warnings(report, targets):
         if r["source"].startswith("fitted") and any(math.isclose(r["T"], x) for x in T_GRID):
             out.append(f"{t}: the fitted temperature is at the edge of the search ({r['T']:.2f}): too few errors "
                        "or too few decisions to fit it; label more or raise --min-per-type")
+    for b, r in (report.get("buckets") or {}).items():
+        if r.get("T") is not None and not r.get("T_type") and str(r.get("source", "")).startswith("fitted") \
+                and any(math.isclose(r["T"], x) for x in T_GRID):
+            out.append(f"choice {b} options: the fitted temperature is at the edge of the search ({r['T']:.2f}): too "
+                       "few errors or too few decisions to fit it")
     for risk in targets:
         r = report["targets"][risk]
         for t, x in (r["fitted"].get("per_type") or {}).items():
@@ -1321,6 +1345,9 @@ def refit(a, targets, reference, reference_name):
         if not isinstance(row, dict):
             raise SystemExit(f"{a.input}: line {i} is not a row written by basal-calibrate --save-rows")
         rows.append(row)
+    rows, nonfinite = finite_rows(rows)
+    if nonfinite and not rows:
+        raise SystemExit(f"{a.input}: no row with finite probabilities ({nonfinite} with a NaN or infinite one)")
     small = sample_size(rows, [], targets)
     for w in small:
         print(f"warning: {w}", file=sys.stderr)
@@ -1333,7 +1360,7 @@ def refit(a, targets, reference, reference_name):
               "thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
         baseline = {k: v for k, v in baseline.items() if k not in ("thresholds", "multi", "task_thresholds")}
     cal, report = fit(rows, baseline, targets, a.min_per_type, head["fmt"], a.min_family, reference, a.min_per_set,
-                      a.min_blend, a.conformal)
+                      a.min_blend, a.conformal, nonfinite)
     cal["gates"]["ece_reference"] = reference_name
     cal["engine"] = engine_name(head["kind"], head["quant"], head.get("vllm_preset"))
     cal["fitted_on"] = dict(data=head["data"], decisions=sum(r["prim"] != "multi" for r in rows),
@@ -1410,8 +1437,8 @@ def main(argv=None):
         targets = sorted({float(x) for x in a.targets.split(",") if x.strip()})
     except ValueError:
         raise SystemExit(f"--targets {a.targets!r}: give numbers such as 0.01,0.05") from None
-    if not targets or not all(0 < r < 1 for r in targets):
-        raise SystemExit("--targets must lie between 0 and 1")
+    if not targets or not all(1e-6 <= r < 1 for r in targets):
+        raise SystemExit("--targets must lie between 1e-06 and 1 (a smaller max_error needs millions of decisions)")
     try:
         a.conformal = sorted({float(x) for x in (a.conformal or "").split(",") if x.strip()})
     except ValueError:
@@ -1447,11 +1474,13 @@ def main(argv=None):
         if failed:
             print(f"warning: {len(failed)} request(s) failed and are left out:\n  " + "\n  ".join(failed[:5]),
                   file=sys.stderr)
+        rows, nonfinite = finite_rows(rows)
         if decisions and not rows:
-            raise SystemExit("no decisions to fit")
+            raise SystemExit("no decisions to fit" + (f": all {nonfinite} answers have a NaN or infinite probability"
+                                                      if nonfinite else ""))
         if rows:
             cal, report = fit(rows, baseline, targets, a.min_per_type, fmt, a.min_family, reference, a.min_per_set,
-                              a.min_blend, a.conformal)
+                              a.min_blend, a.conformal, nonfinite)
             cal["gates"]["ece_reference"] = reference_name
         else:  # task questions only: the temperatures and thresholds of the compared file stay as they are
             cal, report = {k: v for k, v in baseline.items() if k not in KEPT_OUT}, None
