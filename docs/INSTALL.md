@@ -198,10 +198,16 @@ basal-1.5 ([QUANTIZATION.md](QUANTIZATION.md)).
 ### Apple Silicon (MLX)
 
 ```bash
-uv venv --python 3.12 --allow-existing ~/basal-mlx && source ~/basal-mlx/bin/activate
+uv python install cpython-3.12-macos-aarch64-none
+uv venv --python cpython-3.12-macos-aarch64-none --allow-existing ~/basal-mlx && source ~/basal-mlx/bin/activate
 uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.4.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000
 ```
+
+- **The native arm64 Python.** `uv venv --python 3.12` can take an x86_64 Python that runs under Rosetta, and there
+  torch has no build and the `mlx` extra installs nothing; the full name asks uv for the arm64 build. `uname -m`
+  prints `arm64` in a terminal that does not run under Rosetta (`x86_64` under Rosetta). An environment made with an
+  x86_64 Python keeps its packages under `--allow-existing`: make it again with `--clear`.
 
 The request and response are the same as above. `-MLX-8bit` holds affine 8-bit decoder weights; the token embeddings
 and the output head stay in bf16, because the decision is read from the output head. The state of a request is
@@ -215,6 +221,9 @@ The basal server runs in front of Ollama or llama.cpp: it renders basal's own pr
 log-probabilities of the option codes of one generated token. Ollama 0.12.11 or newer:
 
 ```bash
+# On a Mac, the native arm64 Python (Apple Silicon (MLX) above) in place of the next line:
+#   uv python install cpython-3.12-macos-aarch64-none
+#   uv venv --python cpython-3.12-macos-aarch64-none --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.4.tar.gz"   # also installs the hf CLI
 hf download Remek/basal-2.0-4.5B-GGUF --local-dir basal-2.0-4.5B-GGUF

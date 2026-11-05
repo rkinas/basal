@@ -48,6 +48,9 @@ matches the GGUF file. In this mode `--model` is downloaded without its weights.
 ## Serve
 
 ```bash
+# On a Mac, in an environment of the native arm64 Python (INSTALL.md, Apple Silicon; uname -m prints arm64):
+#   uv python install cpython-3.12-macos-aarch64-none
+#   uv venv --python cpython-3.12-macos-aarch64-none --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 # llama-cpp-python builds with Metal on macOS arm64; on Linux the default build runs on the CPU. For CUDA, build it
 # first, without uv's cache (a cached CPU build would be reused silently; checked on an RTX 4090: --mode gguf on the GPU):
 #   CMAKE_ARGS="-DGGML_CUDA=on" uv pip install --no-cache llama-cpp-python --no-binary llama-cpp-python
@@ -111,6 +114,9 @@ Python):
 ```bash
 git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/llama.cpp
 git clone https://github.com/rkinas/basal ~/basal
+# On a Mac, the native arm64 Python in place of the next line (torch has no build for an x86_64 one under Rosetta):
+#   uv python install cpython-3.12-macos-aarch64-none
+#   uv venv --python cpython-3.12-macos-aarch64-none --allow-existing ~/gguf-env
 uv venv --python 3.12 --allow-existing ~/gguf-env
 uv pip install --python ~/gguf-env 'numpy~=2.2.6' 'sentencepiece>=0.1.98,<0.3.0' 'protobuf>=4.21,<5' 'transformers==5.17.0' 'torch==2.11.0'
 uv pip install --python ~/gguf-env -e "$HOME/basal[gguf-export]"
