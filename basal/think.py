@@ -191,6 +191,9 @@ class ThinkServer(Server):
         print(f"basal think: auto below the certified {MAX_ERROR:.0%} thresholds, <= {a.think_tokens} tokens, "
               f"weights {weights}{f' + adapter {adapter}' if adapter else ''}, readout 2 calibration "
               f"{self.think_cal_name}", flush=True)
+        if getattr(self, "layout", "canonical") != "canonical":
+            print(f"basal think: readout 2 reads the canonical layout, as its weights and calibration were made "
+                  f"(readout 1: {self.layout})", flush=True)
 
     def routed(self, q, ans, mode):
         if q["type"] not in TYPES or q.get("multi") or len(q["branches"]) != 1:

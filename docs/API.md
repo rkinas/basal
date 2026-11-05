@@ -182,8 +182,9 @@ raises `BadRequestError`), 5xx `server_error` otherwise.
 | `rank` | the candidates in order, thousands of them (experimental) | the passages for a query, the best of 5,000 products |
 
 **`multi`**: each label is asked as a yes/no branch over the shared state ("does label X apply?"). `selected` holds
-the labels with probability ≥ `threshold` (default 0.5), at most `max` and at least `min`; `set_confidence` estimates
-that the whole set is exactly right. With `"objective": "iou"`, `"f1"` or `"exact"` the engine instead returns the set
+the labels with probability ≥ `threshold` (default 0.5), at most `max` and at least `min` (with `min` above `max`,
+`min` wins: the `min` most probable labels, as since 1.5); `set_confidence` estimates that the whole set is exactly
+right. With `"objective": "iou"`, `"f1"` or `"exact"` the engine instead returns the set
 with the highest expected IoU, F1 or exact-match probability under the label probabilities (`min` / `max` bound its
 size) and its `expected_score`. An `exclusive` label is selected only alone; a `fallback` label ("none of these") is
 selected only when no other label is. See [FEATURES.md](FEATURES.md#choosing-the-set-objective).

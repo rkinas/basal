@@ -27,7 +27,10 @@ Per request, on a `--think auto` server:
   answer carries `"meta": {"think": {"used", "tokens"}}`;
 - `ask_if` reads the answers after thinking, so a question is skipped (or not) by the answer the request gets;
 - `multi` questions, tool sets, tasks, `rank` questions, requests with images or audio (the second readout reads text
-  only) and requests whose state was truncated never think.
+  only) and requests whose state was truncated never think;
+- the second readout reads the canonical prompt layout, as its thinking weights and `CALIBRATION.think.json` were
+  made, also when the first readout uses another one (`--layout` or the model's `basal.json`); basal-serve says so at
+  start-up.
 
 Measured once on Werdykt, both rows on the same pod (one H100 80GB, default mode, 16 clients for the speed column):
 
