@@ -82,15 +82,19 @@ benchmarking a GPU.
   minutes the first time, about half with a warm compile cache). A request with several branches (option orders,
   questions, `multi` labels) runs in two exact passes: the state once, keeping its keys and values, then all branches
   over them ([SOAM.md](SOAM.md#which-kernel-runs)).
-- **Prepared start-up** (2.5): `basal-prepare --model <model> [--mode fast|fp8|nvfp4]` starts the engine once on this GPU
-  and saves what it compiled (Inductor's kernels and autotuning results, and for Qwen3.5 models the configs fla's
-  kernels picked) under `~/.cache/basal/prepared/<key>` (or `--out`). `basal-serve --prepared auto` (the default) loads
-  such a directory before compiling when its key matches: the GPU, the torch / triton / fla / CUDA and basal versions
-  (a basal patch release that changes no compiled code keeps the key: 2.5.1 loads 2.5.0's directories), the model's
-  architecture (config.json; fine-tunes of one architecture share it), the mode, dtype and attention. A
-  model may ship its own under `prepared/<key>/`. Then the server compiles nothing it has not seen and picks the same
-  kernels in every start; CUDA graphs are still captured. `--prepared off` compiles as before; `--prepared <dir>`
-  loads that directory or refuses to start.
+- **Prepared start-up** (2.5): `basal-prepare --model <model> [basal-serve's engine flags]` starts the engine once on
+  this GPU as `basal-serve` starts it with those flags (its defaults included: on Hopper compact rows with the template
+  prefix; give the flags the server will run with, such as `--mode fp8`, `--batches compact` or `--compile-scope
+  layer`) and saves what it compiled (Inductor's kernels and autotuning results, and for Qwen3.5 models the configs
+  fla's kernels picked) under `~/.cache/basal/prepared/<key>` (or `--out`). `basal-serve --prepared auto` (the
+  default) loads such a directory before compiling when its key matches: the GPU, the torch / triton / fla / CUDA and
+  basal versions (a basal patch release that changes no compiled code keeps the key: 2.5.1 loads 2.5.0's directories),
+  the model's architecture (config.json; fine-tunes of one architecture share it), the mode, dtype and attention. The
+  other engine flags are not in the key: preparing again with other flags adds their kernels to the same directory
+  (one `inductor*.bin` per flag set, all loaded), and a start with flags it was not prepared with compiles what it
+  lacks. A model may ship its own under `prepared/<key>/`. Then the server compiles nothing it has not seen
+  and picks the same kernels in every start; CUDA graphs are still captured. `--prepared off` compiles as before;
+  `--prepared <dir>` loads that directory or refuses to start.
 - **Batching**: concurrent requests are batched into the same forward passes and every request is answered as soon as
   its passes are read out. Under load the server waits up to `--batch-window-ms` (default 3) for as many requests as
   the previous batch had; an idle server answers at once. `--max-batch` and `--wait-ms` control batching further.

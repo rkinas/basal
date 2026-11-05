@@ -145,18 +145,20 @@ def load(d):
     """Loads a prepared directory before the engine compiles -> what was loaded (for the start-up line). Inductor's
     cache directory is set first, as the compiling engine sets it (engine.persist_compile_cache): the artifacts are
     written into that directory, so they must land where the engine then looks. A file that cannot be read (a broken
-    download) is left out: those kernels compile as without it."""
+    download) is left out: those kernels compile as without it. Every Inductor file is loaded (inductor.bin: the
+    kernels of basal-serve's default flags; inductor-<flags>.bin: of other flag sets, save): Inductor checks each
+    entry against its own key, so kernels of flags this start does not use only cost the reading."""
     from .engine import persist_compile_cache
     persist_compile_cache()
     out = {"dir": str(d)}
-    f = Path(d) / "inductor.bin"
-    if f.exists():
+    files, res = sorted(Path(d).glob("inductor*.bin")), []
+    for f in files:
         try:
-            info = torch.compiler.load_cache_artifacts(f.read_bytes())
+            res.append(_count(torch.compiler.load_cache_artifacts(f.read_bytes())))
         except Exception as e:  # noqa: BLE001
-            out["inductor"] = f"not loaded ({type(e).__name__})"
-            return out
-        out["inductor"] = _count(info)
+            res.append(f"not loaded ({type(e).__name__})")
+    if res:  # (several flag sets: per file)
+        out["inductor"] = res[0] if len(res) == 1 else {f.name: r for f, r in zip(files, res)}
     f = Path(d) / "fla_configs.json"
     if f.exists():
         from . import gdn_graph
@@ -175,55 +177,97 @@ def _count(info):
     return 1
 
 
-def save(d, fields, fla=False):
-    """Writes the artifacts of this process's compiles (and fla's picked configs) into d with the manifest."""
+def inductor_file(flags=None):
+    """The Inductor file of one engine flag set in a prepared directory: inductor.bin for basal-serve's defaults (as
+    2.5.0 named it), inductor-<hash of the flags>.bin for others, so preparing one model with several flag sets
+    (the same key: the flags are not in it) adds their kernels instead of replacing them."""
+    if not flags:
+        return "inductor.bin"
+    h = hashlib.sha256(json.dumps(flags, sort_keys=True, default=str).encode()).hexdigest()[:12]
+    return f"inductor-{h}.bin"
+
+
+def _replace(path, write):
+    """write(tmp) then rename it over path: an interrupted or concurrent save never leaves a truncated file."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        out = write(tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out
+
+
+def save(d, fields, fla=False, flags=None):
+    """Writes the artifacts of this process's compiles (and fla's picked configs) into d with the manifest; flags:
+    the engine flags that differ from basal-serve's defaults (inductor_file). A directory prepared before for the
+    same key keeps its other flag sets' files."""
     d = Path(d)
     d.mkdir(parents=True, exist_ok=True)
     saved = {}
     got = torch.compiler.save_cache_artifacts()
     if got is not None:
         data, info = got
-        (d / "inductor.bin").write_bytes(data)
+        _replace(d / inductor_file(flags), lambda p: p.write_bytes(data))
         saved["inductor"] = _count(info)
         saved["inductor_bytes"] = len(data)
     if fla:
         from .gdn_graph import fla_record
-        saved["fla_kernels"] = fla_record(d / "fla_configs.json")
-    files = sorted(p.name for p in d.iterdir() if p.name in FILES) + ["manifest.json"]
-    man = dict(fields=fields, key=key(fields), saved=saved, files=sorted(set(files)),
+        saved["fla_kernels"] = _replace(d / "fla_configs.json", fla_record)
+    try:
+        prev = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        prev = {}
+    sets = prev.get("flag_sets", {}) if prev.get("fields") == fields else {}
+    sets[inductor_file(flags)] = flags or {}
+    files = sorted(p.name for p in d.iterdir() if p.name in FILES or p.name in sets) + ["manifest.json"]
+    man = dict(fields=fields, key=key(fields), saved=saved, files=sorted(set(files)), flag_sets=sets,
                created_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-    (d / "manifest.json").write_text(json.dumps(man, indent=1, sort_keys=True))
+    _replace(d / "manifest.json", lambda p: p.write_text(json.dumps(man, indent=1, sort_keys=True)))
     return man
 
 
 def main(argv=None):
-    """basal-prepare: start the engine once (its warm-up compiles and captures every graph shape) and save what a later
-    start of the same model architecture, mode and environment can load (basal-serve --prepared auto)."""
-    ap = argparse.ArgumentParser(description="prepare the start-up of the CUDA graph engine for this GPU")
-    ap.add_argument("--model", required=True)
-    ap.add_argument("--revision", default=None)
-    ap.add_argument("--mode", default="fast", choices=["fast", "fp8", "nvfp4"])
-    ap.add_argument("--dtype", default="bfloat16")
-    ap.add_argument("--attn", default="auto")
+    """basal-prepare: start the engine once as basal-serve starts it with the same flags (its warm-up compiles and
+    captures every graph shape) and save what a later start of the same model architecture, mode and environment can
+    load (basal-serve --prepared auto). Every option but --out / --into-model is basal-serve's, and the engine is built
+    by basal-serve's Server: the compiled code depends on the engine flags (--batches, --template-prefix,
+    --compile-scope, --merge, ...), so the prepared kernels are those of the configuration the server runs, its
+    defaults included (on Hopper: compact rows with the template prefix)."""
+    ap = argparse.ArgumentParser(description="prepare the start-up of the CUDA graph engine for this GPU",
+                                 epilog="Every other option is basal-serve's (basal-serve --help): give the model and "
+                                        "the engine flags the server will run with.")
     ap.add_argument("--out", default=None, help="directory to write (default: the user cache, ~/.cache/basal/prepared/"
                                                  "<key>, where basal-serve --prepared auto looks)")
     ap.add_argument("--into-model", dest="into_model", action="store_true",
                     help="write into the local model directory, as prepared/<key> (to ship with the model: basal-serve "
                          "--prepared auto finds it there, also in the model's Hugging Face repository)")
-    a = ap.parse_args(argv)
-    if a.into_model and (a.out or not Path(a.model).is_dir()):
+    a, rest = ap.parse_known_args(argv)
+    from .server import MODES, Server, add_engine_args, default_mode, parser, refuse_lean_flex
+    s = parser().parse_args(rest + ["--prepared", "off"])  # (this start compiles what a later one loads)
+    if a.into_model and (a.out or not Path(s.model).is_dir()):
         raise SystemExit("--into-model: give --model as a local model directory, without --out")
     if not torch.cuda.is_available():
         raise SystemExit("basal-prepare needs a CUDA GPU (the prepared kernels are for the GPU it runs on)")
-    from .engine import GraphBackend, resolve
+    refuse_lean_flex(s.lean, s.tree)  # as basal-serve's main, before default_mode
+    s.mode = s.mode or default_mode(s.model, s.revision)
+    kind, _, comp = MODES[s.mode]
+    if kind not in ("graph", "exit") or not comp:
+        raise SystemExit(f"basal-prepare: --mode {s.mode} compiles nothing to prepare (the CUDA graph engine's "
+                         "compiled modes: fast, fp8, nvfp4, ...)")
+    defaults = vars(add_engine_args(argparse.ArgumentParser()).parse_args([]))
+    keyed = ("model", "revision", "mode", "dtype", "attn", "prepared")  # (mode, dtype and attention are in the key)
+    flags = {k: v for k, v in sorted(vars(s).items()) if k in defaults and k not in keyed and v != defaults[k]}
     from .gdn_graph import is_gdn
-    md = resolve(a.model, a.revision)
-    fields = key_fields(md, a.mode, a.dtype, a.attn)
     t0 = time.time()
-    quant = {"fast": None, "fp8": "fp8", "nvfp4": "nvfp4"}[a.mode]
-    GraphBackend(md, a.dtype, quant, compile=True, attn=a.attn)  # compiles, autotunes and captures every shape
-    out = Path(a.out) if a.out else (Path(md) / "prepared" if a.into_model else cache_root()) / key(fields)
-    man = save(out, fields, fla=is_gdn(md))
+    if s.think == "off":  # checks the flags as basal-serve does, then compiles, autotunes and captures every shape
+        srv = Server(s)
+    else:  # its sidecar takes GPU memory before the graphs are sized, as in basal-serve
+        from .think import ThinkServer
+        srv = ThinkServer(s)
+    fields = key_fields(srv.md, s.mode, s.dtype, s.attn)  # the key basal-serve computes for these flags
+    out = Path(a.out) if a.out else (Path(srv.md) / "prepared" if a.into_model else cache_root()) / key(fields)
+    man = save(out, fields, fla=is_gdn(srv.md), flags=flags)
     print(json.dumps(dict(out=str(out), start_s=round(time.time() - t0, 1), **man), indent=1))
 
 

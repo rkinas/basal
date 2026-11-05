@@ -103,6 +103,92 @@ def test_prepare_needs_a_gpu(monkeypatch):
         prepared.main(["--model", "x"])
 
 
+def test_prepare_builds_the_engine_basal_serve_runs(tmp_path, monkeypatch):
+    """basal-prepare starts the engine through basal-serve's Server with basal-serve's parse of the same flags (its
+    defaults too: 2.5.2 built GraphBackend with the constructor's, padded rows without the template prefix, which
+    basal-serve does not run on Hopper), loads no prepared directory itself, and writes where basal-serve's lookup for
+    those flags finds it."""
+    import basal.server as S
+    m = model(tmp_path / "m")
+    seen = []
+
+    class Built:
+        def __init__(self, a):
+            seen.append(a)
+            self.md = str(m)
+    monkeypatch.setattr(S, "Server", Built)
+    monkeypatch.setattr(S, "default_mode", lambda model, revision=None: "fast")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(prepared, "environment", lambda: dict(ENV))
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: None)
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    for flags in ([], ["--batches", "compact", "--compile-scope", "layer", "--attn", "fa2", "--mode", "fast"]):
+        prepared.main(["--model", str(m)] + flags)
+        want = S.parser().parse_args(["--model", str(m)] + flags + ["--prepared", "off"])
+        want.mode = "fast"
+        assert vars(seen[-1]) == vars(want)
+        attn = "fa2" if flags else "auto"
+        assert prepared.locate(m, prepared.key_fields(m, "fast", "bfloat16", attn)) is not None  # Server's lookup
+
+
+def test_other_flag_sets_add_their_kernels_to_the_directory(tmp_path, monkeypatch):
+    """The engine flags are not in the key: preparing the same model with basal-serve's defaults and with other flags
+    writes one Inductor file each (inductor.bin, inductor-<flags>.bin) into the one directory, the manifest lists
+    both, and a start loads both; preparing a flag set again replaces only its own file."""
+    blobs, loaded = iter([b"defaults", b"compact", b"compact again"]), []
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: (next(blobs), None))
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda b: loaded.append(b))
+    f = dict(ENV, architecture="a", mode="fast", dtype="bfloat16", attn="auto")
+    d = tmp_path / "p"
+    prepared.save(d, f)
+    compact = prepared.inductor_file({"batches": "compact"})
+    prepared.save(d, f, flags={"batches": "compact"})
+    man = prepared.save(d, f, flags={"batches": "compact"})
+    assert man["files"] == sorted(["inductor.bin", compact, "manifest.json"]) and compact != "inductor.bin"
+    assert man["flag_sets"] == {"inductor.bin": {}, compact: {"batches": "compact"}}
+    assert (d / "inductor.bin").read_bytes() == b"defaults" and (d / compact).read_bytes() == b"compact again"
+    assert prepared.locate(tmp_path, f, str(d)) == d
+    out = prepared.load(d)
+    assert sorted(loaded) == [b"compact again", b"defaults"] and set(out["inductor"]) == {"inductor.bin", compact}
+
+
+def test_an_interrupted_save_leaves_the_previous_file(tmp_path):
+    """Files of a prepared directory are written under a temporary name and renamed over the old one: a write that
+    fails (an interrupted or overlapping save) leaves the previous file whole and no temporary file behind."""
+    p = tmp_path / "fla_configs.json"
+    p.write_text('{"kernels": {}}')
+
+    def broken(tmp):
+        tmp.write_text('{"ker')
+        raise OSError("disk full")
+    with pytest.raises(OSError):
+        prepared._replace(p, broken)
+    assert p.read_text() == '{"kernels": {}}' and sorted(x.name for x in tmp_path.iterdir()) == ["fla_configs.json"]
+
+
+def test_prepare_with_think_builds_the_think_server(tmp_path, monkeypatch):
+    """--think auto: basal-serve builds ThinkServer (its sidecar takes GPU memory before the graphs are sized), and so
+    does basal-prepare."""
+    import basal.server as S
+    import basal.think as T
+    m, built = model(tmp_path / "m"), []
+
+    class Built:
+        def __init__(self, a):
+            built.append(type(self).__name__)
+            self.md = str(m)
+    monkeypatch.setattr(S, "Server", type("Server", (Built,), {}))
+    monkeypatch.setattr(T, "ThinkServer", type("ThinkServer", (Built,), {}))
+    monkeypatch.setattr(S, "default_mode", lambda model, revision=None: "fast")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(prepared, "environment", lambda: dict(ENV))
+    monkeypatch.setattr(torch.compiler, "save_cache_artifacts", lambda: None)
+    monkeypatch.setenv("BASAL_PREPARED_DIR", str(tmp_path / "cache"))
+    prepared.main(["--model", str(m), "--think", "auto"])
+    prepared.main(["--model", str(m)])
+    assert built == ["ThinkServer", "Server"]
+
+
 def gdn_model(d):
     return model(d, layer_types=["linear_attention", "full_attention"])
 
