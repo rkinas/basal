@@ -141,7 +141,9 @@ Thank you to the people whose work is in this repository, by pull request:
   while GPU memory stays free ([#41](https://github.com/rkinas/basal/pull/41)); torch.compile's cache kept across
   reboots ([#47](https://github.com/rkinas/basal/pull/47)), less host work in the CUDA cascade
   ([#44](https://github.com/rkinas/basal/pull/44)) and `--compile-scope layer`
-  ([#49](https://github.com/rkinas/basal/pull/49)).
+  ([#49](https://github.com/rkinas/basal/pull/49)); in 2.5.4 `basal-prepare` building the engine `basal-serve`
+  runs ([#106](https://github.com/rkinas/basal/pull/106)) and the RTX 4090 measured with basal-2.0
+  ([#111](https://github.com/rkinas/basal/pull/111)).
 - Grzegorz Brzezinka ([@agentGreg](https://github.com/agentGreg)): the calibration report's per-type ECE as
   `basal-serve` applies the temperatures ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count for
   the 1% target in CALIBRATION.md ([#25](https://github.com/rkinas/basal/pull/25)), the Apple M5 Max benchmark tables in
@@ -181,7 +183,10 @@ Thank you to the people whose work is in this repository, by pull request:
   ([#83](https://github.com/rkinas/basal/pull/83)) and HTTP 422 for an unknown question type
   ([#84](https://github.com/rkinas/basal/pull/84)); in 2.5.3 Windows paths and `basal-attach` without symlink rights
   ([#85](https://github.com/rkinas/basal/pull/85)) and `basal-bench` timing HTTP engines on prompts their cache has
-  not seen ([#90](https://github.com/rkinas/basal/pull/90)).
+  not seen ([#90](https://github.com/rkinas/basal/pull/90)); in 2.5.4 `basal-loadtest`, `basal-calibrate` and
+  `basal-agree` on inputs they failed on ([#102](https://github.com/rkinas/basal/pull/102)), malformed requests
+  refused before the run ([#103](https://github.com/rkinas/basal/pull/103)) and request text that cannot forge a
+  turn ([#104](https://github.com/rkinas/basal/pull/104)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),

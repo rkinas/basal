@@ -67,7 +67,7 @@ from .tools import answer as tool_answer
 from .tools import parse as parse_tools
 from .tools import set_answer as tool_set_answer
 
-RELEASE_DATE = "2026-11-04"  # the engine's release date (GET /v1/models), not the served model's
+RELEASE_DATE = "2026-11-05"  # the engine's release date (GET /v1/models), not the served model's
 
 MODES = {
     # mode: (backend, quantisation, compile)
