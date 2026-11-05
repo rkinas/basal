@@ -149,16 +149,20 @@ def _durations(text):
 
 
 def _plus(d, n, unit):
-    if unit == "d":
-        return d + timedelta(days=n)
-    if unit == "w":
-        return d + timedelta(weeks=n)
-    if unit == "m":
-        return add_months(d, n)
+    """d + n units, or None when the result is outside date.min..date.max (year 1..9999)."""
     try:
-        return d.replace(year=d.year + n)
-    except ValueError:
-        return d.replace(year=d.year + n, day=28)
+        if unit == "d":
+            return d + timedelta(days=n)
+        if unit == "w":
+            return d + timedelta(weeks=n)
+        if unit == "m":
+            return add_months(d, n)
+        try:
+            return d.replace(year=d.year + n)
+        except ValueError:
+            return d.replace(year=d.year + n, day=28)
+    except (OverflowError, ValueError):
+        return None
 
 
 UNIT_PL = {"d": ("dzień", "dni"), "w": ("tydzień", "tygodnie"), "m": ("miesiąc", "miesiące"), "y": ("rok", "lata")}
@@ -418,13 +422,20 @@ def facts(text):
         if today:
             for g in AGO.finditer(text):
                 n = int(g.group(1))
-                lines.append(f"{n} dni przed {fmt(today[0])} to {fmt(today[0] - timedelta(days=n))}")
+                try:
+                    before = today[0] - timedelta(days=n)
+                except OverflowError:  # before year 1: no fact rather than an HTTP 500
+                    continue
+                lines.append(f"{n} dni przed {fmt(today[0])} to {fmt(before)}")
     durs = _durations(text)
     for d in ds[:3]:
         for n, unit in durs:
             one, many = UNIT_PL[unit]
-            lines.append(f"{fmt(d)} + {n} {one if n == 1 else many} (kalendarzowo) = {fmt(_plus(d, n, unit))} "
-                         f"({WEEKDAYS[_plus(d, n, unit).weekday()]})")
+            end = _plus(d, n, unit)
+            if end is None:  # outside year 1..9999: no fact rather than an HTTP 500
+                continue
+            lines.append(f"{fmt(d)} + {n} {one if n == 1 else many} (kalendarzowo) = {fmt(end)} "
+                         f"({WEEKDAYS[end.weekday()]})")
     rates = sorted(_vat_rates(text), reverse=True)
     covered = set()
     rate_at = {p for p, _ in _rates(text)[0]}  # an exchange rate is not an amount to put VAT on

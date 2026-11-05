@@ -55,9 +55,9 @@ from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so bas
 from .facts import inject as inject_facts
 from .gdn_graph import default_fast as gdn_default_fast, is_gdn, refused as gdn_refused
 from . import rank, tasks
-from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, lang_of, letter_ids, max_options,
-                     media_messages, model_format, model_layout, model_option_isolation, model_two_way, once_ids,
-                     option_tokens, reads_request, render, tokens_once)
+from .prompt import (FORMATS, LAYOUTS, MAX_OPTIONS, OptionPrompt, RequestError, defang, lang_of, letter_ids,
+                     max_options, media_messages, model_format, model_layout, model_option_isolation, model_two_way,
+                     once_ids, option_tokens, reads_request, render, tokens_once)
 from .sets import label_set_id
 from .sets import select as select_set
 from .sets import validate as validate_set
@@ -1548,7 +1548,7 @@ class Server:
         prompt and the user header "State:" / "Stan:"), checked against the prompt's token ids; None when not found."""
         head = FORMATS[self.fmt]["templates"][q["lang"]]["user"].split("{state}")[0]
         text = render(self.tok, q["state"], q["question"], q["options"], q["lang"], self.fmt)
-        i = text.find(head + q["state"]) if q["state"] else -1
+        i = text.find(head + defang(self.tok, q["state"])) if q["state"] else -1  # as rendered (special tokens broken)
         if i < 0:
             return None
         memo = self.__dict__.setdefault("_template_ids", {})
@@ -1567,11 +1567,12 @@ class Server:
         short state can also be a word of the system prompt)."""
         head = FORMATS[self.fmt]["templates"][q["lang"]]["user"].split("{state}")[0]
         text = render(self.tok, q["state"], q["question"], q["options"], q["lang"], self.fmt)
-        i = text.find(head + q["state"]) if q["state"] else -1
+        shown = defang(self.tok, q["state"])  # the state as rendered (special tokens broken)
+        i = text.find(head + shown) if q["state"] else -1
         if i < 0:
             return None
         full = self.tok(text, add_special_tokens=False).input_ids
-        pre = self.tok(text[: i + len(head) + len(q["state"])], add_special_tokens=False).input_ids
+        pre = self.tok(text[: i + len(head) + len(shown)], add_special_tokens=False).input_ids
         while pre and full[: len(pre)] != pre:  # the last token merges with what follows: end one token earlier
             pre = pre[:-1]
         return len(pre) or None
@@ -1823,7 +1824,9 @@ class Server:
         if body.get("facts", "off") not in ("off", "auto"):
             raise RequestError('facts must be "off" or "auto"')
         if body.get("facts") == "auto":  # append computed calendar / arithmetic facts (PL dates, gaps, VAT)
-            state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+            # (a regex pass over the whole state, ~1 s per MB: off the event loop, which answers /health meanwhile)
+            text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+            state = await asyncio.to_thread(inject_facts, text)
         if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
             if body.get("media") is not None:
                 raise RequestError("give media or images, not both")
@@ -1917,7 +1920,7 @@ class Server:
             question, options = q["branches"][b[1]]
             for perm, lid in zip(b[2], b[4]):
                 msgs.append(media_messages(q["state"], question, [options[c] for c in perm], m["kinds"], q["lang"],
-                                           self.fmt))
+                                           self.fmt, self.tok))
                 ids.append(lid)
                 where.append(j)
         limit = getattr(self, "context", None)
