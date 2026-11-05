@@ -1823,7 +1823,9 @@ class Server:
         if body.get("facts", "off") not in ("off", "auto"):
             raise RequestError('facts must be "off" or "auto"')
         if body.get("facts") == "auto":  # append computed calendar / arithmetic facts (PL dates, gaps, VAT)
-            state = inject_facts(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+            # (a regex pass over the whole state, ~1 s per MB: off the event loop, which answers /health meanwhile)
+            text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+            state = await asyncio.to_thread(inject_facts, text)
         if body.get("images") is not None:  # the alias of vLLM's structured-diffusion example
             if body.get("media") is not None:
                 raise RequestError("give media or images, not both")
@@ -1917,7 +1919,7 @@ class Server:
             question, options = q["branches"][b[1]]
             for perm, lid in zip(b[2], b[4]):
                 msgs.append(media_messages(q["state"], question, [options[c] for c in perm], m["kinds"], q["lang"],
-                                           self.fmt))
+                                           self.fmt, self.tok))
                 ids.append(lid)
                 where.append(j)
         limit = getattr(self, "context", None)
