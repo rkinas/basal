@@ -188,9 +188,9 @@ def test_server_refuses_other_recurrent_models_before_download(monkeypatch, qwen
 
 
 @pytest.mark.parametrize("cc, fla, mode", [((9, 0), True, "fast"), ((9, 0), False, "eager"), ((8, 0), True, "eager"),
-                                           ((12, 0), True, "eager")])
+                                           ((12, 0), True, "fast"), ((12, 0), False, "eager")])
 def test_default_mode_of_qwen35_on_cuda(monkeypatch, qwen35, cc, fla, mode):
-    """Without --mode: fast where the port passed its gate (Hopper, with fla), eager on other GPU classes."""
+    """Without --mode: choose fast only for an allowed CUDA capability with importable fla."""
     monkeypatch.setattr(server_module, "resolve", lambda name, revision=None, metadata_only=False: name)
     monkeypatch.setattr(gdn_module.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(gdn_module.torch.cuda, "get_device_capability", lambda *a: cc)
