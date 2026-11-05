@@ -311,6 +311,8 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
                 base = "noul"
             else:
                 base = q.get("base", "choice")
+                if base not in ("choice", "noul"):
+                    raise RequestError(f"question {name!r}: base must be \"choice\" or \"noul\", got {base!r}")
                 if isinstance(crit, list):
                     crit = {k: None for k in crit}
                 keys, opts = named_options(crit, q.get("option_keys", "show"))
@@ -2450,7 +2452,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     async def systemone(request):
         try:
             body = await request.json()
-        except ValueError as e:  # not JSON (or not UTF-8)
+        except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
             return failed(RequestError(f"the request body is not valid JSON: {e}"))
         t = time.perf_counter()
         counts["requests"] += 1
@@ -2470,7 +2472,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         try:
             try:
                 body = await request.json()
-            except ValueError as e:  # not JSON (or not UTF-8)
+            except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
                 raise RequestError(f"the request body is not valid JSON: {e}") from None
             s1, specs = dec.to_systemone(body)
             return JSONResponse(dec.to_decision(await srv.serve(s1), specs))

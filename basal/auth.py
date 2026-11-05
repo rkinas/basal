@@ -26,7 +26,7 @@ class ApiKeys:
             now = time.monotonic()
             if signature == self._signature and now - self._loaded_at <= 2:
                 return self._records
-            with open(self.path, encoding="utf-8") as f:
+            with open(self.path, encoding="utf-8-sig") as f:  # Notepad and PowerShell 5 write a BOM
                 data = json.load(f)
             records = data["keys"]
             if not isinstance(records, list) or any(not isinstance(k, dict) or
