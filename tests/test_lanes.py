@@ -132,7 +132,7 @@ def test_rows_a_lane_reads_are_written_on_its_own_stream():
         torch.cuda._sleep(int(5e8))  # the first lane's stream is busy (about a quarter of a second)
         a._rows(lids)
     with torch.cuda.stream(sb):
-        w, _, _ = b._rows(lids)
+        (w, _), _, _ = b._rows(lids)  # (the rows and their bias)
         got = w.clone()
     torch.cuda.synchronize()
     assert torch.equal(got, head.weight[[11, 12, 13, 500]].float())  # (the rows of every code id asked, sorted)

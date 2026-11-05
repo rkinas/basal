@@ -90,6 +90,7 @@ def test_unsupported_compact_refused_before_loading(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
     monkeypatch.setattr("basal.engine.AutoTokenizer.from_pretrained", lambda *_: pytest.fail("loaded before refusing"))
     monkeypatch.setattr("basal.engine.set_attention", lambda *_, **__: "fa2")
+    monkeypatch.setattr("basal.engine.resolve_attention", lambda *_, **__: "fa2")  # (graph_options resolves it)
     with pytest.raises(ValueError, match="--batches compact needs .* torch's varlen attention"):
         GraphBackend(str(tmp_path), dtype="float32", batches="compact")
 
