@@ -379,8 +379,29 @@ def media_messages(state, question, options, kinds, lang=None, fmt=2, tok=None):
     return [{"role": "system", "content": t["system"]}, {"role": "user", "content": parts}]
 
 
+LETTER_TAIL = 1024  # letter_ids reads a longer prompt from a line break at least this many characters before its end
+
+
+def answer_end(tok, prompt):
+    """The end of a prompt that letter_ids reads: a prompt over 2 x LETTER_TAIL characters from its last line break
+    LETTER_TAIL or more characters before its end, when that part tokenizes alone as it does at the end of the whole
+    prompt, its first token aside (a SentencePiece tokenizer starts a text with a word boundary); else the whole
+    prompt. The option codes at the answer position depend on the tokens there only, and a prompt of a long state then
+    costs one tokenization instead of one per option code."""
+    if len(prompt) <= 2 * LETTER_TAIL:
+        return prompt
+    cut = prompt.rfind("\n", 0, len(prompt) - LETTER_TAIL)
+    if cut <= 0:
+        return prompt
+    tail = str(prompt[cut:])
+    whole, end = tok([str(prompt), tail], add_special_tokens=False).input_ids
+    return tail if len(end) > 1 and whole[len(whole) - len(end) + 1:] == end[1:] else prompt
+
+
 def letter_ids(tok, prompt, k, fmt=1):
-    """Token id of each of the first k option codes at the answer position; None if one is not a single token there."""
+    """Token id of each of the first k option codes at the answer position; None if one is not a single token there.
+    A long prompt is read at its end (answer_end)."""
+    prompt = answer_end(tok, prompt)
     base = tok(prompt, add_special_tokens=False).input_ids
     ids = []
     for full in tok([prompt + c for c in FORMATS[fmt]["codes"][:k]], add_special_tokens=False).input_ids:
