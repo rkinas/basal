@@ -124,8 +124,16 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --por
   CUDA than your driver. DGX Spark and B300: the cu130 build ([docs/HARDWARE.md](docs/HARDWARE.md)).
 - The first start in `--mode fast` compiles the model (several minutes); `--mode fast-nocompile` starts in seconds.
 
-Apple Silicon: the same with `uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.4.tar.gz"`
-(no torch step) and `basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000`.
+Apple Silicon, with the native arm64 Python (`--python 3.12` can take an x86_64 one under Rosetta) and no torch step:
+
+```bash
+uv python install cpython-3.12-macos-aarch64-none
+uv venv --python cpython-3.12-macos-aarch64-none --allow-existing ~/basal-env && source ~/basal-env/bin/activate
+uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.4.tar.gz"
+basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000
+```
+
+`uname -m` prints `arm64` in a terminal that does not run under Rosetta (`x86_64` under Rosetta).
 
 Ask questions with curl. Several questions about one state go into one request and share the state; each answer has a
 probability for every option, the chosen key and the confidence ([response](docs/API.md#response)):
