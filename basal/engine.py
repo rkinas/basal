@@ -380,8 +380,9 @@ class EagerBackend(Capable):
         return CodeReadout(self.head, self.softcap, self.__dict__.setdefault("_wrows", {}))
 
     def _codes(self, h, ids_list):
-        """Hidden states [B, D] -> the probabilities over each prompt's codes, read back in one copy."""
-        return self._code_readout().probs(h, ids_list)
+        """Hidden states [B, D] -> the probabilities over each prompt's codes, each prompt read alone (its numbers do not
+        depend on its batch), read back in one copy."""
+        return self._code_readout().probs_each(h, ids_list)
 
     def run_shared(self, groups, policy=None):
         if self.g4 is not None:  # Gemma 4: the shared prefix of each group once (SOAM)

@@ -82,3 +82,23 @@ class CodeReadout:
         rows, idx, pad = self.rows(lids)
         p = self.probs_of(self.logits(h, rows), idx, pad).tolist()  # one device sync
         return [row[: len(ids)] for row, ids in zip(p, lids)]
+
+    def probs_each(self, h, lids):
+        """probs, each prompt read alone: the product of its hidden state [D] with its own code rows (in its code order)
+        and the softmax over its codes, as the eager engine has always read them, so a prompt's numbers do not depend on
+        the prompts read with it (a product or softmax of another shape, such as probs' over the union of the codes,
+        can differ in the last bits). One copy to the host."""
+        out = []
+        for b, ids in enumerate(lids):
+            key = tuple(ids)
+
+            def make(key=key):
+                sel = self.to_dev(torch.tensor(key))
+                bias = self.head.bias.index_select(0, sel).float() if getattr(self.head, "bias", None) is not None else None
+                return self.head.weight.index_select(0, sel).float(), bias
+            out.append(torch.softmax(self.logits(h[b], code_rows(self.cache, key, make)), -1))
+        p, n, res = torch.cat(out).tolist(), 0, []  # one device sync
+        for ids in lids:
+            res.append(p[n: n + len(ids)])
+            n += len(ids)
+        return res

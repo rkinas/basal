@@ -359,8 +359,8 @@ def test_code_rows_kept_within_their_budget(monkeypatch):
 
 
 def test_eager_codes_read_back_once():
-    """The eager readout reads all prompts' code probabilities back at once (one softmax, one copy to the host), with
-    the values of a prompt read alone; prompts with other code sets and counts in one call."""
+    """The eager readout reads all prompts' code probabilities back at once (one copy to the host, not one per prompt),
+    each with the values of the prompt read alone; prompts with other code sets and counts in one call."""
     import basal.engine as eng
     m = tiny()
     be = eng.EagerBackend.__new__(eng.EagerBackend)
@@ -368,16 +368,16 @@ def test_eager_codes_read_back_once():
     g = torch.Generator().manual_seed(0)
     h = torch.randn(5, m.config.hidden_size, generator=g)
     ids = [[3, 4], [3, 4], [5, 6, 7], [3, 4], [9, 10, 11, 12]]
-    calls, real = [], torch.softmax
+    calls, real = [], torch.Tensor.tolist
     try:
-        torch.softmax = lambda *a, **k: calls.append(1) or real(*a, **k)
+        torch.Tensor.tolist = lambda self: calls.append(1) or real(self)
         got = be._codes(h, ids)
     finally:
-        torch.softmax = real
+        torch.Tensor.tolist = real
     assert len(calls) == 1
     for b, lid in enumerate(ids):
-        want = real(h[b] @ m.lm_head.weight[lid].float().T, -1)
-        assert torch.allclose(torch.tensor(got[b]), want, atol=1e-6) and len(got[b]) == len(lid)
+        want = torch.softmax(h[b] @ m.lm_head.weight[lid].float().T, -1).tolist()
+        assert got[b] == want  # the prompt read alone, bit for bit
 
 
 def test_backend_capabilities_come_from_one_table():
