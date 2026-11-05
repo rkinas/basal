@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 
+import pytest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
@@ -102,3 +103,12 @@ def test_cors_preflight_only_allowed_origin(tmp_path):
     assert "x-request-id" in request_id.headers["access-control-allow-headers"].lower()
     response = client.options("/data", headers={**headers, "Origin": "https://other.example"})
     assert "access-control-allow-origin" not in response.headers
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_api_key_file_with_or_without_a_bom(tmp_path, encoding):
+    secret = "s3cret-key"
+    path = tmp_path / "keys.json"
+    path.write_text(json.dumps({"keys": [{"name": "ci", "sha256": hashlib.sha256(secret.encode()).hexdigest()}]}),
+                    encoding=encoding)
+    assert ApiKeys(path).check(secret) is not None
