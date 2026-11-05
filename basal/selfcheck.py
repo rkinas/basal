@@ -8,14 +8,16 @@ questions) and the probabilities that basal's own PyTorch engine (fp32) gave for
 requests to your server and prints, over all readouts:
 
   top-1 agreement     the share of questions whose most probable option is the reference's. A disagreement where the
-                      reference's top two options are within 0.02 counts as agreeing ("outside near ties"): any change
-                      of rounding can flip those
+                      server's top option was within 0.02 of the reference's top, in the reference, counts as
+                      agreeing ("outside near ties"): any change of rounding can flip those
   max |dp|            the largest change of any option's probability, and the mean
   seconds             wall time per request
 
 The exit status is 0 when the agreement outside near ties is at least --gate (default 0.98), 1 otherwise. Start the
 server without calibration (basal-serve ... --no-calibration), as the reference was made: the check compares raw
-probabilities. Requests the server had to cut (usage.truncated: the context is too short) are left out and counted.
+probabilities. Requests the server had to cut (usage.truncated: the context is too short) are left out and counted; the check
+fails (exit 1) when fewer than half of the requests were compared, when a request failed or when a question came back
+unanswered.
 
 Make a reference file for a model (a maintainer's step; run it against a server of the native engine, fp32):
 
@@ -69,6 +71,8 @@ def call(url, path, body=None, timeout=300):
         raise SystemExit(f"{url}{path}: HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
     except OSError as e:
         raise SystemExit(f"{url}{path}: {e} (is the server running?)") from None
+    except ValueError as e:  # a 200 that is not JSON (a proxy's error page)
+        raise SystemExit(f"{url}{path}: the reply is not JSON ({e})") from None
 
 
 def server_info(url):
@@ -105,9 +109,10 @@ def compare(ref, got):
     keys = list(ref)
     r, g = [ref[k] for k in keys], [got.get(k, 0.0) for k in keys]
     a, b = max(range(len(r)), key=r.__getitem__), max(range(len(g)), key=g.__getitem__)
-    hi = sorted(r, reverse=True)
     dps = [abs(x - y) for x, y in zip(r, g)]
-    return a == b, a == b or hi[0] - hi[1] < TIE, max(dps), sum(dps), len(keys)
+    # near tie: the server's top option is within TIE of the reference's top in the reference (as on main: a three-way
+    # tie counts), so a flip to an option the reference ranked clearly lower is still a disagreement
+    return a == b, a == b or r[a] - r[b] < TIE, max(dps), sum(dps), len(keys)
 
 
 def check(url, reference, gate, note):
@@ -118,7 +123,7 @@ def check(url, reference, gate, note):
     if not info["uncalibrated"]:
         print("warning: the server applies a calibration; start it with --no-calibration, or the probabilities are "
               "tempered and the |dp| below is not the engine's", file=sys.stderr)
-    rows, cut, errors, times = [], 0, 0, []
+    rows, cut, errors, missing, times = [], 0, 0, 0, []
     for it in ref["items"]:
         t = time.perf_counter()
         try:
@@ -128,15 +133,23 @@ def check(url, reference, gate, note):
             print(f"{it['id']}: {e}", file=sys.stderr)
             continue
         times.append(time.perf_counter() - t)
+        if not isinstance(res, dict) or not isinstance(res.get("answers"), dict):
+            # a 200 that is JSON but not an answer ({"error": ...}, null, a list): a failed request
+            errors += 1
+            print(f"{it['id']}: the reply is not an answer object ({str(res)[:100]})", file=sys.stderr)
+            continue
         if (res.get("usage") or {}).get("truncated"):
             cut += 1
             continue
         for name, want in it["answers"].items():
             a = res["answers"].get(name)
-            if a:
-                rows.append((it["id"], name, want["type"], *compare(want["probabilities"], a["probabilities"])))
+            if not isinstance(a, dict) or not isinstance(a.get("probabilities"), dict):
+                missing += 1  # unanswered or without probabilities: not a pass
+                continue
+            rows.append((it["id"], name, want["type"], *compare(want["probabilities"], a["probabilities"])))
     if not rows:
-        raise SystemExit("no readouts compared (every request failed or was cut)")
+        raise SystemExit("no readouts compared (every request failed, was cut or came back without answers: "
+                         f"{errors} failed, {cut} cut, {missing} answers missing)")
     n = len(rows)
     top1 = sum(r[3] for r in rows) / n
     agree = sum(r[4] for r in rows) / n
@@ -146,9 +159,9 @@ def check(url, reference, gate, note):
     print(f"basal-selfcheck {__version__}  reference {ref['model']} ({ref['engine']}, basal {ref['basal']}): {ref['note']}")
     print(f"server       {info['name']} ({info['mode']})" + (f"   {note}" if note else ""))
     print(f"requests     {len(ref['items'])}: {len(ref['items']) - cut - errors} compared, {cut} cut by the context "
-          f"(usage.truncated), {errors} failed")
+          f"(usage.truncated), {errors} failed, {missing} answers missing")
     print(f"readouts     {n}")
-    print(f"top-1        {top1:.4f}   outside near ties (top two within {TIE}) {agree:.4f}")
+    print(f"top-1        {top1:.4f}   outside near ties (server's top within {TIE} of the reference's top) {agree:.4f}")
     print(f"|dp|         mean {sum(r[6] for r in rows) / options:.4f}   max {worst[5]:.4f} ({worst[0]} {worst[1]})")
     print(f"seconds      p50 {times[len(times) // 2]:.2f}   max {times[-1]:.2f} per request" if times else "")
     for t in ("choice", "noul", "score"):
@@ -156,8 +169,9 @@ def check(url, reference, gate, note):
         if sub:
             print(f"  {t:<7}    {len(sub):>4} readouts  top-1 {sum(r[3] for r in sub) / len(sub):.4f}  "
                   f"max |dp| {max(r[5] for r in sub):.4f}")
-    ok = agree >= gate and not errors
-    print(f"{'PASS' if ok else 'FAIL'}  (gate: agreement outside near ties >= {gate}, no failed request)")
+    ok = agree >= gate and not errors and not missing and len(ref["items"]) - cut - errors >= len(ref["items"]) / 2
+    print(f"{'PASS' if ok else 'FAIL'}  (gate: agreement outside near ties >= {gate}, no failed request, no missing answer, "
+          "at least half of the requests compared)")
     return 0 if ok else 1
 
 
