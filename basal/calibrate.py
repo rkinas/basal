@@ -680,6 +680,7 @@ def fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend=MIN_B
     blended with the shipped ones from min_blend decisions (0: never), else the shipped ones -> (temps, source,
     buckets, bucket source)."""
     temps, source = {}, {}
+    min_per_type = max(1, min_per_type)  # 0 would fit a type that has no decision at all (max() of nothing)
     for t in PRIMS:
         rs = [r for r in fit_rows if r["prim"] == t]
         if len(rs) >= min_per_type:
@@ -784,8 +785,8 @@ def fit_fallback(sets, T, min_per_set=30):
         cert_p = [(r, set_probs(r, T)) for r in rs if is_cert(r["group"])]
         e = dict(fallback=rs[0]["set"]["fallback"], labels=rs[0]["keys"], n=len(rs), n_fit=len(fit_p),
                  n_cert=len(cert_p))
-        if len(fit_p) < min_per_set:
-            out[sid] = dict(e, fallback_threshold=None, reason=f"{len(fit_p)} FIT questions < {min_per_set}")
+        if len(fit_p) < max(1, min_per_set):
+            out[sid] = dict(e, fallback_threshold=None, reason=f"{len(fit_p)} FIT questions < {max(1, min_per_set)}")
             continue
         best = max(FALLBACK_GRID, key=lambda t: set_metrics(fit_p, t)["iou"])
         fitted, default = set_metrics(cert_p, best), set_metrics(cert_p, None)
@@ -1298,11 +1299,27 @@ def engine_name(kind, quant, preset=None):
 def refit(a, targets, reference, reference_name):
     """--from-rows: the fit on the probabilities a --save-rows run recorded (no engine). The baseline is --calibration,
     else the file that run compared with."""
-    lines = Path(a.input).read_text(encoding="utf-8").splitlines()
-    head = json.loads(lines[0])
-    if head.get("basal_calibrate_rows") != 1:
+    try:
+        lines = Path(a.input).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as e:  # a binary file, a directory
+        raise SystemExit(f"{a.input}: not a file written by basal-calibrate --save-rows ({type(e).__name__})") from None
+    try:
+        head = json.loads(lines[0])
+    except (IndexError, ValueError):
+        head = {}
+    if not isinstance(head, dict) or head.get("basal_calibrate_rows") != 1:
         raise SystemExit(f"{a.input}: not a file written by basal-calibrate --save-rows")
-    rows = [json.loads(x) for x in lines[1:] if x.strip()]
+    rows = []
+    for i, x in enumerate(lines[1:], 2):
+        if not x.strip():
+            continue
+        try:
+            row = json.loads(x)
+        except ValueError:
+            row = None
+        if not isinstance(row, dict):
+            raise SystemExit(f"{a.input}: line {i} is not a row written by basal-calibrate --save-rows")
+        rows.append(row)
     small = sample_size(rows, [], targets)
     for w in small:
         print(f"warning: {w}", file=sys.stderr)

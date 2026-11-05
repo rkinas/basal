@@ -41,6 +41,7 @@ from . import synth
 from .prompt import letter_ids, model_format, render
 
 GATE = 0.99
+OLLAMA_URL, LLAMACPP_URL = "http://127.0.0.1:11434", "http://127.0.0.1:8080"
 BOOT = 2000
 
 QUESTIONS = {
@@ -178,9 +179,27 @@ def gate(row, g=GATE):
     return "pass" if ok else "FAIL"
 
 
-def cache_key(model, revision, version, reference, sets):
-    blob = json.dumps(dict(model=model, revision=revision, version=version, reference=reference, sets=sets))
-    return hashlib.sha256(blob.encode()).hexdigest()[:24]
+def cache_key(model, revision, version, reference, sets, weights=None):
+    """`weights` holds only what the reference reads and what differs from the default; with none, the key is the
+    one of earlier versions, so the cached rows of the default reference stay valid."""
+    parts = dict(model=model, revision=revision, version=version, reference=reference, sets=sets)
+    if weights:
+        parts["weights"] = weights
+    return hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:24]
+
+
+def reference_weights(a):
+    """The options that choose the weights of the reference engine (gguf, ollama, llamacpp), if not at the default."""
+    mode = a.reference.partition("=")[0]
+    if mode == "gguf":
+        fields = dict(gguf=(a.gguf, None))
+    elif mode == "ollama":
+        fields = dict(ollama_model=(a.ollama_model, None), ollama_url=(a.ollama_url, OLLAMA_URL))
+    elif mode == "llamacpp":
+        fields = dict(llamacpp_url=(a.llamacpp_url, LLAMACPP_URL))
+    else:
+        fields = {}
+    return {k: v for k, (v, default) in fields.items() if v != default}
 
 
 def cached_reference(path, make, sets):
@@ -243,8 +262,8 @@ def main(argv=None):
                                            / "agree"), help="directory of the cached reference rows ('' = none)")
     ap.add_argument("--gguf", default=None)
     ap.add_argument("--ollama-model", dest="ollama_model", default=None)
-    ap.add_argument("--ollama-url", dest="ollama_url", default="http://127.0.0.1:11434")
-    ap.add_argument("--llamacpp-url", dest="llamacpp_url", default="http://127.0.0.1:8080")
+    ap.add_argument("--ollama-url", dest="ollama_url", default=OLLAMA_URL)
+    ap.add_argument("--llamacpp-url", dest="llamacpp_url", default=LLAMACPP_URL)
     ap.add_argument("--out", default=None)
     a = ap.parse_args(argv)
     from transformers import AutoTokenizer
@@ -267,7 +286,7 @@ def main(argv=None):
     sets = {"single": single, "multi": multi, "long": long}
     gold = [(a.n_single + i, q["gold"]) for i, q in enumerate(qs) if isinstance(q.get("gold"), int)]
     model, revision = model_identity(a.model, md)
-    key = cache_key(model, revision, __version__, a.reference, sets)
+    key = cache_key(model, revision, __version__, a.reference, sets, reference_weights(a))
     path = Path(a.cache) / f"{key}.json" if a.cache else None
     t0 = time.time()
     ref, hit = cached_reference(path, backend_factory(a.reference, md, a, fmt), sets)

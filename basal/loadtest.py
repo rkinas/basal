@@ -38,6 +38,8 @@ def body(q, early_exit=None, questions=1):
 
 
 async def run(a):
+    if a.n_seq < 1:
+        raise SystemExit("basal-loadtest: --n-seq must be at least 1")
     # warm-up, sequential and concurrent phases ask different requests (as far as the questions go), so an engine with
     # a prefix cache across requests (vLLM, SGLang, llama.cpp) cannot answer a timed request from an earlier phase
     n = 10 + a.n_seq + a.n_conc
@@ -60,7 +62,10 @@ async def run(a):
         async def one(b):
             async with sem:
                 t0 = time.perf_counter()
-                r = await c.post(a.url, json=b)
+                try:
+                    r = await c.post(a.url, json=b)
+                except httpx.HTTPError:  # a timeout or a refused connection is an error, it does not end the run
+                    return time.perf_counter() - t0, 0
                 return time.perf_counter() - t0, r.status_code
 
         t0 = time.perf_counter()
@@ -126,6 +131,8 @@ def main():
                     help="N: compare N answers given alone and under load (instead of the load test)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
+    if a.concurrency < 1:
+        raise SystemExit("basal-loadtest: --concurrency must be at least 1")
     if a.determinism:
         n = 2 * a.determinism
         qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic \
