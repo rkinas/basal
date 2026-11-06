@@ -1304,7 +1304,6 @@ class Server:
         # --state-cache-dir: the compatibility signature of the cached states' files (engine.cache_signature)
         disk_kwargs = dict(state_cache_dir=getattr(a, "state_cache_dir", None),
                            state_cache_disk_gb=getattr(a, "state_cache_disk_gb", 20.0),
-                           state_cache_import=getattr(a, "state_cache_import", "same-engine"),
                            state_cache_signature=None)
         if disk_kwargs["state_cache_dir"] is not None:
             kv_dtype = "bf16" if kind == "mlx" else {"bfloat16": "bf16", "float16": "f16", "float32": "f32"}.get(
@@ -2311,11 +2310,6 @@ def add_engine_args(ap):
                          "--state-cache-disk-gb")
     ap.add_argument("--state-cache-disk-gb", dest="state_cache_disk_gb", type=float, default=20.0,
                     help="--state-cache-dir: GiB of state files kept on disk (default 20)")
-    ap.add_argument("--state-cache-import", dest="state_cache_import", choices=["same-engine", "any-engine"],
-                    default="same-engine",
-                    help="--state-cache-dir: same-engine (default) reads only files this engine wrote; any-engine: also "
-                         "read files written by another engine serving the same bf16 checkpoint (CUDA graph engine "
-                         "<-> --mode mlx); answers over such states are close to, not equal to, the uncached ones")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
                     help="CUDA graph engine and --mode mlx: compute the template prefix (chat template, system "
                          "prompt, the header up to the state) once and run short requests over its cached keys and "
