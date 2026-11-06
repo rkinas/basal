@@ -56,6 +56,29 @@ def test_determinism_creates_the_directory_of_out(monkeypatch, tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["determinism"]["requests"] == 2
 
 
+@pytest.mark.parametrize("name", ["gdn_graph", "server", "gemma4_graph", "interpolate", "calibrate", "bench", "loadtest",
+                                  "agree"])
+def test_every_text_file_these_modules_open_names_its_encoding(name):
+    """open() and read_text() / write_text() without an encoding use the locale of the machine (cp1252 on Windows)."""
+    import ast
+    tree = ast.parse((Path(__file__).resolve().parent.parent / "basal" / f"{name}.py").read_text(encoding="utf-8"))
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        kw = {k.arg for k in node.keywords}
+        if isinstance(f, ast.Name) and f.id == "open":
+            mode = node.args[1].value if len(node.args) > 1 and isinstance(node.args[1], ast.Constant) else next(
+                (k.value.value for k in node.keywords if k.arg == "mode" and isinstance(k.value, ast.Constant)), "r")
+            if "b" not in str(mode) and "encoding" not in kw:
+                bad.append(node.lineno)
+        elif isinstance(f, ast.Attribute) and f.attr in ("read_text", "write_text") and "encoding" not in kw:
+            if not (f.attr == "write_text" and len(node.args) > 1) and not (f.attr == "read_text" and node.args):
+                bad.append(node.lineno)
+    assert bad == [], f"basal/{name}.py: text open without encoding at lines {bad}"
+
+
 def agree_cache_default(monkeypatch):
     """The default of agree's --cache as the command builds it."""
     seen = {}

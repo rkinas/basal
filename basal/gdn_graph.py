@@ -299,7 +299,7 @@ def fla_record(path):
             common = Counter(json.dumps(c, sort_keys=True) for _, c in entries).most_common(1)[0][0]
             kernels[name] = dict(default=json.loads(common), keys=entries)
     Path(path).write_text(json.dumps(dict(gpu=torch.cuda.get_device_name(), fla=fla.__version__, kernels=kernels),
-                                     indent=1, sort_keys=True))
+                                     indent=1, sort_keys=True), encoding="utf-8")
     return len(kernels)
 
 
@@ -328,7 +328,7 @@ def fla_pin(path=None):
         return 0
     import fla
     from triton.runtime.autotuner import Config
-    table = json.loads(Path(path).read_text())
+    table = json.loads(Path(path).read_text(encoding="utf-8"))
     if table.get("gpu") != torch.cuda.get_device_name() or table.get("fla") != fla.__version__:
         return 0
     n = 0

@@ -126,7 +126,7 @@ def load_nvfp4_amax(amax):
     either that mapping or {"amax": mapping} (the shipped NVFP4_AMAX.json)."""
     if not isinstance(amax, dict):
         import json
-        with open(amax) as f:
+        with open(amax, encoding="utf-8") as f:
             amax = json.load(f)
     return amax.get("amax", amax) if isinstance(amax.get("amax"), dict) else amax
 
