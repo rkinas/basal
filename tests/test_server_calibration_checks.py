@@ -25,3 +25,15 @@ def test_a_temperature_that_is_not_a_finite_number_above_zero_is_refused_at_star
                                  {"temperature_per_prim": {"nobody_asks": 0}}, {}])
 def test_a_valid_calibration_is_accepted(cal):
     assert not refused({"prompt": 1, **cal})
+
+
+def test_the_question_types_of_a_request_are_the_ones_whose_temperatures_are_checked():
+    from basal import server
+    assert server.QUESTION_TYPES == ("choice", "noul", "score", "act", "multi", "tool")
+    with pytest.raises(server.RequestError, match="unknown type"):
+        server.to_items("s", {"q": {"type": "nobody_asks", "instructions": "?"}}, 1)
+
+
+@pytest.mark.parametrize("key", ["choice", "nobody_asks"])
+def test_a_bad_bucket_name_is_refused_under_any_key(key):
+    assert refused({"prompt": 1, "temperature_per_bucket": {key: {"x": 1.0}}})

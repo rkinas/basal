@@ -255,6 +255,9 @@ def check_body(body):
         raise RequestError('"questions" must name at least one question')
 
 
+QUESTION_TYPES = ("choice", "noul", "score", "act", "multi", "tool")  # the types a question can have
+
+
 @reads_request
 def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
     """Questions of a request -> readout items (options as a list) + keys to assemble the answer. Every item has
@@ -266,7 +269,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
     state_pl = not force_lang and lang_of(state) == "pl"  # once per request, not once per question
     for name, q in questions.items():
         t = q.get("type", "choice")
-        if t not in ("choice", "noul", "score", "act", "multi", "tool"):
+        if t not in QUESTION_TYPES:
             raise RequestError(f"question {name!r}: unknown type {t!r}")
         instr = _text(q.get("instructions", ""))
         lang = force_lang or ("pl" if state_pl else lang_of(instr))
@@ -596,9 +599,6 @@ def stored_fallback(cal, q):
     entry = (cal.get("multi") or {}).get(label_set_id(q["keys"], q["labels"], q["fallback"])) or {}
     if entry.get("fallback_threshold") is not None:
         q["fallback_threshold"], q["fallback_threshold_source"] = float(entry["fallback_threshold"]), "calibration"
-
-
-QUESTION_TYPES = ("choice", "noul", "score", "act", "multi", "tool")  # the types a question can have
 
 
 def temperature(cal, q_type, k):
