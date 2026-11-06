@@ -224,3 +224,21 @@ def test_the_typeset_minus_is_a_minus():
 
 def test_the_ascii_minus_and_a_plain_number_are_unchanged():
     assert parse_number("-5") == -5 and parse_number("5") == 5
+
+
+def test_extract_number_after_a_typeset_minus_keeps_its_sign():
+    """An extract answer: the span chosen is the same source text "−5" as before, and its value is now -5 (it was 5).
+    An ASCII "-" was already read."""
+    state = "Stacja: Kraków\nTemperatura: \u22125 °C\nZmiana: -2 °C"
+    want = {"temp": ("Temperatura", "\u22125"), "change": ("Zmiana", "-2")}
+
+    def pref(s, o):
+        q = s.split("<user>")[-1]
+        line_kw, value = want[re.search(r"pola: (\w+)", q).group(1)]
+        if "W której linii" in q:
+            return 9 if line_kw in o else 1
+        return 9 if o == value else 1
+    schema = {"type": "object", "properties": {"temp": {"type": "number"}, "change": {"type": "integer"}}}
+    x = run(FakeServer(by_text(pref)), {"state": state, "questions": {"x": {"type": "extract", "schema": schema}}})
+    x = x["answers"]["x"]
+    assert x["fields"]["temp"]["text"] == "\u22125" and x["data"] == {"temp": -5, "change": -2}
