@@ -163,7 +163,7 @@ still the best MLX 4-bit format on mini.) Mini's `-MLX-fp4` ships its own temper
 thresholds are copied from bf16 and not certified for that port.
 
 ```bash
-uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.4.tar.gz"
+uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.5.tar.gz"
 basal-serve --model Remek/basal-1.5-4.5B-MLX-8bit --mode mlx --port 8000
 ```
 
@@ -319,7 +319,7 @@ NVFP4 needs Blackwell (B200, B300, RTX 50xx, RTX PRO 6000, DGX Spark). basal-1.5
 costs basal-1.5-mini about 6 accuracy points with almost no speed gain over FP8; use `-FP8`. Run them with vLLM in a separate environment:
 
 ```bash
-uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.4.tar.gz"
+uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.5.tar.gz"
 basal-serve --model Remek/basal-1.5-4.5B-FP8 --mode vllm --port 8000
 ```
 
@@ -346,7 +346,7 @@ The `Remek/basal-1.0-4.5B-FP8` / `-NVFP4` and `Remek/basal-1.0-1.5B-FP8` / `-NVF
 ModelOpt Hugging Face exports and load in vLLM (tested):
 
 ```bash
-uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.4.tar.gz"   # separate environment: vLLM brings its own torch
+uv pip install "basal[vllm] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.5.tar.gz"   # separate environment: vLLM brings its own torch
 basal-serve --model Remek/basal-1.0-4.5B-NVFP4 --mode vllm --port 8000
 ```
 
@@ -358,6 +358,6 @@ H100, offline (`basal-bench`, 1,000 development decisions, both option orders), 
 calibration file for 1.5; both use `CALIBRATION.json`.
 
 SGLang runs in its own environment. Install it with `uv pip install --prerelease=allow "sglang[srt]==0.5.21"` (its kernels need a CUDA 12.9+ toolkit), then
-`uv pip install --no-deps "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.4.tar.gz"` and, if missing, `uv pip install starlette uvicorn httpx accelerate
+`uv pip install --no-deps "basal @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.5.tar.gz"` and, if missing, `uv pip install starlette uvicorn httpx accelerate
 safetensors`. This is the setup the SGLang numbers were measured with; the basal engine's own modes (`fast`, `eager`)
 and vLLM use the default install.

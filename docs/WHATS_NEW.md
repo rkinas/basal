@@ -1,3 +1,85 @@
+# What is new in basal 2.5.5
+
+Released 6 November 2026. Bug fixes, contributed by Rafal Wiktorowicz (NovaraX), and our own. Answers to valid requests
+are byte-identical to 2.5.4 (checked on an H100 with basal-omni-1.0-mini in `--mode fast` and `--mode eager`,
+basal-omni-1.0-mini-FP8, basal-omni-pico and basal-2.0-mini-FP8 in `--mode fast`). Some requests that failed
+now get an answer: media data in wrapped or URL-safe base64 (#120), and an extract number of 309 digits or more
+(#122). `basal-selfcheck` exits 1 in more cases (#118), and `basal-export-gguf` refuses a two-way model unless
+`--one-way` (#134).
+
+- **basal-selfcheck no longer passes a server it barely compared**: a near tie in the reference forgave a flip to
+  any option, even one the reference ranked clearly lower, and now forgives only an option within 0.02 of the
+  reference's top. A question the server left unanswered, or answered without probabilities, is a FAIL; it was
+  skipped. The run FAILs when fewer than half of the requests were compared (the others cut by the context). A
+  200 that is not JSON, or not an answer, is a clean failure instead of a traceback. Contributed by Rafal
+  Wiktorowicz (NovaraX), [#118](https://github.com/rkinas/basal/pull/118).
+- **Media data as base64 tools write it is accepted** (`media`): base64 wrapped every 76 characters (coreutils,
+  MIME), the URL-safe alphabet with or without its padding, and an upper-case `DATA:` scheme were refused with a
+  422. They now decode to the same bytes as the plain form, which decodes as before. Contributed by Rafal
+  Wiktorowicz (NovaraX), [#120](https://github.com/rkinas/basal/pull/120).
+- **The client's API key goes with each request** (`basal.client`): `Basal` and `AsyncBasal` with `api_key` and a
+  shared httpx client (`http=`) wrote the key into that client's headers. Every request made through it, by the
+  caller too and to any host, then carried the key, and a second basal client on it sent the other's key. The key
+  is now a header of each request of the basal client, and the httpx client is left as it was. Contributed by
+  Rafal Wiktorowicz (NovaraX), [#121](https://github.com/rkinas/basal/pull/121).
+- **A reply that is not JSON, or has no answers, is a `ServerError`** (`basal.client`): a 200 with a proxy's HTML
+  page raised a `JSONDecodeError`, and a JSON without `answers` (or with a list there) raised a `KeyError`,
+  `TypeError` or `AttributeError` from `decide`. Both now raise `ServerError` with the status and the first 200
+  characters of the reply, like every other failure. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#121](https://github.com/rkinas/basal/pull/121).
+- **A number too large for a float is no value, not a 500** (`extract` number / integer fields): 309 digits or more
+  in the text were float infinity, and turning that into an integer raised `OverflowError`, so the request failed.
+  Such a number now gives no value, like text that is no number. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#122](https://github.com/rkinas/basal/pull/122).
+- **SIGTERM runs basal-serve's exit handlers** (`kill`, `docker stop`, `systemctl stop`): uvicorn hands SIGTERM back
+  to Python's default action after its shutdown, so no exit handler ran. The vLLM process of think mode outlived the
+  server, and a merged adapter copy stayed in /tmp. basal-serve now runs them and still ends with status -15, as an
+  unhandled SIGTERM does. A program that uses basal as a library keeps its own signal handling. Contributed by Rafal
+  Wiktorowicz (NovaraX), [#123](https://github.com/rkinas/basal/pull/123).
+- **A short engine result no longer leaves a request waiting** (basal-serve): when a backend returned fewer results
+  than the groups of its call, the requests past the end were never answered and their HTTP requests hung. The call
+  now fails as a whole, and each of its requests gets a 500. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#126](https://github.com/rkinas/basal/pull/126).
+- **The macOS install lines take the native arm64 Python** (docs; `--mode mlx`, `--mode gguf` on a Mac):
+  `uv venv --python 3.12` can take an x86_64 Python that runs under Rosetta, where torch has no build and
+  `basal[mlx]` installs no MLX. The Apple Silicon lines of the README, INSTALL.md, PORTS.md and GGUF.md now install
+  and use `cpython-3.12-macos-aarch64-none`, and `uname -m` (`arm64`) tells whether the terminal runs under Rosetta.
+  Reported on Hugging Face by [adamage](https://huggingface.co/adamage),
+  [#128](https://github.com/rkinas/basal/pull/128).
+- **A server error is logged with its traceback** (basal-serve): an HTTP 500 printed only its one line, such as
+  `basal: request failed: TypeError: …`, which hid where the error came from. The line is now followed by the
+  traceback on stderr. The reply is unchanged and never carries the traceback. An invalid request (422 / 400) and
+  out of GPU memory (503) keep their one line. [#134](https://github.com/rkinas/basal/pull/134).
+- **`python -m basal.think rows --concurrency 0` is refused** instead of waiting for ever, as basal-run and
+  basal-calibrate refuse it since 2.5.4. [#134](https://github.com/rkinas/basal/pull/134).
+- **basal-mcp answers a line it cannot read** (the stdio bridge): a JSON-RPC line with a lone surrogate
+  (`"\ud800"`), invalid JSON, or JSON that is not a JSON-RPC message got no reply, so the agent host waited for
+  ever. It now gets a JSON-RPC error: a parse error (-32700), or an invalid request (-32600), with the line's id
+  when it has one. [#134](https://github.com/rkinas/basal/pull/134).
+- **`--fp8-accum full` no longer promises batch-independent answers** (docs): the help said "decisions independent
+  of batching, as --deterministic", but under load the answers still depend on the batch. Only `--deterministic`
+  (one request per forward) makes them independent. The help and SERVING.md say so now.
+  [#134](https://github.com/rkinas/basal/pull/134).
+- **basal-agree caches a GGUF reference by the file, not the path as typed**: `--gguf ./m.gguf` and the same file
+  by its absolute path were two cache entries, and a GGUF re-exported to the same path was answered from the old
+  rows. The key now holds the file's resolved path, size and modification time (`--reference gguf@<file>` too).
+  [#134](https://github.com/rkinas/basal/pull/134).
+- **basal-export-gguf refuses a two-way model unless `--one-way`**: a model trained to read two ways
+  (basal.json `"two_way"`) was exported silently, and llama.cpp then reads it one way (causally), so its answers
+  differ from basal-serve's (61% of the top answers agreed on a two-way model we measured). The export now stops
+  with that cost named. `--one-way` exports it for llama.cpp's reading anyway. The exporter never writes
+  `attention.causal = false`: on Gemma 4, stock llama.cpp would then read the sliding window only, further off still.
+  [#134](https://github.com/rkinas/basal/pull/134).
+- **The `--systemone` template reads Polish written in NFD** (basal-export-gguf): a state or question whose Polish
+  letters are decomposed (`o` + U+0301 for `ó`, as macOS writes text) got the English prompt in llama.cpp and the
+  Polish one in basal-serve, which normalises such text. The template now looks for the decomposed letters too, and
+  the export checks it on NFD probes. A GGUF exported before keeps the old template until it is exported again
+  (`--gguf <file> --systemone`). [#134](https://github.com/rkinas/basal/pull/134).
+- **`basal-run` sends every field of a request line** (`basal-run`): a full-request line was sent with `state`,
+  `questions` and `early_exit` only, so `media`, `images`, `facts`, `lang`, `think`, `detail` and `model` were
+  dropped; it is now sent as it is, without the line's own `id`, `gold`, `group`, `family` and `_` fields. Answers of
+  such lines change: they now answer the request the line holds. [#134](https://github.com/rkinas/basal/pull/134).
+
 # What is new in basal 2.5.4
 
 Released 5 November 2026. Bug fixes, contributed by Rafal Wiktorowicz (NovaraX) and Miłosz Kucharski, and fixes from a
