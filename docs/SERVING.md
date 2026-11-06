@@ -587,6 +587,8 @@ Each input line is either a **simple item** or a **full request** (the formats c
 ```
 
 Simple items are sent with placeholder keys and `"option_keys": "hide"`, so the model sees exactly the option texts.
+A full request is sent with all its fields (`media`, `facts`, `lang`, `think`, ...), except the line's own `id`, `gold`,
+`group`, `family` and fields whose name starts with `_`.
 Each output line contains `id`, the full `answers` (probabilities, confidence) and the server `latency_ms`; simple items
 also get `prediction` (index of the chosen option), `option`, `confidence` and, when `gold` is given, `correct`. A line
 that is not valid (not JSON, a simple item without options) or whose request fails gets `error`, and the run goes on.
