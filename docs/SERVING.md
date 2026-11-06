@@ -265,7 +265,11 @@ benchmarking a GPU.
 
   - **Routing:** a request goes to the replica its state is hashed to, so the questions over one document keep
     sharing the state and its cache on one replica. The hash is consistent, so adding or removing a replica moves
-    few states.
+    few states. A state given as a list or an object (chat messages) is hashed by its JSON text.
+  - **Prefix affinity** (`--prefix-affinity on`, the default; `off`: the hash alone): a state that begins with one
+    routed before (the next step of an agent trace or a chat, an edited document) goes to the replica that got that
+    beginning, whose state cache computes only the new tokens (`--state-cache-gb`), while the shared beginning is at
+    least as long as the rest and that replica holds at most 2x the in-flight bound below.
   - **Bounded load:** a replica holding more than 1.25 times the mean in-flight requests passes new ones on along
     the ring (`--load-factor`).
   - **Requests without a state** go to the less loaded of two random replicas.

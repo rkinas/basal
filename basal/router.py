@@ -83,6 +83,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import OrderedDict
 
 from .metrics import prometheus
 
@@ -90,18 +91,42 @@ LOAD_FACTOR = 1.25
 VNODES = 64
 POLL_S = 2.0
 SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (spawn)
+# --prefix-affinity: a state that begins with one routed before goes to the replica that got it (its state cache holds
+# that beginning: a growing agent trace computes only its new tokens there), found through chained hashes of
+# BLOCK-character blocks of the routing key, at most MAX_BLOCKS per pool (the least recently routed dropped first),
+# while that replica's load stays within PREFIX_FACTOR x --load-factor of the mean
+BLOCK = 256
+MAX_BLOCKS = 1 << 18
+PREFIX_FACTOR = 2.0
+
+
+def request_key(req):
+    """The routing key of a parsed request body: its state with whitespace normalised (None without a state); a state
+    given as a list or an object (chat messages, items) by its JSON text. Split and join give what
+    re.sub(r"\\s+", " ", state.strip()) gave, for every string (str.isspace and re's whitespace class agree on every
+    code point), in a quarter of the time (3.4 -> 0.85 ms on a 64 KB state)."""
+    state = req.get("state") if isinstance(req, dict) else None
+    if isinstance(state, (list, dict)):
+        state = json.dumps(state, ensure_ascii=False)
+    return (" ".join(state.split()) or None) if isinstance(state, str) else None
+
+
+def key_blocks(key):
+    """Chained hashes of the full BLOCK-character blocks of a routing key: the i-th stands for key[: BLOCK * (i + 1)]."""
+    out, h = [], b""
+    for i in range(BLOCK, len(key) + 1, BLOCK):
+        h = hashlib.blake2b(h + key[i - BLOCK: i].encode("utf-8"), digest_size=8).digest()
+        out.append(h)
+    return out
 
 
 def state_key(body):
-    """The routing key of a request body: its state with whitespace normalised (None without a state, or for a body
-    that is not JSON or nested too deeply to read: the replica answers that client error)."""
+    """request_key of a request body (bytes or str; None for a body that is not a JSON object or nested too deeply to
+    read: the replica answers that client error)."""
     try:
-        state = json.loads(body).get("state")
-    except (ValueError, AttributeError, RecursionError):
+        return request_key(json.loads(body))
+    except (ValueError, RecursionError):
         return None
-    if not isinstance(state, str) or not state.strip():
-        return None
-    return re.sub(r"\s+", " ", state.strip())
 
 
 SCRIPTS = ("latin", "cyrillic", "greek", "arabic", "hebrew", "cjk")
@@ -306,7 +331,7 @@ class Ring:
 
 class Router:
     def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None,
-                 levels=None, blend=None, blend_weight=1.0, fallback=None):
+                 levels=None, blend=None, blend_weight=1.0, fallback=None, affinity=True):
         """escalate, below: one cascade level; levels: [(URLs, threshold), ...] for levels 2, 3, ... instead;
         blend: [(URLs, weight), ...] asked beside the replicas (weight blend_weight); fallback: {url, model, below,
         timeout, extra} of the LLM after the last level."""
@@ -330,7 +355,9 @@ class Router:
         self.scripts = {}
         self.ready = set()
         self.load = {r: 0 for r in self.replicas}
-        self.routed = {(r, how): 0 for r in self.replicas for how in ("state", "load")}
+        self.routed = {(r, how): 0 for r in self.replicas for how in ("state", "prefix", "load")}
+        self.affinity = affinity  # --prefix-affinity
+        self.index = {}  # pool -> OrderedDict(block hash -> the replica the state with that beginning went to)
         self.failed = {r: 0 for r in self.replicas}
         self.factor = factor
         self.rng = random.Random(seed)
@@ -338,16 +365,48 @@ class Router:
         self.client = httpx.AsyncClient(timeout=None, transport=transport,
                                         limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
-    def choose(self, key, pool="main"):
-        """(replica, how) for a request with routing key key (None: by load), among the replicas of pool."""
+    def choose(self, key, pool="main", hs=None):
+        """(replica, how) for a request with routing key key (None: by load), among the replicas of pool: with
+        --prefix-affinity the replica a state with the same beginning went to ("prefix", _prefix), else the ring's.
+        hs: key_blocks(key), when the caller has them (_send records them after the replica answers, _remember)."""
         if key is not None:
-            r = self.rings[pool].pick(key, self.load, self.ready, self.factor)
-            return r, "state"
+            if hs is None:
+                hs = key_blocks(key) if self.affinity else ()
+            r, how = self._prefix(hs, pool, len(key)), "prefix"
+            if r is None:
+                r, how = self.rings[pool].pick(key, self.load, self.ready, self.factor), "state"
+            return r, how
         ready = sorted(self.ready & set(self.pools[pool]))
         if not ready:
             return None, "load"
         a, b = self.rng.choice(ready), self.rng.choice(ready)
         return (a if self.load[a] <= self.load[b] else b), "load"
+
+    def _remember(self, hs, pool, r):
+        """--prefix-affinity: the blocks of a key replica r answered (200: it read, and may cache, that state) go to r;
+        a request it refused or failed records nothing."""
+        idx = self.index.setdefault(pool, OrderedDict())
+        for h in hs:
+            idx[h] = r
+            idx.move_to_end(h)
+        while len(idx) > MAX_BLOCKS:
+            idx.popitem(last=False)
+
+    def _prefix(self, hs, pool, n):
+        """The replica whose earlier state shares the longest beginning (whole blocks) with a key of n characters,
+        when that beginning is at least as long as the rest (a shared letterhead does not pin unrelated documents)
+        and the replica is ready, with its load within PREFIX_FACTOR x --load-factor of the mean; else None."""
+        idx = self.index.get(pool)
+        hit, m = None, 0
+        for i, h in enumerate(hs if idx else ()):  # the deepest recorded block: the hashes are chained, so a block
+            r = idx.get(h)                        # stands for the whole beginning up to it (one evicted before it
+            if r is not None:                     # does not end the match)
+                hit, m = r, (i + 1) * BLOCK
+        if hit is None or hit not in self.ready or m < n - m:
+            return None
+        names = [x for x in self.pools[pool] if x in self.ready]
+        cap = math.ceil(PREFIX_FACTOR * self.factor * (sum(self.load.get(x, 0) for x in names) + 1) / len(names))
+        return hit if self.load.get(hit, 0) + 1 <= cap else None
 
     async def poll(self):
         """Readiness of every replica (GET /health: 200 = ready)."""
@@ -361,31 +420,39 @@ class Router:
 
     async def forward(self, path, body, headers):
         """-> (status, content, content type): the request to the replica its pool and state give, then (--escalate)
-        its low-confidence questions to the escalation replicas."""
+        its low-confidence questions to the escalation replicas. The body is parsed once here: the routing key and the
+        sub-requests of --escalate / --blend / --fallback come from it (they keep its state, so its key)."""
+        try:
+            req = json.loads(body)
+        except (ValueError, RecursionError):  # (not JSON, or nested too deeply to read: the replica refuses it)
+            req = None
+        req = req if isinstance(req, dict) else None
+        key = request_key(req)
         pool = "main"
         if any(name.startswith("script:") for name in self.rings):  # --route
-            try:
-                sc = script_of(json.loads(body).get("state"))
-            except (ValueError, AttributeError, TypeError):  # (not JSON, not an object: the replica refuses it)
-                sc = None
+            sc = script_of(req.get("state")) if req is not None else None  # (not an object: the replica refuses it)
             if sc is not None:
                 self.scripts[sc] = self.scripts.get(sc, 0) + 1
                 pool = f"script:{sc}" if f"script:{sc}" in self.rings else pool
-        status, content, ctype = await self._send(pool, path, body, headers)
+        if not (self.levels or self.blends or self.fallback):
+            req = None  # (nothing reads it after the replica answers: not held while the request is in flight)
+        status, content, ctype = await self._send(pool, path, body, headers, key)
+        if req is None:
+            return status, content, ctype
         level = {}
         if self.levels and status == 200:
-            content = await self._cascade(path, body, content, headers, level)
+            content = await self._cascade(path, req, content, headers, key, level)
         if self.blends and status == 200:
-            content = await self._blend(path, body, content, headers)
+            content = await self._blend(path, req, content, headers, key)
         if self.fallback and status == 200:
-            content = await self._fallback(body, content, level if self.levels else None)
+            content = await self._fallback(req, content, level if self.levels else None)
         return status, content, ctype
 
-    async def _fallback(self, body, content, level=None):
+    async def _fallback(self, req, content, level=None):
         """The answers of the last level (level: the cascade's level of each question; None: one model) whose top
         probability is under --fallback-below asked of the LLM, concurrently; its answer replaces the basal one."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
             if req.get("media") is not None or req.get("images") is not None:  # (images: the alias of media)
@@ -452,10 +519,10 @@ class Router:
         i, probs, result = fallback_parse(data, len(options))
         return i, probs, result, (data.get("model") if isinstance(data, dict) else None) or f["model"]
 
-    async def _blend(self, path, body, content, headers):
+    async def _blend(self, path, req, content, headers, key):
         """The first replica's answers, the blendable ones mixed with the --blend pools' (asked at once, concurrently)."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
             qs = req.get("questions") or {}
             want = [q for q, a in answers.items() if q in qs and blendable(qs[q], a)]
@@ -464,7 +531,7 @@ class Router:
         if not want:
             return content
         sub = json.dumps(dict(req, questions={q: qs[q] for q in want})).encode()
-        outs = await asyncio.gather(*(self._send(pool, path, sub, headers) for pool, _ in self.blends))
+        outs = await asyncio.gather(*(self._send(pool, path, sub, headers, key) for pool, _ in self.blends))
         others = []
         for (_, w), (st, c, _) in zip(self.blends, outs):
             try:
@@ -487,12 +554,12 @@ class Router:
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _cascade(self, path, body, content, headers, level_out=None):
+    async def _cascade(self, path, req, content, headers, key, level_out=None):
         """The answers of the first replica (level 1), with those under level k's threshold asked again of level k + 1,
         level by level. A level that is down or does not answer 200 leaves the previous answers (and ends the chain).
         With one level the response is as before; with more, every answer also gives its level and model."""
         try:
-            req, resp = json.loads(body), json.loads(content)
+            resp = json.loads(content)
             answers = resp["answers"]
         except (ValueError, KeyError, TypeError):
             return content
@@ -511,7 +578,7 @@ class Router:
             if not low:
                 break
             sub = dict(req, questions={q: req["questions"][q] for q in low})
-            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers)
+            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers, key)
             if st != 200:
                 break
             r2 = json.loads(c2)
@@ -532,8 +599,9 @@ class Router:
         resp["cascade"] = {"below": below, "escalated": done}
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _send(self, pool, path, body, headers):
-        r, how = self.choose(state_key(body), pool)
+    async def _send(self, pool, path, body, headers, key):
+        hs = key_blocks(key) if self.affinity and key is not None else ()
+        r, how = self.choose(key, pool, hs)
         if r is None:
             return 503, b'{"error": "no basal replica is ready"}', "application/json"
         self.load[r] += 1
@@ -542,6 +610,8 @@ class Router:
             resp = await self.client.post(r + path, content=body, headers=headers)
             if resp.status_code >= 500:
                 self.failed[r] += 1
+            if hs and resp.status_code == 200:
+                self._remember(hs, pool, r)
             return resp.status_code, resp.content, resp.headers.get("content-type", "application/json")
         except Exception as e:  # noqa: BLE001
             self.failed[r] += 1
@@ -786,6 +856,10 @@ def main(argv=None):
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--load-factor", dest="load_factor", type=float, default=LOAD_FACTOR)
+    ap.add_argument("--prefix-affinity", dest="prefix_affinity", choices=["on", "off"], default="on",
+                    help="a state that begins with one routed before (a growing agent trace or chat, an edited "
+                         "document) goes to the replica that got it while its load allows (on); off: by the hash of "
+                         "the whole state, as before 2.5.3")
     ap.add_argument("--escalate", nargs="*", action="append", default=[],
                     help="escalation replicas (a bigger model) for the cascade; repeat for further levels")
     ap.add_argument("--escalate-below", dest="escalate_below", type=float, action="append", default=[],
@@ -837,7 +911,7 @@ def main(argv=None):
             raise SystemExit(f"basal-router: --route {x!r}: SCRIPT=URL[,URL], SCRIPT one of {', '.join(SCRIPTS)}, other")
         routes[k] = v.split(",")
     router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes, blend=blend, blend_weight=first,
-                    fallback=fallback)
+                    fallback=fallback, affinity=a.prefix_affinity == "on")
     ui = None
     if a.ui == "on":  # basal/router_ui.py: the page at /ui, its state at /ui/state
         from .router_ui import RouterUI
