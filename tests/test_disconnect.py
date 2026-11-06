@@ -13,7 +13,7 @@ from basal import server
 from basal import think as T
 from tests.test_http_status import BODY, AppServer, Engine
 
-GONE = (499, {"error": "client disconnected"})  # the answer of a request whose client left
+GONE = (499, {"error": "client disconnected", "code": "CLIENT_DISCONNECTED"})  # a request whose client left
 
 
 IDLE = {"running": 0, "queued": 0}  # GET /health of a server with nothing in flight

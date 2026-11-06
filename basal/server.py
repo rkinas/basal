@@ -2493,7 +2493,7 @@ def error_body(e, error_format="basal"):
     return body, status
 
 
-CLIENT_GONE = ({"error": "client disconnected"}, 499)  # the answer to a request whose client left (nobody reads it)
+CLIENT_GONE = ({"error": "client disconnected", "code": "CLIENT_DISCONNECTED"}, 499)  # (nobody reads it)
 
 
 async def until_disconnect(request, coro):

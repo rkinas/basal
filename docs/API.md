@@ -85,8 +85,12 @@ one shared state (SOAM); asking them in one request is faster than separate requ
     the server's mode or model);
   - **503**: the GPU ran out of memory (CUDA, MPS or Metal). The server frees the failed request's memory, so a retry,
     later or on another server, may succeed;
-  - **500**: any other server error.
-  Every error body also has a `code`: `INVALID_REQUEST` (422), `OUT_OF_MEMORY` (503) or `INTERNAL_ERROR` (500).
+  - **500**: any other server error;
+  - **499** (2.6): the client disconnected (a timeout, a closed connection) before its answer. The request is
+    cancelled, so its work still waiting for the engine is dropped. Nobody reads this answer (the same body with
+    every error format and on `/v1/decisions`); it shows in `--ui` and in the logs of a proxy in front of the server.
+  Every error body also has a `code`: `INVALID_REQUEST` (422), `OUT_OF_MEMORY` (503), `INTERNAL_ERROR` (500) or
+  `CLIENT_DISCONNECTED` (499).
   A 422 adds `detail`, a one-item body-location validation error; `error` retains the message.
 
   `basal-serve --error-format openai` answers `{"error": {"message": "...", "type": "validation_error" |

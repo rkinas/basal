@@ -213,7 +213,9 @@ benchmarking a GPU.
 - `--rank-max-candidates N` (default 10,000): the most candidates of `rank` questions in one request (HTTP 422 above);
   every 50 of them are one engine request through the queue all clients share. [NAVIGATE.md](NAVIGATE.md)
 - **Status codes and load (2.3.1)**: an invalid request answers HTTP 422, the GPU out of memory 503 (retry later or
-  elsewhere) and any other server error 500, all with `{"error": "..."}`. `GET /health` returns the requests in flight
+  elsewhere) and any other server error 500, all with `{"error": "..."}`. A request whose client disconnects before
+  its answer is cancelled (2.6): its work still waiting for the engine is dropped, and it answers 499, which nobody
+  reads (a batch already on the GPU finishes). `GET /health` returns the requests in flight
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md). `--error-format openai` answers errors as `{"error": {"message",
   "type", "code"}}` (same status codes).
