@@ -217,7 +217,8 @@ benchmarking a GPU.
 - **Status codes and load (2.3.1)**: an invalid request answers HTTP 422, the GPU out of memory 503 (retry later or
   elsewhere) and any other server error 500, all with `{"error": "..."}`. A request whose client disconnects before
   its answer is cancelled (2.6): its work still waiting for the engine is dropped, and it answers 499, which nobody
-  reads (a batch already on the GPU finishes). `GET /health` returns the requests in flight
+  reads (a batch already on the GPU finishes). Behind basal-router too (it cancels its own request to the replica, and
+  with it any escalation, blend and fallback call), and for an MCP tool call at `/mcp`. `GET /health` returns the requests in flight
   as `running` and `queued` (waiting for the engine); both 0 means idle, for a process manager that stops or restarts
   the server. Definitions: [API.md](API.md). `--error-format openai` answers errors as `{"error": {"message",
   "type", "code"}}` (same status codes).

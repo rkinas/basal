@@ -11,7 +11,9 @@ calls basal as a tool:
   `max_error` and `tool` (`state`, `questions` as in the HTTP API, `lang`, `facts`). Returns the HTTP API response.
 
 Both tools are read-only. The server's MCP instructions give the agent the rules of [how to ask](API.md#how-to-ask), and an
-invalid request (for example a question with one option) returns a tool error with the server's message.
+invalid request (for example a question with one option) returns a tool error with the server's message. A call whose
+HTTP client disconnects (an agent host that timed out) is cancelled, as a request to `/v1/systemone` is (2.6): its
+work still waiting for the engine is dropped.
 
 ```bash
 uv pip install "basal[fp8,mcp] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.5.tar.gz"
