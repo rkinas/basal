@@ -138,7 +138,10 @@ uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v
 basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000
 ```
 
-`uname -m` prints `arm64` in a terminal that does not run under Rosetta (`x86_64` under Rosetta).
+`uname -m` prints `arm64` in a terminal that does not run under Rosetta (`x86_64` under Rosetta). An environment made
+earlier under Rosetta keeps its x86_64 packages under `--allow-existing`: if
+`grep -l x86_64 ~/basal-env/lib/python3*/site-packages/*.dist-info/WHEEL` lists any, make it once with `--clear` in
+place of `--allow-existing`.
 
 Ask questions with curl. Several questions about one state go into one request and share the state; each answer has a
 probability for every option, the chosen key and the confidence ([response](docs/API.md#response)):

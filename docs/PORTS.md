@@ -15,7 +15,10 @@ log behave as in `--mode fast`. Not available in the ports: the evidence output 
 ## Use
 
 ```bash
-# Apple Silicon, MLX: the native arm64 Python (uname -m prints arm64; x86_64 means the terminal runs under Rosetta)
+# Apple Silicon, MLX: the native arm64 Python (uname -m prints arm64; x86_64 means the terminal runs under Rosetta).
+# An environment made earlier under Rosetta keeps its x86_64 packages: if
+#   grep -l x86_64 ~/basal-mlx/lib/python3*/site-packages/*.dist-info/WHEEL
+# lists any, make it once with --clear in place of --allow-existing
 uv python install cpython-3.12-macos-aarch64-none
 uv venv --python cpython-3.12-macos-aarch64-none --allow-existing ~/basal-mlx && source ~/basal-mlx/bin/activate
 uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.5.5.tar.gz"

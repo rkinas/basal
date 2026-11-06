@@ -207,7 +207,11 @@ basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000
 - **The native arm64 Python.** `uv venv --python 3.12` can take an x86_64 Python that runs under Rosetta, and there
   torch has no build and the `mlx` extra installs nothing; the full name asks uv for the arm64 build. `uname -m`
   prints `arm64` in a terminal that does not run under Rosetta (`x86_64` under Rosetta). An environment made with an
-  x86_64 Python keeps its packages under `--allow-existing`: make it again with `--clear`.
+  x86_64 Python keeps its packages under `--allow-existing`, though its interpreter becomes arm64: the line after
+  replaces basal's own, but any other stays x86_64 and fails to import. If
+  `grep -l x86_64 ~/basal-mlx/lib/python3*/site-packages/*.dist-info/WHEEL` lists any, make the environment once with
+  `--clear` in place of `--allow-existing` (not in the line itself: it would also empty an environment that is right,
+  with anything else installed into it).
 
 The request and response are the same as above. `-MLX-8bit` holds affine 8-bit decoder weights; the token embeddings
 and the output head stay in bf16, because the decision is read from the output head. The state of a request is
