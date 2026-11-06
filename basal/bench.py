@@ -164,6 +164,22 @@ def load_questions(paths, n, seed=0):
     return [q for _, q in numbered_questions(paths, n, seed)]
 
 
+def check_gold(located):
+    """basal-bench scores against gold, so a gold that is not an option index stops it (a wrong gold reads as option 0
+    and shows an accuracy of 0.9 or 1.0 in silence). located: numbered_questions. Only the bench calls this:
+    loadtest and ordercheck never read gold and take such a file as they always did."""
+    for where, q in located:
+        opts = q.get("options")
+        if "gold" not in q:
+            continue
+        if not isinstance(opts, list):
+            raise SystemExit(f"{where}: options must be a list, not {type(opts).__name__}")
+        g = q["gold"]
+        if not (isinstance(g, int) and not isinstance(g, bool) and 0 <= g < len(opts)):
+            raise SystemExit(f"{where}: gold {g!r} of {str(q.get('question', ''))[:40]!r} is not an option index "
+                             f"0..{len(opts) - 1}")
+
+
 def groups_for(tok, qs, fmt=1):
     out = []
     for q in qs:
@@ -284,7 +300,9 @@ def main():
             raise SystemExit(adapter_refused(adapter.name, f"--modes {m}", why))
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
-    qs = load_questions(a.questions, a.n)
+    located = numbered_questions(a.questions, a.n)
+    check_gold(located)
+    qs = [q for _, q in located]
     if len(qs) < MIN_ITEMS:  # before any engine is loaded
         raise SystemExit(f"basal-bench: {len(qs)} simple items with options in --questions (--n {a.n}); at least "
                          f"{MIN_ITEMS} are needed (5 warm up the latency runs)")
