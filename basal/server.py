@@ -598,6 +598,9 @@ def stored_fallback(cal, q):
         q["fallback_threshold"], q["fallback_threshold_source"] = float(entry["fallback_threshold"]), "calibration"
 
 
+QUESTION_TYPES = ("choice", "noul", "score", "act", "multi", "tool")  # the types a question can have
+
+
 def temperature(cal, q_type, k):
     """Calibrated temperature of a question type with k options. Calibration file 2 (format-2 models) may give
     temperature_per_bucket[type]["lo-hi"] for option-count buckets ("2-10", "11-26", "27-255"); a type or count without
@@ -610,11 +613,24 @@ def temperature(cal, q_type, k):
 
 
 def check_calibration(cal, fmt, path):
-    """Malformed buckets or a file fitted for another prompt format are refused at start-up, not on a request."""
+    """Malformed buckets or a file fitted for another prompt format are refused at start-up, not on a request. A
+    temperature is refused only when temperature() would break on it (float() of it fails, or it is NaN, infinite,
+    0 or below); "1.2" as a string is read as before, and a key that is not a question type is never looked up."""
     for t, bs in (cal.get("temperature_per_bucket") or {}).items():
         for b in bs:
             if not re.fullmatch(r"\d+-\d+", b) or int(b.split("-")[0]) > int(b.split("-")[1]):
                 raise SystemExit(f"{path}: temperature_per_bucket[{t!r}] has a bad bucket {b!r} (\"lo-hi\", e.g. \"2-10\")")
+    temps = [(f"temperature_per_prim[{t!r}]", T) for t, T in (cal.get("temperature_per_prim") or {}).items()
+             if t in QUESTION_TYPES]
+    temps += [(f"temperature_per_bucket[{t!r}][{b!r}]", T) for t, bs in (cal.get("temperature_per_bucket") or {}).items()
+              if t in QUESTION_TYPES for b, T in bs.items()]
+    for where, T in temps:  # temper() divides by T: 0 or NaN gives NaN probabilities (HTTP 500), T < 0 inverts the ranking
+        try:
+            x = float(T)
+        except (TypeError, ValueError):
+            x = float("nan")
+        if not math.isfinite(x) or x <= 0:
+            raise SystemExit(f"{path}: {where} is {T!r}, a temperature is a finite number above 0")
     if cal.get("prompt", fmt) != fmt:
         raise SystemExit(f"{path} was fitted for prompt format {cal['prompt']}, the model uses format {fmt}")
 
