@@ -46,6 +46,7 @@ from pathlib import Path
 import torch
 
 from . import adapter as adapter_module
+from .signals import exit_on_sigterm
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
                      VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
@@ -2630,6 +2631,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
 
 
 def main():
+    exit_on_sigterm()  # SIGTERM (kill, docker stop) runs the exit handlers: the merged adapter copy, the vLLM sidecar
     a = parser().parse_args()
     refuse_lean_flex(a.lean, a.tree)  # before default_mode, which resolves the model on CUDA GPUs without FA3
     a.mode = a.mode or default_mode(a.model, a.revision)
