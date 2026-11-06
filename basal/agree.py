@@ -278,6 +278,13 @@ def gold_items(qs, offset):
     return gold
 
 
+def cache_home():
+    """$XDG_CACHE_HOME, else ~/.cache; the XDG rule: an empty or relative value is ignored (it would put the cache in
+    whatever directory the command runs from)."""
+    x = os.environ.get("XDG_CACHE_HOME", "")
+    return Path(x) if x and os.path.isabs(x) else Path.home() / ".cache"
+
+
 def main(argv=None):
     import sys
     argv = sys.argv[1:] if argv is None else argv
@@ -299,8 +306,8 @@ def main(argv=None):
     ap.add_argument("--per-call", dest="per_call", type=positive, default=8, help="requests per call of a backend")
     ap.add_argument("--independence", choices=["on", "off"], default="on")
     ap.add_argument("--gate", type=float, default=GATE)
-    ap.add_argument("--cache", default=str(Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "basal"
-                                           / "agree"), help="directory of the cached reference rows ('' = none)")
+    ap.add_argument("--cache", default=str(cache_home() / "basal" / "agree"),
+                    help="directory of the cached reference rows ('' = none)")
     ap.add_argument("--gguf", default=None)
     ap.add_argument("--ollama-model", dest="ollama_model", default=None)
     ap.add_argument("--ollama-url", dest="ollama_url", default=OLLAMA_URL)

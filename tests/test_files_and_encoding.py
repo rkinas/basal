@@ -3,10 +3,12 @@ and the encoding of every text file a module opens."""
 import argparse
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
 
+from basal import agree
 from basal import bench
 from basal import loadtest
 
@@ -52,3 +54,35 @@ def test_determinism_creates_the_directory_of_out(monkeypatch, tmp_path):
     a = argparse.Namespace(determinism=2, url="http://test/v1/systemone", concurrency=2, out=str(out))
     asyncio.run(loadtest.determinism(a, bodies))
     assert json.loads(out.read_text(encoding="utf-8"))["determinism"]["requests"] == 2
+
+
+def agree_cache_default(monkeypatch):
+    """The default of agree's --cache as the command builds it."""
+    seen = {}
+
+    def grab(self, args=None, namespace=None):
+        seen["cache"] = self.get_default("cache")
+        raise SystemExit(0)
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", grab)
+    with pytest.raises(SystemExit):
+        agree.main([])
+    return Path(seen["cache"])
+
+
+@pytest.mark.parametrize("value", ["", "tmpcache", "./cache", "cache/here"])
+def test_an_empty_or_relative_xdg_cache_home_is_ignored(monkeypatch, value):
+    monkeypatch.setenv("XDG_CACHE_HOME", value)
+    assert agree.cache_home() == Path.home() / ".cache"
+    assert agree_cache_default(monkeypatch) == Path.home() / ".cache" / "basal" / "agree"
+
+
+def test_an_absolute_xdg_cache_home_is_used(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert agree.cache_home() == tmp_path
+    assert agree_cache_default(monkeypatch) == tmp_path / "basal" / "agree"
+
+
+def test_no_xdg_cache_home_gives_the_home_cache(monkeypatch):
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    assert agree.cache_home() == Path.home() / ".cache"
+    assert agree_cache_default(monkeypatch) == Path.home() / ".cache" / "basal" / "agree"
