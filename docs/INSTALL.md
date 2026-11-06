@@ -381,7 +381,9 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
              "criteria": {"23": "23%", "8": "8%", "5": "5%", "0": "0% lub zwolniony"}}}}'
 ```
 
-- Images: any format Pillow reads; `"detail": "high"` reads small print (1,120 image tokens instead of 280; slower).
+- Images: any format Pillow reads, one frame (an animated GIF, PNG or WebP, or a multi-page TIFF, is refused); the
+  EXIF orientation is applied, a transparent image is put on white, and an image is kept at most 4,096 px a side.
+  `"detail": "high"` reads small print (1,120 image tokens instead of 280; slower).
   Audio: WAV, FLAC, OGG or MP3, at most 30 s a clip (a longer clip is refused after reading 30 s of it). At most 8
   items and 20 MB each per request.
 - Answers carry `"calibration": "text"`: the temperatures and thresholds were fitted on text, so validate them on your

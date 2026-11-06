@@ -5,13 +5,14 @@ A request carries its media with the state:
   "media": [{"type": "image" | "audio", "data": "<base64>"}, ...], "detail": "default" | "high" (optional)
 
 The items go where the state text goes, before it, in the order given: the prompt the basal-omni evaluation reads them
-with. Images: any format Pillow opens, converted to RGB; "detail" sets the image's soft tokens
-(default 280, high 1,120). Audio: WAV, FLAC, OGG or MP3 (libsndfile), mixed to mono and resampled to 16 kHz; at most the
-model's audio window (Gemma 4: 750 tokens x 40 ms = 30 s). One request holds at most MAX_ITEMS items of at most
-MAX_BYTES each; an image may have at most MAX_PIXELS pixels (decompression bombs are refused before decoding); a clip
-is read up to the window (one frame more shows it is longer), and a clip of a model without a known window up to
-MAX_AUDIO_SAMPLES samples, so a long clip that compresses well is refused without decoding it whole.
-Errors are ValueError (HTTP 422).
+with. Images: any single-frame format Pillow opens (an animated or multi-page file is refused; an MPO phone photo is
+read as its photo), turned as its EXIF orientation says, shrunk to at most MAX_SIDE px a side, a transparent one
+composited onto white, then converted to RGB; "detail" sets the image's soft tokens (default 280, high 1,120).
+Audio: WAV, FLAC, OGG or MP3 (libsndfile), mixed to mono and resampled to 16 kHz; at most the model's audio window
+(Gemma 4: 750 tokens x 40 ms = 30 s). One request holds at most MAX_ITEMS items of at most MAX_BYTES each; an image
+may have at most MAX_PIXELS pixels (decompression bombs are refused before decoding); a clip is read up to the window
+(one frame more shows it is longer), and a clip of a model without a known window up to MAX_AUDIO_SAMPLES samples, so
+a long clip that compresses well is refused without decoding it whole. Errors are ValueError (HTTP 422).
 """
 import base64
 import binascii
@@ -60,7 +61,7 @@ def _raw(data, n):
         raise ValueError(f"media {n}: data is not valid base64") from None
 
 
-ANIMATED = {"GIF", "PNG", "WEBP", "TIFF"}  # formats whose n_frames > 1 means an animation or several pages
+ANIMATED = {"GIF", "PNG", "WEBP", "TIFF"}  # formats whose second frame means an animation or several pages
 
 
 def _image(raw, n):
@@ -71,8 +72,9 @@ def _image(raw, n):
         w, h = im.size
         if w * h > MAX_PIXELS:
             raise ValueError(f"media {n}: {w}x{h} pixels, more than {MAX_PIXELS:,}")
-        if im.format in ANIMATED and getattr(im, "n_frames", 1) > 1:  # not MPO: a phone photo (Ultra HDR, depth)
-            raise ValueError(f"media {n}: {im.n_frames} frames (animated or multi-page); send a single frame")
+        if im.format in ANIMATED and getattr(im, "is_animated", False):  # not MPO: a phone photo (Ultra HDR, depth)
+            # (is_animated looks for a second frame; n_frames would walk every frame of a GIF)
+            raise ValueError(f"media {n}: an animated or multi-page {im.format} image; send a single frame")
         alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
         if alpha or im.mode == "P":  # a palette image is resized by nearest neighbour; do it in colour
             to = "RGBA" if alpha else "RGB"
