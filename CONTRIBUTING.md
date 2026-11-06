@@ -186,7 +186,12 @@ Thank you to the people whose work is in this repository, by pull request:
   not seen ([#90](https://github.com/rkinas/basal/pull/90)); in 2.5.4 `basal-loadtest`, `basal-calibrate` and
   `basal-agree` on inputs they failed on ([#102](https://github.com/rkinas/basal/pull/102)), malformed requests
   refused before the run ([#103](https://github.com/rkinas/basal/pull/103)) and request text that cannot forge a
-  turn ([#104](https://github.com/rkinas/basal/pull/104)).
+  turn ([#104](https://github.com/rkinas/basal/pull/104)); in 2.5.5 the API key of the client on a shared HTTP
+  client ([#121](https://github.com/rkinas/basal/pull/121)), the verdicts of `basal-selfcheck`
+  ([#118](https://github.com/rkinas/basal/pull/118)), SIGTERM and `basal-serve`'s exit handlers
+  ([#123](https://github.com/rkinas/basal/pull/123)), and media base64, short engine results and numbers too large
+  for a float ([#120](https://github.com/rkinas/basal/pull/120), [#126](https://github.com/rkinas/basal/pull/126),
+  [#122](https://github.com/rkinas/basal/pull/122)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),
