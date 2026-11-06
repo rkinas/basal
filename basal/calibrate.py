@@ -1360,6 +1360,11 @@ def warnings(report, targets):
         if r["source"].startswith("fitted") and any(math.isclose(r["T"], x) for x in T_GRID):
             out.append(f"{t}: the fitted temperature is at the edge of the search ({r['T']:.2f}): too few errors "
                        "or too few decisions to fit it; label more or raise --min-per-type")
+    for b, r in (report.get("buckets") or {}).items():
+        if r.get("T") is not None and not r.get("T_type") and str(r.get("source", "")).startswith("fitted") \
+                and any(math.isclose(r["T"], x) for x in T_GRID):
+            out.append(f"choice {b} options: the fitted temperature is at the edge of the search ({r['T']:.2f}): too "
+                       "few errors or too few decisions to fit it")
     for risk in targets:
         r = report["targets"][risk]
         for t, x in (r["fitted"].get("per_type") or {}).items():
