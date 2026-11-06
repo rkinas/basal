@@ -194,18 +194,35 @@ def cache_key(model, revision, version, reference, sets, weights=None):
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:24]
 
 
+def file_id(path):
+    """A weights file as the cache key sees it: its resolved path, size and modification time, so ./m.gguf and its
+    absolute path are one entry and another file written at the same path is another. A path that is no file stays as
+    typed (the run then fails on it)."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return path
+    st = p.stat()
+    return [str(p.resolve()), st.st_size, st.st_mtime_ns]
+
+
 def reference_weights(a):
-    """The options that choose the weights of the reference engine (gguf, ollama, llamacpp), if not at the default."""
+    """The options that choose the weights of the reference engine (gguf, ollama, llamacpp), if not at the default;
+    a GGUF file by file_id."""
     mode = a.reference.partition("=")[0]
     if mode == "gguf":
         fields = dict(gguf=(a.gguf, None))
+    elif mode.startswith("gguf@"):  # gguf@<file.gguf>: the file is in the reference itself
+        fields = dict(gguf=(mode.split("@", 1)[1], None))
     elif mode == "ollama":
         fields = dict(ollama_model=(a.ollama_model, None), ollama_url=(a.ollama_url, OLLAMA_URL))
     elif mode == "llamacpp":
         fields = dict(llamacpp_url=(a.llamacpp_url, LLAMACPP_URL))
     else:
         fields = {}
-    return {k: v for k, (v, default) in fields.items() if v != default}
+    out = {k: v for k, (v, default) in fields.items() if v != default}
+    if "gguf" in out:
+        out["gguf"] = file_id(out["gguf"])
+    return out
 
 
 def cached_reference(path, make, sets):
