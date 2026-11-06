@@ -1091,7 +1091,9 @@ class DiskTier:
 
     engine: "graph" or "mlx", in each file's name and metadata (the two engines' states of one key differ in their last
     bits, so they never share a file); a tier reads only its own engine's files. pack(kv) -> [(name, dtype, shape,
-    bytes)] runs on the caller's thread (device reads); unpack(path) -> (kv, metadata)."""
+    bytes)] runs on the caller's thread (device reads); unpack(path) -> (kv, metadata). A state's tag (save(tag=),
+    JSON) is kept in its file and indexed with it (tag()): what the engine needs to know about how the state was
+    computed (MLX: the uncached row count, MLXBackend._state)."""
 
     VERSION = "1"
     QUEUE = 16
@@ -1108,6 +1110,7 @@ class DiskTier:
         self.budget, self.used = int(budget_bytes), 0
         self.pack, self.unpack = pack, unpack
         self.entries, self.index, self.lock = OrderedDict(), {}, threading.Lock()  # key -> (path, size, tokens, blocks)
+        self.tags = {}  # key -> its file's tag (only tagged entries)
         self.loads = self.prefix_loads = self.writes = self.write_drops = self.errors = self.evictions = 0
         self.closed = False
         self.pending, self.cancelled = set(), set()  # keys queued for writing; of those, deleted before written
@@ -1166,24 +1169,29 @@ class DiskTier:
                     if len(tokens) != int(md["tokens_n"]):
                         raise ValueError(f"{p}: {len(tokens)} token ids, {md['tokens_n']} in its metadata")
                     blocks = [bytes.fromhex(h) for h in json.loads(md["blocks"])]
-                    found.append((st.st_mtime, key, p, st.st_size, tokens, blocks))
+                    tag = json.loads(md["tag"]) if "tag" in md else None
+                    found.append((st.st_mtime, key, p, st.st_size, tokens, blocks, tag))
                 except FileNotFoundError:
                     continue  # removed by another process meanwhile
                 except (OSError, ValueError, KeyError, TypeError):
                     with self.lock:
                         self.errors += 1
         with self.lock:
-            for _, key, p, size, tokens, blocks in sorted(found, key=lambda f: f[0]):
+            for _, key, p, size, tokens, blocks, tag in sorted(found, key=lambda f: f[0]):
                 if key not in self.entries:
-                    self._add(key, p, size, tokens, blocks)
+                    self._add(key, p, size, tokens, blocks, tag)
             self._evict()
 
-    def _add(self, key, path, size, tokens, blocks):
+    def _add(self, key, path, size, tokens, blocks, tag=None):
         """Indexes a file (lock held)."""
         if key in self.entries:
             self.used -= self.entries.pop(key)[1]
         self.entries[key] = (path, size, tokens, blocks)
         self.used += size
+        if tag is None:
+            self.tags.pop(key, None)
+        else:
+            self.tags[key] = tag
         for h in blocks:
             self.index.setdefault(h, {})[key] = None
 
@@ -1199,6 +1207,7 @@ class DiskTier:
         if e is None:
             return
         path, size, _, blocks = e
+        self.tags.pop(key, None)
         self.used -= size
         for h in blocks:
             keys = self.index.get(h)
@@ -1211,17 +1220,18 @@ class DiskTier:
         except FileNotFoundError:
             pass
 
-    def _meta(self, layers, tokens, blocks):
+    def _meta(self, layers, tokens, blocks, tag=None):
         """A file's metadata (safetensors: strings only)."""
         import time
         from . import __version__
         return {"basal_state_cache": self.VERSION, "signature": self.signature, "engine": self.engine,
                 "basal_version": __version__, "tokens": json.dumps([int(t) for t in tokens]),
                 "tokens_n": str(len(tokens)), "blocks": json.dumps([b.hex() for b in blocks]), "layers": str(layers),
-                "created": str(int(time.time()))}
+                "created": str(int(time.time())), **({} if tag is None else {"tag": json.dumps(tag)})}
 
-    def save(self, key, kv, tokens, blocks, replaces=None):
-        """Queues a state for writing; False when the write is dropped (queue full, or the tier closed)."""
+    def save(self, key, kv, tokens, blocks, replaces=None, tag=None):
+        """Queues a state for writing; False when the write is dropped (queue full, or the tier closed). tag: kept in
+        the file and indexed with it (tag())."""
         import queue
         with self.lock:
             if self.closed:
@@ -1238,7 +1248,7 @@ class DiskTier:
                     self._delete(replaces)
                 return True
         tokens = np.asarray(tokens, dtype=np.int64)
-        item = (key, self.pack(kv), self._meta(len(kv), tokens, blocks), list(blocks), tokens, replaces)
+        item = (key, self.pack(kv), self._meta(len(kv), tokens, blocks, tag), list(blocks), tokens, replaces, tag)
         with self.lock:
             if self.closed:  # (closed meanwhile: nothing is written after the writer's sentinel)
                 self.write_drops += 1
@@ -1276,7 +1286,7 @@ class DiskTier:
             try:
                 if item is None:
                     return
-                key, items, meta, blocks, tokens, replaces = item
+                key, items, meta, blocks, tokens, replaces, tag = item
                 path = self._path(key)
                 tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
                 try:
@@ -1303,7 +1313,7 @@ class DiskTier:
                         continue
                     if replaces is not None and replaces != key:
                         self._unlink(replaces)
-                    self._add(key, path, size, tokens, blocks)
+                    self._add(key, path, size, tokens, blocks, tag)
                     self.writes += 1
                     self._evict()
             finally:
@@ -1358,6 +1368,11 @@ class DiskTier:
     def has(self, key):
         with self.lock:
             return key in self.entries
+
+    def tag(self, key):
+        """The tag of a state's file (None: not on disk, or untagged)."""
+        with self.lock:
+            return self.tags.get(key)
 
     def delete(self, key):
         """Removes an entry's file; one still queued is removed once written."""
@@ -1599,17 +1614,22 @@ class StateCache:
         """Whether a state is cached, in memory or on disk (no recency update, not counted as a hit or a miss)."""
         return self._in_memory(key) or (self.disk is not None and self.disk.has(key))
 
+    def tag(self, key):
+        """The tag a state was stored with on disk (put(tag=)), or None."""
+        return None if self.disk is None else self.disk.tag(key)
+
     @staticmethod
     def _full(kv, n):
         """Whether every layer holds all n tokens (the token axis is -2 in the torch and the MLX layout)."""
         return all(k.shape[-2] == n and v.shape[-2] == n for k, v in kv)
 
-    def put(self, key, kv, tokens=None, replaces=None, persist=True):
+    def put(self, key, kv, tokens=None, replaces=None, persist=True, tag=None):
         """Stores a state's keys / values; with its token ids (tokens) it is also found by states that begin with it.
         replaces: the key of an entry this one extends to its end (an agent loop keeps one entry, not one per step).
-        persist: also write it to the disk tier (an entry read from there is not written back)."""
+        persist: also write it to the disk tier (an entry read from there is not written back), with tag (JSON) in its
+        file."""
         if persist and self.disk is not None and tokens is not None and self._full(kv, len(tokens)):
-            if not self.disk.save(key, kv, tokens, self._blocks(tokens), replaces) and replaces is not None:
+            if not self.disk.save(key, kv, tokens, self._blocks(tokens), replaces, tag) and replaces is not None:
                 self.disk.delete(replaces)  # (no superseded entry left on disk beside a dropped write)
         if self.bits != 16:
             kv = [(kv_quant(k, self.bits, True), kv_quant(v, self.bits, False)) for k, v in kv]
@@ -4439,13 +4459,14 @@ class MLXBackend:
         (and still replaces the entry it extends). The same holds for an entry of exactly this root: one computed at
         other row counts (another request about the same state: a single question, then other questions) is not
         returned; the root's first entry keeps the plain key (StateCache.has, the server's cut), an entry at other
-        bits is keyed by the root and its kernels."""
+        bits is keyed by the root and its kernels. The row count is also kept in the state's file
+        (StateCache.put(tag=)), so a later server process tells the same of a state it reads from disk."""
         mx, cache = self.mx, self.state_cache
         refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
         bits = self._kernels(ref)
 
         def same_bits(old):
-            return self._kernels(refs.get(old)) == bits
+            return self._kernels(refs[old] if old in refs else cache.tag(old)) == bits
         key = cache.key(root)
         if bits and cache.has(key) and not same_bits(key):
             key = cache.key(list(root) + [-1, *bits])
@@ -4462,7 +4483,7 @@ class MLXBackend:
                     initial = [(k[..., :m, :], v[..., :m, :]) for k, v in pkv]
         kv = [(mx.contiguous(k), mx.contiguous(v)) for k, v in self._prefix(root, initial, ref)]
         mx.eval(kv)
-        cache.put(key, kv, tokens=root, replaces=replaces)
+        cache.put(key, kv, tokens=root, replaces=replaces, tag=ref)
         refs[key] = ref
         if len(refs) > 2 * len(cache.entries) + 64:  # entries evicted or replaced since
             self._refs = {k: r for k, r in refs.items() if k in cache.entries}

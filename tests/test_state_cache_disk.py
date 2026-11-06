@@ -491,7 +491,29 @@ def test_mlx_restart_is_bit_identical(tmp_path, forward):
     be2.state_cache.close()
 
 
-def test_mlx_prefix_from_disk_recomputes_the_root(tmp_path):
+def test_mlx_restart_hits_where_the_row_count_decides_the_bits(tmp_path, monkeypatch):
+    """Where a state's bits depend on the uncached forward's row count (MLXBackend._kernels; a real model's quantised
+    products and attention), an entry is reused only for a request of the same row count. A restarted server knows the
+    row count of a state it reads from disk (the file's tag), so the same request is a disk hit, not a state computed
+    afresh under a second key."""
+    pytest.importorskip("mlx.core")
+    from basal.engine import MLXBackend
+    from tests.test_mlx import LIDS, STATE, TOKS, tiny_llama
+    monkeypatch.setattr(MLXBackend, "_kernels", lambda self, ref: None if ref is None else (ref,))
+    tiny_llama(tmp_path)
+    be = mlx_cached(tmp_path, tmp_path / "sc")
+    cold = be.run_shared([(TOKS, LIDS, len(STATE))])[0]
+    be.state_cache.close()
+    be2 = mlx_cached(tmp_path, tmp_path / "sc")
+    warm = be2.run_shared([(TOKS, LIDS, len(STATE))])[0]
+    st = be2.state_cache.stats()
+    assert warm == cold and (st["hits"], st["misses"], st["disk_loads"], st["disk_entries"]) == (1, 0, 1, 1)
+    be2.state_cache.close()
+
+
+def test_mlx_prefix_from_disk_continues_the_root(tmp_path):
+    """A state that begins with one on disk continues it after a restart (the file keeps the row count its rows were
+    computed for), computing only its new tokens, with the answers of a server computing it whole."""
     pytest.importorskip("mlx.core")
     import random
     from tests.test_mlx import tiny_llama
@@ -508,7 +530,7 @@ def test_mlx_prefix_from_disk_recomputes_the_root(tmp_path):
     seen = count_tokens(be2)
     got = be2.run_shared([([s2 + x for x in q], lids, len(s2))])[0]
     assert be2.state_cache.stats()["disk_prefix_loads"] == 1
-    assert seen[0] == len(s2)  # the promoted entry has no row count (_refs): the root is computed, not continued
+    assert seen[0] == len(s2) - len(s1)  # continued from the file: its row count (tag) gives the same bits
     assert got == cached_stub(tmp_path).run_shared([([s2 + x for x in q], lids, len(s2))])[0]
     be2.state_cache.close()
 
