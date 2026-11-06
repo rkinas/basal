@@ -63,3 +63,26 @@ def test_the_key_of_the_default_reference_is_the_one_of_basal_2_5_3():
     assert agree.cache_key("m", "r", "2.5.3", "eager-fp32", sets, {}) == "107e5bb61e5dbf49c839d9a9"
     assert agree.cache_key("m", "r", "2.5.3", "gguf", sets, {"gguf": "A.gguf"}) != \
         agree.cache_key("m", "r", "2.5.3", "gguf", sets, {"gguf": "B.gguf"})
+
+
+def test_one_gguf_file_is_one_cache_entry_however_its_path_is_typed(monkeypatch, capsys, tmp_path):
+    """The key holds the GGUF file's resolved path, size and modification time: ./m.gguf and its absolute path are
+    one entry, and another file written at the same path is another."""
+    import os
+    monkeypatch.chdir(tmp_path)
+    cache, f = tmp_path / "cache", tmp_path / "m.gguf"
+    f.write_bytes(b"weights v1")
+    assert run(monkeypatch, capsys, cache, "--gguf", "m.gguf") is False
+    assert run(monkeypatch, capsys, cache, "--gguf", str(f)) is True  # the same file, typed another way
+    assert run(monkeypatch, capsys, cache, "--gguf", "./m.gguf") is True
+    f.write_bytes(b"weights v2, re-exported")
+    os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 10**9))
+    assert run(monkeypatch, capsys, cache, "--gguf", "m.gguf") is False  # other weights at the same path
+
+
+def test_a_gguf_at_reference_keys_its_file_too(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "m.gguf").write_bytes(b"weights")
+    assert run(monkeypatch, capsys, tmp_path / "c", reference="gguf@m.gguf") is False
+    (tmp_path / "m.gguf").write_bytes(b"other weights")
+    assert run(monkeypatch, capsys, tmp_path / "c", reference="gguf@m.gguf") is False
