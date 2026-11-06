@@ -1,5 +1,6 @@
 """How an image of a request is decoded (basal/media.py _image): transparency, the EXIF orientation, animated and
 multi-page files, and the largest side kept."""
+import base64
 import io
 
 import pytest
@@ -95,3 +96,39 @@ def test_a_phone_photo_stored_as_mpo_is_accepted_as_its_first_frame():
     assert Image.open(io.BytesIO(buf.getvalue())).n_frames == 2  # the file really has two frames
     im = media._image(buf.getvalue(), 0)
     assert im.size == (16, 16) and im.getpixel((0, 0))[0] > 150
+
+
+def b64_png(w, h):
+    b = io.BytesIO()
+    Image.new("RGB", (w, h), (30, 60, 90)).save(b, "PNG")
+    return base64.b64encode(b.getvalue()).decode()
+
+
+@pytest.mark.parametrize("w, h", [(6000, 300), (300, 6000)])
+def test_a_decoded_image_is_at_most_4096_a_side(w, h):
+    (im,), _, _ = media.decode([{"type": "image", "data": b64_png(w, h)}], ("image",))
+    assert max(im.size) == 4096 and abs(im.size[0] / im.size[1] / (w / h) - 1) < 0.05
+
+
+def test_a_transparent_image_is_shrunk_before_it_is_composited(monkeypatch):
+    """The peak is the large copies: alpha_composite must see the 4096 px image, not the 6000 px one."""
+    sizes = []
+    real = Image.alpha_composite
+    monkeypatch.setattr(Image, "alpha_composite", lambda a, b: sizes.append(a.size) or real(a, b))
+    buf = io.BytesIO()
+    Image.new("RGBA", (6000, 300), (255, 0, 0, 128)).save(buf, "PNG")
+    im = media._image(buf.getvalue(), 0)
+    assert sizes and max(max(s) for s in sizes) <= 4096 and im.size[0] == 4096 and im.mode == "RGB"
+
+
+def test_a_palette_image_with_transparency_still_lands_on_white():
+    p = Image.new("P", (8, 8), 0)
+    p.putpalette([0, 0, 0] + [0] * 765)
+    buf = io.BytesIO()
+    p.save(buf, "PNG", transparency=0)
+    assert media._image(buf.getvalue(), 0).getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_a_small_image_keeps_its_size():
+    (im,), _, _ = media.decode([{"type": "image", "data": b64_png(640, 480)}], ("image",))
+    assert im.size == (640, 480)

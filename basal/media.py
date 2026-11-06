@@ -21,6 +21,7 @@ from math import gcd
 MAX_ITEMS = 8
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 50_000_000
+MAX_SIDE = 4096  # a decoded image is kept at most this long a side (the model's soft tokens need far less)
 MAX_AUDIO_SAMPLES = 1 << 26  # decoded samples of one clip, every channel (256 MB of float32; 30 s at 192 kHz x 8 is 46 M)
 SAMPLE_RATE = 16000
 DETAIL = {"default": 280, "high": 1120}
@@ -72,11 +73,14 @@ def _image(raw, n):
             raise ValueError(f"media {n}: {w}x{h} pixels, more than {MAX_PIXELS:,}")
         if im.format in ANIMATED and getattr(im, "n_frames", 1) > 1:  # not MPO: a phone photo (Ultra HDR, depth)
             raise ValueError(f"media {n}: {im.n_frames} frames (animated or multi-page); send a single frame")
-        im.load()
+        alpha = im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info
+        if alpha or im.mode == "P":  # a palette image is resized by nearest neighbour; do it in colour
+            to = "RGBA" if alpha else "RGB"
+            im = im if im.mode == to else im.convert(to)  # (convert copies, even to the same mode)
+        im.thumbnail((MAX_SIDE, MAX_SIDE))  # first, while the image is large: 8 x 50 MP held 1.1 GB RGB per request
         im = ImageOps.exif_transpose(im)  # a phone photo is stored sideways with an Orientation tag
-        if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:  # onto white, not onto black
-            rgba = im.convert("RGBA")
-            im = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
+        if alpha:  # onto white, not onto black
+            im = Image.alpha_composite(Image.new("RGBA", im.size, (255, 255, 255, 255)), im.convert("RGBA"))
         return im.convert("RGB")
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError) as e:
         raise ValueError(f"media {n}: not a readable image ({type(e).__name__})") from None
