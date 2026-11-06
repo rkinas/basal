@@ -1,6 +1,7 @@
 """facts="auto" reads a long state in linear time, its amount patterns match what they matched before, and the server
 bounds the state it reads."""
 import asyncio
+import re
 import time
 
 import pytest
@@ -12,6 +13,9 @@ from test_server import FakeServer
 # Texts that made facts() quadratic: one unit repeated to N characters (each unit, the i-th of the run).
 UNITS = {
     "digit groups without a unit": lambda i: "111 ",
+    "digit groups with an NBSP": lambda i: "111\u00a0",  # (a run of any other space separator, Zs)
+    "digit groups with a thin space": lambda i: "111\u2009",
+    "digit groups with a narrow NBSP": lambda i: "111\u202f",
     "zł amounts": lambda i: f"{i} zł ",
     "netto amounts and a VAT rate": lambda i: f"{i} zł netto " if i else "Stawka VAT 23%. ",
     "percentages without VAT": lambda i: "23% ",
@@ -55,7 +59,7 @@ def test_facts_reads_a_long_text_in_linear_time(name):
     assert ratio < 64, f"{name}: 16 x the text took {ratio:.0f} x as long"
 
 
-@pytest.mark.parametrize("text,expected", [
+RUNS = [
     ("Kwoty: 1111 111 111 zł, 111 11 111 zł, 1 111 111 zł i 111 111 111 111.",
      {"AMOUNT": ["111 111", "11 111", "1 111 111"], "STATED": ["111 111", "11 111", "1 111 111"]}),
     ("Raty 100 200 300 400 500 zł oraz 600 700 PLN, a 12.345.678,90 zł i 5 000 000,50 zł.",
@@ -65,10 +69,17 @@ def test_facts_reads_a_long_text_in_linear_time(name):
      {"EURO": ["1 111 111", "111", "2 000 000"], "EURO_X_RATE": ["2 000 000"]}),
     ("Cennik: 1 000 000,00 zł za sztukę od 1 000 1 do 99 szt.; 111 222 333 zł od 100 szt.",
      {"STATED": ["1 000 000,00", "111 222 333"], "TIER": ["111 222 333"]}),
-])
-def test_amounts_in_digit_group_runs_keep_their_matches(text, expected):
+]
+
+
+@pytest.mark.parametrize("sep", [" ", "\u00a0", "\u2009", "\u202f"], ids=["space", "nbsp", "thin", "narrow-nbsp"])
+@pytest.mark.parametrize("text,expected", RUNS)
+def test_amounts_in_digit_group_runs_keep_their_matches(text, expected, sep):
+    """The same matches with any space separator between the digit groups (the runs' guard reads every one)."""
+    def g(t):
+        return re.sub(r"(?<=\d) (?=\d)", sep, t)
     for name, want in expected.items():
-        assert [m.group(1) for m in getattr(f, name).finditer(text)] == want, name
+        assert [m.group(1) for m in getattr(f, name).finditer(g(text))] == [g(w) for w in want], name
 
 
 def test_facts_auto_bounds_the_state():

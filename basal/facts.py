@@ -53,9 +53,8 @@ ZS = r"[ \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]"
 # The run's earlier group reads the same groups to the same end, so the amount was found there or does not exist;
 # without this, every group of a long run with no "zł" after it rescanned the run to its end (quadratic: 40 kB of
 # "111 " took 14 s).
-IN_RUN = r"(?!(?<=[ \u00a0]\d{3}[ \u00a0])\d{3})"
-IN_RUN_SP = r"(?!(?<=[  ]\d{3}[  ])\d{3})"  # the same for AMOUNT, whose groups are separated by a space only
-AMOUNT = re.compile(r"(?<![\d,.])\b(" + IN_RUN_SP + r"\d{1,3}(?:" + ZS + r"\d{3})+(?:,\d{2})?"
+IN_RUN = r"(?!(?<=" + ZS + r"\d{3}" + ZS + r")\d{3})"  # (every pattern's groups: ZS)
+AMOUNT = re.compile(r"(?<![\d,.])\b(" + IN_RUN + r"\d{1,3}(?:" + ZS + r"\d{3})+(?:,\d{2})?"
                     r"|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)" + ZS + r"zł\b")
 VAT = re.compile(r"(?<![\d,.])\b(23|8|5) ?%")
 VAT_CTX = re.compile(r"\bVAT\b|\bpodat\w* od towarów")
