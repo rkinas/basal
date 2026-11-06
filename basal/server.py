@@ -264,7 +264,9 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None, langs=None
     """Questions of a request -> readout items (options as a list) + keys to assemble the answer. Every item has
     `branches` = [(question text, options)]: one for the decision types, one per label for `multi`. max_opts: the
     model's prompt format limit (10 for format 1, 255 for format 2). force_lang: the request's "lang" ("pl" / "en")
-    for every question's template, yes/no words and branch text, instead of the language detected from its text."""
+    for every question's template, yes/no words and branch text, instead of the language detected from its text.
+    langs: {question name: language} of an earlier pass (the questions rebuilt over a truncated state keep the
+    language of the whole state)."""
     state = _text(state)
     out = []
     state_pl = not force_lang and lang_of(state) == "pl"  # once per request, not once per question
