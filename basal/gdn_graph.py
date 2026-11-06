@@ -664,6 +664,7 @@ class GDNGraphBackend(GraphBackend):
     (GraphBackend.__new__). Single prompts run in the plain graphs as before; a branched unit runs its root in a plain
     graph that also keeps each row's recurrent state, then one row per leaf of its trie (see the module docstring)."""
 
+    SHARE_SPLIT_ROOTS = False  # its pass 1 also carries each row's recurrent state: parts keep their own roots
     TREE_ROWS = [1, 2, 4, 8]  # roots per pass-1 forward (rows of the state buffers)
     ROOT_LENS = [512, 1024, 2048, 4096, 8192]  # pass-2 root buckets: the layout pass 1 writes the roots' keys in
     LEAF_ROWS = [1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 64]  # pass-2 graph rows (leaves: questions x option orders)
