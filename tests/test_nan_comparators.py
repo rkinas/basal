@@ -33,13 +33,15 @@ def test_clean_readouts_agree():
     assert c["agreement"] == 1.0 and c["max_dp"] == 0.0
 
 
-def nan_under_load(monkeypatch, tmp_path, body):
+def nan_under_load(monkeypatch, tmp_path, body, alone=None):
     calls = {"n": 0}
 
     def handler(request):
         calls["n"] += 1
         if calls["n"] > 2 and (calls["n"] - 2) % 2 == 1:  # the requests of the loaded pass: probe, other, probe, other
             return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+        if alone is not None:
+            return httpx.Response(200, content=alone, headers={"content-type": "application/json"})
         return httpx.Response(200, json={"answers": {"q": {"probabilities": {"x": 0.5, "y": 0.5}}}})
     real = httpx.AsyncClient
     monkeypatch.setattr(loadtest.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
@@ -53,4 +55,25 @@ def nan_under_load(monkeypatch, tmp_path, body):
                                   b'{"answers": {"q": {"probabilities": {"x": 0.5, "y": NaN}}}}'])
 def test_a_nan_under_load_is_a_change_of_1_wherever_it_stands(monkeypatch, tmp_path, body):
     d = nan_under_load(monkeypatch, tmp_path, body)
+    assert d["max_abs_diff"] == 1.0 and d["identical"] == 0
+
+
+def test_a_nan_in_the_reference_is_not_an_agreement_either():
+    agrees, outside_ties, max_dp, sum_dp, n = selfcheck.compare({"a": float("nan"), "b": 0.5}, {"a": 0.5, "b": 0.5})
+    assert agrees is False and outside_ties is False and max_dp == 1.0 and sum_dp == 2.0 and n == 2
+
+
+def test_an_infinite_reference_is_not_an_agreement():
+    assert selfcheck.compare({"a": float("inf"), "b": 0.5}, {"a": 0.5, "b": 0.5})[0] is False
+
+
+def test_a_nan_in_the_reference_readout_disagrees():
+    ref = [[float("nan"), 0.4]] + [[0.6, 0.4]] * 3
+    c = agree.compare(ref, [[0.6, 0.4]] * 4)
+    assert c["agreement"] == 0.75 and c["max_dp"] == 1.0
+
+
+def test_inf_against_inf_under_load_is_a_change_of_1_not_a_nan(monkeypatch, tmp_path):
+    body = b'{"answers": {"q": {"probabilities": {"x": Infinity, "y": 0.5}}}}'
+    d = nan_under_load(monkeypatch, tmp_path, body, alone=body)
     assert d["max_abs_diff"] == 1.0 and d["identical"] == 0
