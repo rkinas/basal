@@ -787,7 +787,7 @@ every shape: 268 s (basal-2.0) and 180 s (mini) on a v5e, cached for later start
 Not on TPU: evidence spans, `--media`, early exit and quantisation. The 44 examples are a small sample; agreement and
 speed on your own items: `basal-bench --modes eager-fp32 tpu --questions <file.jsonl>`.
 
-## Dell Pro Precision with GB10: batch flags with basal-2.0
+## Dell Pro Max with GB10: batch flags with basal-2.0
 
 Whole-batch throughput of the bf16 engine (not `fp8`): `basal-calibrate --mode fast-nocompile` at the default
 concurrency (32) on 800 English decisions (every 5th line of a 4,000-decision public panel), basal-2.0 (4.5B) with
@@ -826,7 +826,7 @@ On the GB10 the fastest variant, `--concurrency 128`, saves about 5% of the time
 - **DGX Spark (GB10, aarch64, CUDA 13).** In the README install steps use the CUDA 13 build of PyTorch
   (`uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130`) instead of cu128. The GPU shares LPDDR5X memory (about 273 GB/s) with the CPU; every forward pass reads
   all weights, which is why FP8 (half the bytes) halves latency. With PyTorch 2.13 (cu130), `--batches compact`
-  and the format-1 cascade also run; batch flags measured: [Dell Pro Precision with GB10: batch flags](#dell-pro-precision-with-gb10-batch-flags-with-basal-20).
+  and the format-1 cascade also run; batch flags measured: [Dell Pro Max with GB10: batch flags](#dell-pro-max-with-gb10-batch-flags-with-basal-20).
 - **B300 / B200 (sm_100/sm_103).** PyTorch cu130 wheels work. The `vllm` mode needs a CUDA toolkit (nvcc) of version
   12.9 or newer on the machine: vLLM's FlashInfer kernels are compiled on first use, and nvcc 12.8 (found in some
   container images) cannot target the B300 (`Unsupported gpu architecture 'compute_103a'`). Compilation of `nvfp4` takes long (about 50 minutes on
