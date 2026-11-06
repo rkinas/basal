@@ -46,44 +46,46 @@ DUR_WORD = re.compile(r"\b(tydzień|tygodnia|miesiąc|miesiąca|rok|roku)\b")
 YEAR_BEFORE = re.compile(r"\d{4}(?:-\d{2}-\d{2})?\s+$")  # "2025 roku", "2025-03-03 roku": part of a date
 AGO = re.compile(r"\b(\d{1,3}) (dni|dzień) temu\b")
 TODAY = re.compile(r"\b(?:[Dd]ziś|[Dd]zisiaj)(?: jest| mamy|:)? ")
+# every space separator (Unicode Zs: NBSP, the en / em / figure / thin / hair spaces, the narrow NBSP, ...): a
+# thousands separator, or the gap between an amount and its currency
+ZS = r"[ \u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]"
 # Not the start of an amount: a digit group whose group before it is itself a group of the same run ("… 111 111").
 # The run's earlier group reads the same groups to the same end, so the amount was found there or does not exist;
 # without this, every group of a long run with no "zł" after it rescanned the run to its end (quadratic: 40 kB of
 # "111 " took 14 s).
 IN_RUN = r"(?!(?<=[ \u00a0]\d{3}[ \u00a0])\d{3})"
 IN_RUN_SP = r"(?!(?<=[  ]\d{3}[  ])\d{3})"  # the same for AMOUNT, whose groups are separated by a space only
-AMOUNT = re.compile(r"(?<![\d,.])\b(" + IN_RUN_SP + r"\d{1,3}(?:[  ]\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?"
-                    r"|\d+(?:,\d{2})?) zł\b")
+AMOUNT = re.compile(r"(?<![\d,.])\b(" + IN_RUN_SP + r"\d{1,3}(?:" + ZS + r"\d{3})+(?:,\d{2})?"
+                    r"|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)" + ZS + r"zł\b")
 VAT = re.compile(r"(?<![\d,.])\b(23|8|5) ?%")
 VAT_CTX = re.compile(r"\bVAT\b|\bpodat\w* od towarów")
 
 # money arithmetic
 MAX_TOTAL, MAX_COMPARE, MAX_PLAIN, MAX_EURO = 12, 6, 3, 3
-AMT = IN_RUN + r"\d{1,3}(?:[ \u00a0]\d{3})*(?:,\d{2})?"
-STATED = re.compile(r"(?<![\d,.])\b(" + IN_RUN + r"\d{1,3}(?:[ \u00a0]\d{3})+(?:,\d{2})?|\d{1,3}(?:\.\d{3})+(?:,\d{2})?"
-                    r"|\d+(?:,\d{2})?)"
-                    r"[ \u00a0]?(?:zł|PLN)\b")
-EURO_AMT = r"(?<![\d,])\b(" + IN_RUN + r"\d{1,3}(?:[ \u00a0]\d{3})*(?:,\d{1,2})?)[ \u00a0]?(?:euro\b|EUR\b|€)"
+AMT = IN_RUN + r"\d{1,3}(?:" + ZS + r"\d{3})*(?:,\d{2})?"
+STATED = re.compile(r"(?<![\d,.])\b(" + IN_RUN + r"\d{1,3}(?:" + ZS + r"\d{3})+(?:,\d{2})?"
+                    r"|\d{1,3}(?:\.\d{3})+(?:,\d{2})?|\d+(?:,\d{2})?)" + ZS + r"?(?:zł|PLN)\b")
+EURO_AMT = r"(?<![\d,])\b(" + IN_RUN + r"\d{1,3}(?:" + ZS + r"\d{3})*(?:,\d{1,2})?)" + ZS + r"?(?:euro\b|EUR\b|€)"
 EURO = re.compile(EURO_AMT)
-RATE = r"(\d{1,2},\d{2,4})[ \u00a0]?(?:zł|PLN)\b"
+RATE = r"(\d{1,2},\d{2,4})" + ZS + r"?(?:zł|PLN)\b"
 RATE_ANY = re.compile(r"(?<![\d,])\b" + RATE)
-RATE_PER = re.compile(r"(?<![\d,])\b" + RATE + r"[ \u00a0]?(?:za|/)[ \u00a0]?(?:1[ \u00a0])?(?:euro\b|EUR\b|€)")
-RATE_EQ = re.compile(r"\b1[ \u00a0]?(?:euro\b|EUR\b|€)[ \u00a0]?=[ \u00a0]?" + RATE)
-EURO_X_RATE = re.compile(EURO_AMT + r"[ \u00a0]?[×*][ \u00a0]?" + RATE)
+RATE_PER = re.compile(r"(?<![\d,])\b" + RATE + ZS + r"?(?:za|/)" + ZS + r"?(?:1" + ZS + r")?(?:euro\b|EUR\b|€)")
+RATE_EQ = re.compile(r"\b1" + ZS + r"?(?:euro\b|EUR\b|€)" + ZS + r"?=" + ZS + r"?" + RATE)
+EURO_X_RATE = re.compile(EURO_AMT + ZS + r"?[×*]" + ZS + r"?" + RATE)
 KURS = re.compile(r"\b[Kk]urs\w*")
 BOUND = re.compile(r"[.;!?](?=\s+[A-ZĄĆĘŁŃÓŚŹŻ„\"(])|\n")
-LABEL = re.compile(r"[ \u00a0]?\(?(netto|brutto)\b")
+LABEL = re.compile(ZS + r"?\(?(netto|brutto)\b")
 BUDGET = re.compile(r"\b[Bb]udżet\w*")
 USED = re.compile(r"\b(wykorzystano|wydano|wydatkowano|zużyto|zaangażowano|rozdysponowano)\b")
 UNIT = r"(?:szt\.|sztuk[ia]?|usł\.|godz\.|kg|op\.|opak\.|kpl\.|os\.)"
-PRODUCT = re.compile(r"(?<![\d,])(?<!\d[ \u00a0])\b(\d{1,4})[ \u00a0]?(?:" + UNIT + r"[ \u00a0]?)?×[ \u00a0]?(?=\d)")
+PRODUCT = re.compile(r"(?<![\d,])(?<!\d" + ZS + r")\b(\d{1,4})" + ZS + r"?(?:" + UNIT + ZS + r"?)?×" + ZS + r"?(?=\d)")
 TIER = re.compile(r"(?<![\d,])\b(" + AMT + r") zł(?: netto| brutto)?(?: za (?:sztukę|szt\.))?(?: przy (?:zamówieniu|zakupie))?"
-                  r" (poniżej|do|od|powyżej|co najmniej|min\.) (\d{1,5})(?: do (\d{1,5})|[ \u00a0]?[–-][ \u00a0]?(\d{1,5}))?"
-                  r" (?:szt\.|sztuk)")
-QTY = re.compile(r"(?<![\d,])(?<!\d[ \u00a0])\b(\d{1,5})[ \u00a0](?:szt\.|sztuk[ia]?\b)")
+                  r" (poniżej|do|od|powyżej|co najmniej|min\.) (\d{1,5})"
+                  r"(?: do (\d{1,5})|" + ZS + r"?[–-]" + ZS + r"?(\d{1,5}))? (?:szt\.|sztuk)")
+QTY = re.compile(r"(?<![\d,])(?<!\d" + ZS + r")\b(\d{1,5})" + ZS + r"(?:szt\.|sztuk[ia]?\b)")
 QTY_PRE = ("poniżej ", "od ", "do ", "powyżej ", "najmniej ", "min. ", "–", "-")
 EQ_NEXT = re.compile(r"\s*=")  # "1 EUR =": the euro of a rate
-TIMES_NEXT = re.compile(r"[ \u00a0]?×")  # "5 szt. × 12,00 zł": a product line, not the ordered quantity
+TIMES_NEXT = re.compile(ZS + r"?×")  # "5 szt. × 12,00 zł": a product line, not the ordered quantity
 FEE = re.compile(r"\b(?:[Dd]ostawa|[Ww]ysyłka|[Tt]ransport|[Pp]rzesyłka|[Kk]oszty? (?:dostawy|wysyłki|transportu|przesyłki))\b")
 
 
@@ -182,7 +184,7 @@ def _pl_amount(x):
 
 
 def _dec(raw):
-    return Decimal(raw.replace(" ", "").replace("\u00a0", "").replace(".", "").replace(",", "."))
+    return Decimal(re.sub(ZS, "", raw).replace(".", "").replace(",", "."))
 
 
 def _q(x):
