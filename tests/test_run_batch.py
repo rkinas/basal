@@ -55,6 +55,25 @@ def test_output_equal_to_input_is_refused(tmp_path):
     assert (tmp_path / "in.jsonl").read_bytes() == before
 
 
+def test_request_lines_keep_every_request_field(tmp_path):
+    """A full-request line is sent as it is (media, facts, lang, model, detail, think, images and fields a later
+    server may read), without the line's own id / gold / group / family / _notes."""
+    req = {"state": "s", "questions": {"q": {"type": "noul", "instructions": "?"}}, "early_exit": "0.99",
+           "media": [{"type": "image", "data": "aGk="}], "facts": "auto", "lang": "pl", "model": "basal-x",
+           "detail": "high", "think": "off", "future_field": {"x": 1}}
+    line = dict(req, id="r1", gold={"q": "yes"}, group="g", family="f", _note="mine")
+    write(tmp_path / "in.jsonl", [line])
+    seen = []
+
+    def handler(r):
+        seen.append(json.loads(r.content))
+        return httpx.Response(200, json=answer(seen[-1]))
+    asyncio.run(run_module.run(args(tmp_path), transport=httpx.MockTransport(handler)))
+    assert seen == [req]
+    assert run_module.to_request({"state": "s", "questions": {}, "images": ["data:image/png;base64,aGk="]})[
+        "images"] == ["data:image/png;base64,aGk="]
+
+
 def test_a_bad_line_is_its_own_error_and_the_run_goes_on(tmp_path, capsys):
     write(tmp_path / "in.jsonl", [SIMPLE, {"state": "no options", "question": "?"}, "{not json", "[1, 2]",
                                   {"state": "s", "questions": {"q": {"type": "noul", "instructions": "?"}}},

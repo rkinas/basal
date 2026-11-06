@@ -5,7 +5,9 @@
 Two input formats are accepted (they can be mixed):
   simple   {"id": ..., "state": "...", "question": "...", "options": ["...", "..."], "type": "choice"|"noul"|"score",
             "gold": <index, optional>}      type defaults to "choice"; for "noul" the options are [yes-text, no-text]
-  request  {"id": ..., "state": ..., "questions": {...}, "early_exit": ...}   a full /v1/systemone request body
+  request  {"id": ..., "state": ..., "questions": {...}, "early_exit": ..., ...}   a full /v1/systemone request body:
+           every field is sent as it is (media, facts, lang, think, ...) except the line's own "id", "gold", "group",
+           "family" and fields whose name starts with "_"
 
 Output (one line per input line, same order): {"id", "answers", "latency_ms"} plus, for simple lines, "prediction"
 (index of the chosen option), "confidence" and "correct" when "gold" is given; a line that cannot be sent or read
@@ -27,13 +29,15 @@ import httpx
 
 from .cli import positive
 
+LOCAL = ("id", "gold", "group", "family")  # a line's own fields (as basal-calibrate reads them), never sent
+
 
 def to_request(item, early_exit=None, preset=None, lang=None):
     if preset and "questions" not in item and "question" not in item:  # --preset: its questions over the state
         from .presets import questions
         item = dict(item, questions=questions(preset, lang, item["state"]))
-    if "questions" in item:
-        body = {k: item[k] for k in ("state", "questions", "early_exit") if k in item}
+    if "questions" in item:  # a full request: every field but the line's own
+        body = {k: v for k, v in item.items() if k not in LOCAL and not k.startswith("_")}
     else:
         t, opts = item.get("type", "choice"), item["options"]
         if t == "noul":
