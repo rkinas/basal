@@ -44,7 +44,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from . import adapter as adapter_module
-from .prompt import PREFILL, RequestError, check_option_tokenizer, model_option_isolation, model_two_way
+from .prompt import (PREFILL, RequestError, check_option_tokenizer, model_option_isolation, model_two_way,
+                     shared_length)
 
 
 METADATA_FILES = ["*.json", "*.jinja", "*.model", "*.txt", "*.md", "Modelfile*"]  # tokenizer, template, calibration
@@ -883,29 +884,40 @@ class _VarlenTree(NamedTuple):
     fused: bool = False
 
 
+def _ranges(starts, ends):
+    """np.concatenate([np.arange(s, e) for s, e in zip(starts, ends)]) in one expansion (int64)."""
+    starts, ends = np.asarray(starts, dtype=np.int64), np.asarray(ends, dtype=np.int64)
+    lens = ends - starts
+    total = int(lens.sum())
+    return np.repeat(starts - (np.cumsum(lens) - lens), lens) + np.arange(total, dtype=np.int64)
+
+
 def _varlen_tree(seg, parents, roots, Lk, to_dev, fused=False):
     """seg [B, S] numpy: the block of every token below the root (0..; contiguous, flattened depth first; -1 =
     padding), parents: per row the parent block of every block (-1 = the root), roots: the root's tokens per row, Lk:
     the length of the root key / value buffers, fused: merge with _merge_fused -> _VarlenTree on the device (to_dev:
     host array -> device)."""
     B, S = seg.shape
-    qi, ki, cq, ck = [], [], [0], [0]
+    ks, ke, qs, qe, cq, ck = [], [], [], [], [0], [0]  # (start, end) of every query and key range, flat indices
     for r in range(B):
-        s = seg[r]
+        s, par, base = seg[r], parents[r], r * S
         n = int((s >= 0).sum())
         starts = np.flatnonzero(np.r_[True, s[1:n] != s[: n - 1]]) if n else np.zeros(0, dtype=np.int64)
-        runs = list(zip(starts.tolist(), np.r_[starts[1:], n].tolist()))
-        span = {int(s[a]): (a, b) for a, b in runs}
-        for a, b in runs:
-            keys, p = [np.arange(a, b)], parents[r][int(s[a])]
+        runs = list(zip(starts.tolist(), np.r_[starts[1:], n].tolist(), s[starts].tolist()))
+        span = {x: (a, b) for a, b, x in runs}
+        for a, b, x in runs:
+            chain, p = [], par[x]
             while p >= 0:
-                keys.insert(0, np.arange(*span[p]))
-                p = parents[r][p]
-            ki.append(r * S + np.concatenate(keys))
-            qi.append(r * S + np.arange(a, b))
+                chain.append(span[p])
+                p = par[p]
+            m = b - a
+            for pa, pb in reversed(chain):  # ancestors' tokens first, then the block's own
+                ks.append(base + pa); ke.append(base + pb); m += pb - pa
+            ks.append(base + a); ke.append(base + b)
+            qs.append(base + a); qe.append(base + b)
             cq.append(cq[-1] + b - a)
-            ck.append(ck[-1] + len(ki[-1]))
-    qi, ki = np.concatenate(qi), np.concatenate(ki)
+            ck.append(ck[-1] + m)
+    qi, ki = _ranges(qs, qe), _ranges(ks, ke)
     i32 = lambda x: to_dev(np.asarray(x, dtype=np.int32))  # noqa: E731
     return _VarlenTree(i32(np.arange(B + 1) * S), i32(np.arange(B + 1) * Lk), i32(roots), to_dev(qi), to_dev(ki),
                        i32(cq), i32(ck), int(np.diff(cq).max()), int(np.diff(ck).max()), len(qi) == B * S, fused)
@@ -2381,11 +2393,23 @@ class GraphBackend(EagerBackend):
         text for its option orders) are computed once; positions are each token's index in its own prompt. cut: the
         root block ends after this many tokens (the state prefix of a request, the unit of the state cache) when every
         prompt is longer."""
+
         ids, pos, seg, parent, last = [], [], [], [], [None] * len(toks)
-        cut = cut if cut and all(len(t) > cut for t in toks) and len({tuple(t[:cut]) for t in toks}) == 1 else None
+
+        def common(members, start):
+            """Tokens the members share from `start` on: the common prefix of all of them is that of their least and
+            greatest (list order), found by binary search over slice comparisons (os.path.commonprefix walked it in a
+            Python loop, token by token: 6k-token states over hundreds of prompts in rank / compress requests)."""
+            if len(members) == 1:
+                return len(toks[members[0]]) - start
+            seqs = [toks[m] for m in members] if start == 0 else [toks[m][start:] for m in members]
+            return shared_length(min(seqs), max(seqs))
+
+        if cut and not (all(len(t) > cut for t in toks) and (len(toks) == 1 or common(range(len(toks)), 0) >= cut)):
+            cut = None
 
         def build(members, start, par):
-            end = start + len(os.path.commonprefix([toks[m][start:] for m in members]))
+            end = start + common(members, start)
             if par == -1 and cut is not None:
                 end = min(end, cut)
             blk = len(parent)
