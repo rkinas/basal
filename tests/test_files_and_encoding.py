@@ -24,6 +24,13 @@ def test_a_text_or_a_list_row_is_skipped(tmp_path, line):
     assert len(bench.load_questions(p, 10)) == 1
 
 
+@pytest.mark.parametrize("line", ['"a text with options"', '["options", "a", "b"]'])
+def test_a_text_or_a_list_that_holds_options_is_no_question(tmp_path, line):
+    p = tmp_path / "q.jsonl"  # "options" in a str or a list was a substring or element test, and let the line in
+    p.write_text(line + "\n" + GOOD + "\n", encoding="utf-8")
+    assert bench.load_questions(p, 10) == [json.loads(GOOD)]
+
+
 def test_the_command_ends_with_the_message_not_a_traceback(tmp_path):
     p = tmp_path / "q.jsonl"
     p.write_text(GOOD + "\n{broken\n", encoding="utf-8")
