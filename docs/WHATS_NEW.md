@@ -346,7 +346,7 @@ change what a run gives.
 - **`basal-run --preset` works again** (`basal-run`): in 2.5.0-2.5.2 every line failed with `KeyError: 'q'`, because
   the summary read a preset line (a state only) as a simple line. Contributed by Dariusz Koryto (@dkoryto),
   [#91](https://github.com/rkinas/basal/pull/91).
-- **Batch flags measured on the DGX Spark (GB10)** ([HARDWARE.md](HARDWARE.md#dgx-spark-gb10-batch-flags-with-basal-20)):
+- **Batch flags measured on a Dell Pro Precision with GB10** ([HARDWARE.md](HARDWARE.md#dell-pro-precision-with-gb10-batch-flags-with-basal-20)):
   bf16 basal-2.0 with PyTorch 2.11 and 2.13; the defaults are the best choice there, and `--batches compact` and the
   format-1 cascade need PyTorch 2.13 on the GB10. Contributed by Dariusz Koryto (@dkoryto),
   [#94](https://github.com/rkinas/basal/pull/94).
