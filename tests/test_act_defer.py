@@ -16,3 +16,10 @@ def test_defer_action_is_not_silently_ignored_by_the_wrong_defer_form():
     assert act_spec("q", dict(short, defer_action="defer"), ["yes", "no"])["defer"] == "defer"   # controls
     assert act_spec("q", short, ["yes", "no"])["defer"] == "defer"
     assert act_spec("q", {"type": "act", "costs": {"wrong": 1}}, ["yes", "no"])["defer"] is None
+
+
+def test_an_outcome_named_defer_does_not_overwrite_the_defer_costs():
+    with pytest.raises(RequestError, match="defer"):
+        act_spec("q", {"type": "act", "costs": {"wrong": 1, "defer": 0.2}}, ["defer", "accept"])
+    spec = act_spec("q", {"type": "act", "costs": {"wrong": 1, "defer": 0.2}}, ["yes", "no"])   # control
+    assert spec["costs"]["defer"] == {"yes": 0.2, "no": 0.2} and spec["costs"]["yes"] == {"yes": 0.0, "no": 1.0}
