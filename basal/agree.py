@@ -134,6 +134,8 @@ def flat(groups):
 
 
 def run_groups(be, groups, per_call):
+    if per_call < 1:
+        raise SystemExit("--per-call must be at least 1")
     out = []
     for i in range(0, len(groups), per_call):
         out += be.run_shared(groups[i: i + per_call])
