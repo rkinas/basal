@@ -4,6 +4,8 @@ basal-serve (http_app) with its batching worker and a stub engine that holds the
 import asyncio
 import json
 import sys
+import threading
+import time
 
 import httpx
 import pytest
@@ -30,7 +32,7 @@ class CountingEngine(Engine):
         return super().run_shared(groups, policy)
 
 
-async def raw_post(app, path, body, gone):
+async def raw_post(app, path, body, gone, headers=()):
     """POST through the ASGI app, the client disconnecting once `gone` is set -> (status, body)."""
     messages = [{"type": "http.request", "body": json.dumps(body).encode(), "more_body": False}]
 
@@ -46,7 +48,7 @@ async def raw_post(app, path, body, gone):
         sent.append(message)
 
     scope = {"type": "http", "method": "POST", "path": path, "raw_path": path.encode(), "query_string": b"",
-             "headers": [(b"content-type", b"application/json")], "http_version": "1.1", "scheme": "http",
+             "headers": [(b"content-type", b"application/json"), *headers], "http_version": "1.1", "scheme": "http",
              "server": ("basal", 80), "client": ("test", 1), "root_path": ""}
     await app(scope, receive, send)
     start = next(m for m in sent if m["type"] == "http.response.start")
@@ -328,3 +330,176 @@ def test_a_client_that_leaves_while_sending_its_body_answers_499(path, capsys):
     err = capsys.readouterr().err
     assert "Traceback" not in err and "raised" not in err and "request failed" not in err
     assert not srv.backend.entered.is_set()
+
+
+# -- behind basal-router: the router's own request to the replica is cancelled, so the replica sees the disconnect ----
+class Uvicorn:
+    """An ASGI app served by uvicorn on a free local port, in a thread of its own (as basal-serve serves it)."""
+
+    def __init__(self, app):
+        import socket
+
+        import uvicorn
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        self.url = f"http://127.0.0.1:{port}"
+        self.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+        self.thread = threading.Thread(target=self.server.run, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        for _ in range(500):
+            if self.server.started:
+                return self
+            time.sleep(0.01)
+        raise RuntimeError("the server did not start")
+
+    def __exit__(self, *_):
+        self.server.should_exit = True
+        self.thread.join(10)
+
+
+def test_a_request_abandoned_behind_the_router_never_reaches_the_replicas_engine():
+    """basal-router in front of a replica (basal-serve's app under uvicorn, over TCP): the replica's engine holds one
+    request, the router's request queues behind it, and the router's client leaves. The router answers 499 at once and
+    cancels its own request to the replica, which closes that connection: the replica sees the disconnect and drops
+    its queued request, which never reaches the engine."""
+    from basal import router as R
+    engine = CountingEngine()
+    engine.go.clear()
+    srv = AppServer(engine)
+    with Uvicorn(server.http_app(srv, "fast")) as replica:
+        rt = R.Router([replica.url])
+        rt.ready = {replica.url}
+
+        async def go():
+            async with httpx.AsyncClient(base_url=replica.url, timeout=30) as direct:
+                held = asyncio.create_task(direct.post("/v1/systemone", json=BODY))
+                await asyncio.get_running_loop().run_in_executor(None, engine.entered.wait, 5)
+                gone = asyncio.Event()
+                abandoned = asyncio.create_task(raw_post(R.app(rt), "/v1/systemone", BODY, gone))
+                await until(lambda: srv.queued == 1)  # the router's request waits in the replica's queue
+                assert rt.load[replica.url] == 1
+                gone.set()
+                status, out = await asyncio.wait_for(abandoned, 5)
+                await until(lambda: srv.queued == 0)  # the replica saw its client (the router) leave
+                engine.go.set()
+                held = (await held).status_code
+                await until(lambda: srv.load() == IDLE)
+                await rt.client.aclose()
+                return status, out, held, rt.load[replica.url], rt.failed[replica.url]
+
+        status, out, held, load, failed = asyncio.run(go())
+    assert (status, out) == GONE
+    assert (held, engine.calls) == (200, 1)  # the held request only
+    assert (load, failed) == (0, 0)  # (a client that left is no replica failure)
+
+
+def test_the_router_cancels_the_call_of_a_request_whose_client_left():
+    """The replica's call is cancelled with the router's handler, and a client that leaves while sending its body
+    answers 499, not 500."""
+    from basal import router as R
+    calls = {"started": 0, "cancelled": 0}
+
+    async def replica(request):
+        calls["started"] += 1
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            calls["cancelled"] += 1
+            raise
+        return httpx.Response(200, json={})
+
+    async def go():
+        rt = R.Router(["http://r0"], transport=httpx.MockTransport(replica))
+        rt.ready = {"http://r0"}
+        gone = asyncio.Event()
+        abandoned = asyncio.create_task(raw_post(R.app(rt), "/v1/systemone", BODY, gone))
+        await until(lambda: calls["started"] == 1)
+        gone.set()
+        first = await asyncio.wait_for(abandoned, 5)
+        messages = [{"type": "http.request", "body": b'{"state": "', "more_body": True}, {"type": "http.disconnect"}]
+        sent = []
+
+        async def receive():
+            return messages.pop(0)
+
+        async def send(message):
+            sent.append(message)
+        try:
+            await R.app(rt)({"type": "http", "method": "POST", "path": "/v1/systemone", "raw_path": b"/v1/systemone",
+                             "query_string": b"", "headers": [], "http_version": "1.1", "scheme": "http",
+                             "server": ("basal", 80), "client": ("test", 1), "root_path": ""}, receive, send)
+        except Exception:  # noqa: BLE001  (Starlette raises a handler's error again after its 500)
+            pass
+        second = next(m["status"] for m in sent if m["type"] == "http.response.start")
+        return first, second, dict(calls), rt.load["http://r0"]
+
+    first, second, seen, load = asyncio.run(go())
+    assert first == GONE and second == 499
+    assert seen == {"started": 1, "cancelled": 1} and load == 0
+
+
+# -- /mcp: a tool call whose client leaves is cancelled with its stateless session ---------------------------------
+class Tools:
+    """The server behind /mcp: its serve waits until it is cancelled, or answers at once with `quick`."""
+    name = "basal"
+
+    def __init__(self, quick=False):
+        self.quick, self.started, self.cancelled = quick, None, False
+
+    async def decide(self, body):  # (mcp_server.http serves through serve)
+        raise AssertionError("not called")
+
+    async def serve(self, body):
+        self.started.set()
+        if self.quick:
+            return {"model": "basal", "answers": {"answer": {"type": "noul", "noul": 0.9, "confidence": 0.9,
+                                                             "probabilities": {"true": 0.9, "false": 0.1}}}}
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+MCP_CALL = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "decide", "arguments": {"state": "Invoice 1240 PLN.", "question": "Is it paid?"}}}
+MCP_HEADERS = [(b"accept", b"application/json, text/event-stream"), (b"host", b"127.0.0.1:8000"),
+               (b"mcp-protocol-version", b"2025-06-18")]
+
+
+def mcp_call(tools, leave):
+    """A tools/call through the /mcp routes of basal-serve --mcp on (raw ASGI, the session manager running); the client
+    leaves once the serve has started when `leave` -> (status, body, whether the serve was cancelled)."""
+    from starlette.applications import Starlette
+
+    from basal import mcp_server
+    routes, run = mcp_server.http(tools, "127.0.0.1")
+    app = Starlette(routes=routes)
+
+    async def go():
+        tools.started = asyncio.Event()
+        gone = asyncio.Event()
+        async with run():
+            call = asyncio.create_task(raw_post(app, "/mcp", MCP_CALL, gone, MCP_HEADERS))
+            await asyncio.wait_for(tools.started.wait(), 5)
+            if leave:
+                gone.set()
+            status, out = await asyncio.wait_for(call, 5)
+        return status, out, tools.cancelled
+
+    return asyncio.run(go())
+
+
+def test_an_mcp_tool_call_whose_client_leaves_is_cancelled():
+    status, out, cancelled = mcp_call(Tools(), leave=True)
+    assert (status, out) == GONE
+    assert cancelled is True
+
+
+def test_an_mcp_tool_call_whose_client_stays_is_answered():
+    status, out, cancelled = mcp_call(Tools(quick=True), leave=False)
+    assert status == 200 and cancelled is False
+    assert out["result"]["structuredContent"]["noul"] == 0.9

@@ -149,10 +149,19 @@ def build(decide, model="basal", models=None):
 def http(server, host, models=None):
     """--mcp on: the MCP tools of a running basal server -> (routes for /mcp, the session manager's lifespan).
     Stateless JSON responses: every call is one request. Bound to a loopback host, Host / Origin are checked (DNS
-    rebinding). models: see build."""
+    rebinding). models: see build. A tool call whose HTTP client disconnects is cancelled, as on POST /v1/systemone:
+    the SDK does not watch the disconnect, but a stateless request's session, and its tool call, end with its
+    handler (basal/disconnect.py)."""
+    import inspect
+
+    from starlette.routing import Route
+
+    from .disconnect import CancelOnDisconnect
     m = build(getattr(server, "serve", server.decide), getattr(server, "name", None) or "basal", models)
     app = m.streamable_http_app(host=host, stateless_http=True, json_response=True)
-    return app.routes, m.session_manager.run
+    routes = [Route(r.path, CancelOnDisconnect(r.endpoint), methods=r.methods, name=r.name)  # (the ASGI app at /mcp)
+              if isinstance(r, Route) and not inspect.isroutine(r.endpoint) else r for r in app.routes]
+    return routes, m.session_manager.run
 
 
 def remote(url, timeout=60.0, transport=None, model=None, api_key=None):

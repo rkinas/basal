@@ -580,14 +580,27 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
     poll_s = POLL_S if poll_s is None else poll_s
 
     from starlette.applications import Starlette
+    from starlette.requests import ClientDisconnect
     from starlette.responses import JSONResponse, PlainTextResponse, Response
     from starlette.routing import Route
 
+    from .disconnect import CLIENT_GONE, until_disconnect
+
     async def post(request):
+        """A client that disconnects (a timeout, a retry) cancels the request: every call it has made to a replica is
+        cancelled, which closes that connection, so the replica cancels its own request in turn (its queued work is
+        dropped). Without it the router held the replica's connection until the replica answered nobody."""
         headers = {"content-type": "application/json", **key_headers(request.headers.raw)}
         if request.scope.get("basal.request_id"):  # (request_ids below: the client's, or one it made)
             headers["x-request-id"] = request.scope["basal.request_id"]
-        status, content, ctype = await router.forward(request.url.path, await request.body(), headers)
+        try:
+            body = await request.body()
+        except ClientDisconnect:  # the client left while sending the body
+            return JSONResponse(*CLIENT_GONE)
+        out = await until_disconnect(request, router.forward(request.url.path, body, headers))
+        if out is None:  # the client is gone
+            return JSONResponse(*CLIENT_GONE)
+        status, content, ctype = out
         return Response(content, status_code=status, media_type=ctype)
 
     def main_ready():

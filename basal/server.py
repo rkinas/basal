@@ -47,6 +47,7 @@ import torch
 
 from . import adapter as adapter_module
 from .signals import exit_on_sigterm
+from .disconnect import CLIENT_GONE, until_disconnect  # (torch-free: basal-router uses it too)
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
                      VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
@@ -2514,39 +2515,6 @@ def error_body(e, error_format="basal"):
     if status == 422:
         body["detail"] = [{"loc": ["body"], "msg": str(e), "type": "value_error"}]
     return body, status
-
-
-CLIENT_GONE = ({"error": "client disconnected", "code": "CLIENT_DISCONNECTED"}, 499)  # (nobody reads it)
-
-
-async def until_disconnect(request, coro):
-    """The result of `coro` (the request's serve), or None when the HTTP client disconnects first. The serve task is
-    then cancelled, so the request's entries still in the queue are dropped before they reach the engine (ask cancels
-    their futures, the workers skip done futures); a batch already on the GPU finishes. Without it a client that timed
-    out left its request to run in full: 48 abandoned 6k-token requests kept the GPU busy for 74 s (#129).
-    The disconnect is the server's http.disconnect message, awaited by a task of its own (the handler has read the
-    body, so nothing else receives): a waiting request costs the event loop nothing and is cancelled at once, where
-    polling is_disconnected() every 0.25 s cost 15% of a core with 1,024 requests waiting. A serve that has ended
-    answers as it ended (its error raised, not lost); a cancelled handler cancels its serve too."""
-    task = asyncio.ensure_future(coro)
-    gone = asyncio.ensure_future(_disconnected(request.receive))
-    try:
-        await asyncio.wait({task, gone}, return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        gone.cancel()
-        task.cancel()  # (nothing once it has ended) the client is gone, or this handler was cancelled
-    await asyncio.wait({task})  # the serve's own clean-up first: ask drops the request's queued entries
-    return None if task.cancelled() else task.result()
-
-
-async def _disconnected(receive):
-    """Returns when the server says the request's client is gone (http.disconnect). A receive that fails says
-    nothing: the request is then served to the end, as without the watch."""
-    try:
-        while (await receive())["type"] != "http.disconnect":
-            pass
-    except Exception:  # noqa: BLE001
-        await asyncio.get_running_loop().create_future()  # (never set: cancelled when the serve ends)
 
 
 def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
