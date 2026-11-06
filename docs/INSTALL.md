@@ -353,7 +353,9 @@ same; single questions take as long as in `eager`).
 ### Images and audio: basal-omni (experimental)
 
 Install the `media` extra (pillow, soundfile, scipy, torchvision) and serve a basal-omni model in `eager` mode with
-`--media on`:
+`--media on`. torchvision must be the build of the installed torch (the same CUDA), which no version in the extra can
+name: install the pair together from torch's index, as in the second line, and the extra then keeps it. A torchvision of
+another build fails at load ("operator torchvision::nms does not exist").
 
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
