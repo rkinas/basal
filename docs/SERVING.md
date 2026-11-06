@@ -196,9 +196,15 @@ benchmarking a GPU.
     `--state-cache-gb N` (a state cache across requests; 2.3.1: also for states that begin with a cached one, e.g.
     agent traces, which then compute only their new tokens; 2.5: `--state-cache-bits 8` keeps ~1.7x as many
     states per GB, answers close to the uncached ones; `--state-cache-lock on` removes a rare HTTP 500 under
-    concurrent requests at ~8% of the throughput at 8 clients, see WHATS_NEW 2.5's known limits), `--prefix-cache`,
-    `--long-lane`. Measurements:
-    [HARDWARE.md](HARDWARE.md#kernels-of-the-cuda-graph-engine-one-h100).
+    concurrent requests at ~8% of the throughput at 8 clients, see WHATS_NEW 2.5's known limits; `--state-cache-dir
+    DIR`: also every cached state as a `.safetensors` file under DIR, one subdirectory per model signature, read back
+    on a memory miss and by later servers over the same directory, here and on `--mode mlx`, not for Qwen3.5;
+    `--state-cache-disk-gb G` bounds it, default 20, least recently used files out first; `--state-cache-import
+    any-engine` also reads the files the other engine wrote for the same bf16 checkpoint, CUDA graph engine <->
+    `--mode mlx`, whose answers are close to, not equal to, the uncached answers; the default `same-engine` reads only
+    its own engine's files), `--prefix-cache`, `--long-lane`. Measurements:
+    [HARDWARE.md](HARDWARE.md#kernels-of-the-cuda-graph-engine-one-h100),
+    [disk tier](HARDWARE.md#state-cache-disk-tier).
 - **vLLM options (2.3):** `--vllm-preset default | deterministic` (deterministic: batch-invariant kernels, no prefix
   cache, no chunked prefill; repeatable answers at a throughput cost) loads `CALIBRATION.vllm.<preset>.json` when the
   model ships one, else `CALIBRATION.vllm.json`, else `CALIBRATION.json`, and is reported in `GET /v1/models`;

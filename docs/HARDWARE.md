@@ -699,6 +699,56 @@ while without the cache it grows with it:
   buffers), counted against the budget. One 2.1k-token BAN-PL state is about 126 MB on 4.5B (60 layers, 2 KV heads of
   128). The wired limit is raised by the budget.
 
+### State cache disk tier
+
+`--state-cache-dir DIR` keeps every state the state cache stores as one `.safetensors` file under DIR: per layer
+`k.{i}` / `v.{i}` [KV heads, tokens, head size] as computed, the token ids and the prefix index's block hashes in the
+metadata, one subdirectory per model signature (model, revision, `config.json` and weight file sizes, adapter,
+quantisation, KV dtype). A background thread writes them (a full queue drops the write, counted in
+`basal_state_cache_disk_write_drops_total`). At start-up the server indexes the files of its signature from their
+headers, and on a memory miss it reads a state back, exactly or as the longest prefix. `--state-cache-disk-gb` bounds
+the directory, least recently used files out first. Each engine writes its own files (the engine is in the file name),
+so the CUDA graph engine and MLX can share a directory without overwriting each other's states. Files of the other
+engine are read only with `--state-cache-import any-engine`, and a server prefers its own engine's file of a state.
+
+Measured on an Apple M4 Max (40-core GPU, 128 GB), macOS 27.0.1, MLX 0.32.4, mlx-lm 0.32.2: `basal-serve --model
+Remek/basal-2.0-mini --mode mlx --no-calibration --state-cache-gb 16`, plus the run's flags. The input is 300 English
+web pages (2,167 characters, about 630 state tokens on average), one six-level `score` question each, `basal-run
+--concurrency 1`. Runs in ABBA order (off, memory, disk cold, disk warm, then the reverse); the table keeps the
+second run of each, as planned. p50 of the server's latency per request, from `tools/state_cache/compare.py`:
+
+| run | p50 off | p50 on | speed-up | top answers same | at margin >= 0.2 | \|dp\| median / p99 / max |
+|---|---|---|---|---|---|---|
+| restart over a warm directory, against cache off | 330 ms | 124 ms | 2.67x (**FAIL** `speedup>=3`) | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| restart, against memory hits in one process | 141 ms | 124 ms | 1.14x | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| memory hits in one process, against cache off | 330 ms | 141 ms | 2.34x | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| first pass writing to an empty directory, against the memory cache's first pass | 384 ms | 338 ms | 1.14x | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| second server over the first one's directory, against the first server | 437 ms | 153 ms | 2.85x | 300/300 | 1.0000 | 0.0000 / 0.0000 / 0.0000 |
+| graph-engine files (transformers on the CPU, bf16) served by `--mode mlx --state-cache-import any-engine`, against cache off | 330 ms | 118 ms | 2.80x | 298/300 | 1.0000 | 0.0078 / 0.0211 (**FAIL** `p99_dp<=0.02`) / 0.0258 |
+
+- **Restarts are exact.** On the same engine a state read back from disk gives the probabilities of the uncached
+  server bit for bit: 300 / 300 readouts identical, from a restart and from a second server process. The restart had
+  `basal_state_cache_misses_total 0` and `basal_state_cache_disk_loads_total 300`.
+- **A restart is as fast as a memory hit, not faster.** The 3x target was set from 1.5k-token states. These states
+  are about 630 tokens, and the six options in two orders are a large share of each request, so even the memory cache
+  gives 2.34x. The ABBA drift is large on this machine: the first run of each gave off 226 ms, memory 133 ms and
+  restart 124 ms (1.82x), and the first-pass pair 282 ms against 362 ms (0.78x) instead of 1.14x. What writing adds to a
+  request is the copy of its keys and values on the MLX thread: 9.7 ms for a 574-token state and 14.4 ms for 2,847
+  tokens (93 MB). The file itself is written off that thread.
+- **Reading a state back.** `DiskTier.load` of the largest file (93.3 MB, 2,847 tokens) takes a median 22.2 ms
+  (4.2 GB/s) when the file is not in the page cache and 2.0 ms when it is, 20 loads each. Without `sudo purge`, each
+  cold read was of a fresh copy written with `F_NOCACHE`.
+- **8 clients** (`--concurrency 8`, empty directory): 2.8 requests/s with the disk tier, 2.6 without, the same
+  probabilities bit for bit, `disk_write_drops_total 0`.
+- **Another engine's states are close, not equal.** The graph engine's files in this row were written by a stand-in:
+  transformers on the CPU in bf16 computed the same 300 states (the same keys and token ids). No CUDA host was
+  reachable. Against the uncached MLX server, 298 / 300 top answers are the same (the two changes: one near tie, one
+  at a margin between 0.02 and 0.2), all of them at a margin of 0.2 or more, and the max |dp| is 0.026. The p99 of
+  0.0211 misses the 0.02 gate. These are bf16 rounding differences between two forwards, not the file format: the
+  codecs are checked bit for bit in both directions (`tests/test_state_cache_disk.py`).
+- Not measured yet: the CUDA graph engine (restart, Gemma 4, and real graph-engine states in both directions). It
+  needs an H100-class host.
+
 
 ## AMD Strix Halo (experimental, community-maintained)
 

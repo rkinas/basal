@@ -180,8 +180,9 @@ def facts(srv, a, mode):
         ["state once, ask many", getattr(srv, "soam", None)],
         ["context limit", f"{ctx[0]} tokens ({ctx[1]})" if ctx else None],
         ["context overflow", getattr(srv, "overflow", None)],
-        ["state cache", f"{a.state_cache_gb:g} GB, {a.state_cache_bits}-bit" if getattr(a, "state_cache_gb", 0)
-         else "off"],
+        ["state cache", (f"{a.state_cache_gb:g} GB, {a.state_cache_bits}-bit" if getattr(a, "state_cache_gb", 0)
+                         else "off") + (f", disk {a.state_cache_disk_gb:g} GB at {a.state_cache_dir}"
+                                        if getattr(a, "state_cache_dir", None) else "")],
         ["max batch", getattr(srv, "max_batch", None)],
         ["python", sys.version.split()[0]],
         ["platform", f"{sys.platform} {os.uname().machine}" if hasattr(os, "uname") else sys.platform],
