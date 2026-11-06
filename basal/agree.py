@@ -40,6 +40,7 @@ import time
 from pathlib import Path
 
 from . import synth
+from .cli import positive
 from .jsonl import read_lines
 from .prompt import letter_ids, model_format, render
 
@@ -292,7 +293,7 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--questions", default=None, help="JSONL of simple items {state, question, options, gold?}")
     ap.add_argument("--n-questions", dest="n_questions", type=int, default=500)
-    ap.add_argument("--per-call", dest="per_call", type=int, default=8, help="requests per call of a backend")
+    ap.add_argument("--per-call", dest="per_call", type=positive, default=8, help="requests per call of a backend")
     ap.add_argument("--independence", choices=["on", "off"], default="on")
     ap.add_argument("--gate", type=float, default=GATE)
     ap.add_argument("--cache", default=str(Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "basal"

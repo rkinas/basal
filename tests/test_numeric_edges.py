@@ -21,3 +21,14 @@ def test_no_multi_readouts_gives_a_row_without_independence():
 def test_per_call_below_1_is_refused(n):
     with pytest.raises(SystemExit, match="per-call"):
         agree.run_groups(object(), [1, 2], n)
+
+
+def test_per_call_0_is_refused_before_any_model_is_loaded(monkeypatch, capsys):
+    import basal.engine
+
+    def no_model(*a, **k):
+        raise AssertionError("a model was resolved")
+    monkeypatch.setattr(basal.engine, "resolve", no_model)
+    with pytest.raises(SystemExit) as e:
+        agree.main(["--model", "m", "--backends", "eager", "--per-call", "0"])
+    assert e.value.code == 2 and "--per-call: 0: must be at least 1" in capsys.readouterr().err
