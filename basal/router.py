@@ -7,7 +7,8 @@ along the ring). Requests without a state go to the less loaded of two random re
 /health; one answering 503 (starting) or not answering gets no requests until it is ready again. With --gpus, the
 router exits (status 1) when every replica it started has exited, and the replicas it started end with it: each runs
 in its own process group, which the router ends when it stops (SIGTERM, SIGINT, SIGHUP, an error) and, on Linux, which
-gets SIGTERM when the router is killed.
+gets SIGTERM when the router is killed. With CUDA_VISIBLE_DEVICES set, --gpus gives indexes of the GPUs it lists (as
+CUDA numbers them), and anything else is refused.
 
 Off by default (the replicas' answers then pass through untouched):
   --escalate URL ... --escalate-below P   a cascade: questions whose top probability (calibrated, as the first replica
@@ -711,17 +712,39 @@ def _death_signal():
     return child
 
 
+def devices(gpus, mask=None):
+    """The CUDA_VISIBLE_DEVICES of each replica of --gpus. Without a mask of the user's (CUDA_VISIBLE_DEVICES not
+    set) an entry goes on as given: an index, a GPU UUID. With one, an entry is an index into the mask, as CUDA numbers
+    the GPUs the router sees, and the replica gets the mask's entry at it. Anything else is refused before a replica
+    starts: a number past the mask read as a physical id would mean another GPU than the same number as an index (mask
+    0,2,3 with --gpus 2,3 put both replicas on GPU 3)."""
+    gpus = [str(g).strip() for g in gpus]
+    if not all(gpus):
+        raise SystemExit(f"basal-router: --gpus {','.join(gpus)}: an empty entry")
+    if mask is None:
+        return gpus
+    seen = [x.strip() for x in mask.split(",") if x.strip()]
+    if not seen:
+        raise SystemExit(f"basal-router: --gpus {','.join(gpus)}: CUDA_VISIBLE_DEVICES is set but lists no GPU; unset "
+                         "it to name GPUs by their own ids")
+    bad = [g for g in gpus if not (g.isascii() and g.isdigit() and int(g) < len(seen))]
+    if bad:
+        raise SystemExit(f"basal-router: --gpus {','.join(gpus)}: with CUDA_VISIBLE_DEVICES={mask} an entry is an index "
+                         f"of the {len(seen)} GPUs it lists, 0 to {len(seen) - 1} ({', '.join(bad)} is not); unset "
+                         "CUDA_VISIBLE_DEVICES to name GPUs by their own ids")
+    return [seen[int(g)] for g in gpus]
+
+
 def spawn(gpus, port0, serve_args):
-    """One basal-serve per GPU (CUDA_VISIBLE_DEVICES), on ports port0, port0 + 1, ... -> (processes, URLs). Each in
-    its own process group (Replicas.stop ends the replica and whatever it started) that, on Linux, gets SIGTERM when
-    the router dies. The replicas listen on 127.0.0.1 only (the router reaches them there; basal-serve's own default,
-    0.0.0.0, would let the network bypass the router) unless the arguments after -- give --host."""
+    """One basal-serve per GPU of --gpus (devices: indexes of the user's CUDA_VISIBLE_DEVICES when it is set), on
+    ports port0, port0 + 1, ... -> (processes, URLs). Each in its own process group (Replicas.stop ends the replica
+    and whatever it started) that, on Linux, gets SIGTERM when the router dies. The replicas listen on 127.0.0.1 only
+    (the router reaches them there; basal-serve's own default, 0.0.0.0, would let the network bypass the router)
+    unless the arguments after -- give --host."""
     procs, urls, pre = [], [], _death_signal()
     host = [] if any(x == "--host" or x.startswith("--host=") for x in serve_args) else ["--host", "127.0.0.1"]
-    for i, g in enumerate(gpus):
+    for i, dev in enumerate(devices(gpus, os.environ.get("CUDA_VISIBLE_DEVICES"))):
         port = port0 + i
-        mask = [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()]
-        dev = mask[int(g)] if mask and str(g).isdigit() and int(g) < len(mask) else str(g)  # --gpus indexes the user's mask
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=dev)
         procs.append(subprocess.Popen([*SERVE, "--port", str(port), *host, *serve_args], env=env,
                                       start_new_session=hasattr(os, "killpg"), preexec_fn=pre))
@@ -796,7 +819,8 @@ def main(argv=None):
     argv = argv[: argv.index("--")] if "--" in argv else argv
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--replicas", nargs="*", default=[], help="URLs of running basal-serve replicas")
-    ap.add_argument("--gpus", default=None, help="start one basal-serve per GPU, e.g. 0,1,2,3 (arguments after --)")
+    ap.add_argument("--gpus", default=None, help="start one basal-serve per GPU, e.g. 0,1,2,3 (arguments after --); "
+                    "with CUDA_VISIBLE_DEVICES set, indexes of the GPUs it lists")
     ap.add_argument("--replica-port", dest="replica_port", type=int, default=8001)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)

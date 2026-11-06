@@ -421,26 +421,56 @@ def test_spawned_replicas_listen_on_localhost_unless_given_a_host(monkeypatch, a
         assert given == [host] and argv[-len(args):] == args
 
 
-@pytest.mark.parametrize("mask, gpus, want", [
-    ("2,3", ["0", "1"], ["2", "3"]),  # --gpus indexes the GPUs the user left visible
-    (None, ["0", "1"], ["0", "1"]),
-    (None, ["GPU-abc"], ["GPU-abc"]),
-    ("2,3", ["5"], ["5"]),  # beyond the mask: the plain index
-])
-def test_replicas_start_on_the_gpus_of_the_users_cuda_mask(monkeypatch, mask, gpus, want):
-    seen = []
+@pytest.fixture(autouse=True)
+def _no_cuda_mask(monkeypatch):
+    """The tests that start replicas with --gpus 0,1 do not depend on the machine's own CUDA_VISIBLE_DEVICES (one GPU
+    of a GPU job would refuse the index 1)."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+
+def _spawned_masks(monkeypatch, mask, gpus, seen=None):
+    """The CUDA_VISIBLE_DEVICES of each replica R.spawn starts (appended to `seen`) under the user's mask."""
+    seen = [] if seen is None else seen
 
     class Popen:
         def __init__(self, argv, env=None, **_):
             seen.append(env["CUDA_VISIBLE_DEVICES"])
 
     monkeypatch.setattr(R.subprocess, "Popen", Popen)
-    if mask is None:
-        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    else:
+    if mask is not None:
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", mask)
     R.spawn(gpus, 9000, [])
-    assert seen == want
+    return seen
+
+
+@pytest.mark.parametrize("mask, gpus, want", [
+    ("2,3", ["0", "1"], ["2", "3"]),  # --gpus indexes the GPUs the user left visible
+    ("0,2,3", ["1", "2"], ["2", "3"]),
+    ("GPU-aa, GPU-bb", ["1"], ["GPU-bb"]),  # a mask of UUIDs
+    ("2,3", [" 1", "0 "], ["3", "2"]),  # --gpus "1, 0"
+    ("2,3", ["1", "1"], ["3", "3"]),  # two replicas on one GPU, as asked
+    (None, ["0", "1"], ["0", "1"]),  # no mask: the ids as given
+    (None, ["GPU-abc"], ["GPU-abc"]),
+])
+def test_replicas_start_on_the_gpus_of_the_users_cuda_mask(monkeypatch, mask, gpus, want):
+    assert _spawned_masks(monkeypatch, mask, gpus) == want
+
+
+@pytest.mark.parametrize("mask, gpus", [
+    ("0,2,3", ["2", "3"]),  # 3 read as a physical id put both replicas on GPU 3
+    ("2,3", ["5"]),  # past the mask
+    ("2,3", ["GPU-abc"]),  # a UUID is not an index of the mask
+    ("2,3", ["-1"]),
+    ("2,3", ["\u00b9"]),  # a superscript one: str.isdigit, but no index
+    ("", ["0"]),  # set but empty: no GPU visible
+    ("2,3", ["0", ""]),  # --gpus 0,
+    (None, ["0", ""]),
+])
+def test_gpus_that_are_no_index_of_the_users_cuda_mask_are_refused(monkeypatch, mask, gpus):
+    seen = []
+    with pytest.raises(SystemExit, match="--gpus"):
+        _spawned_masks(monkeypatch, mask, gpus, seen)
+    assert seen == []  # refused before any replica started
 
 
 @posix

@@ -283,6 +283,9 @@ benchmarking a GPU.
     ends when it stops (SIGTERM, SIGINT, SIGHUP, an error; SIGKILL after 30 s); on Linux a replica also gets
     SIGTERM when the router is killed. When every replica has exited, the router exits with status 1. They listen on
     127.0.0.1 only (the router reaches them there), unless the arguments after `--` give `--host`.
+  - **Your own `CUDA_VISIBLE_DEVICES`:** with it set, `--gpus` gives indexes of the GPUs it lists, as CUDA numbers
+    them: `CUDA_VISIBLE_DEVICES=2,3 basal-router --gpus 0,1` starts the replicas on GPUs 2 and 3. Anything else (an
+    index past the list, a GPU UUID) is refused; without it, `--gpus` takes the GPUs' own ids or UUIDs.
   - **One live page for all replicas** (`--ui on`, off by default): the router and every replica behind it on one page
     at the router's `/ui` ([Live web page](#live-web-page-25)).
 - **`GET /metrics`** (basal-serve and basal-router) is Prometheus text: engine version and model, requests waiting and
