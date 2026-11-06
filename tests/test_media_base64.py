@@ -29,7 +29,8 @@ def test_urlsafe_base64_without_its_padding_is_accepted(n):
 
 
 def test_a_broken_padding_is_still_refused():
+    # (not "QUJD=": a padding after a whole group is refused from Python 3.11 on but accepted by 3.10, as in 2.5.4)
     with pytest.raises(ValueError, match="not valid base64"):
-        media._raw("QUJD=", 0)
+        media._raw("QU=JD", 0)  # a padding inside the data
     with pytest.raises(ValueError, match="not valid base64"):
         media._raw("QUJDR", 0)  # 5 characters can never be base64
