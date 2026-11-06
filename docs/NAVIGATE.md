@@ -23,12 +23,13 @@ on these prompts. Check the quality on your own data.
    "label": "Passage", "list_title": "Passages", "top": 20}}}
 ```
 
-1. **Screening.** The candidates are numbered in a list (`Passage 7: <text>`, under a `[<group>]` line) and packed, in
-   their order, into requests of `chunk` candidates (default 50; a group stays in one request when it fits). Each
-   request's state is your state plus its list, and every candidate in it is one yes / no question, `{candidate}` in
-   the instructions naming it. A request reads its state once and judges its candidates side by side, which makes
-   their probabilities comparable; the paper found this gain levels off at about 50 candidates per request. All
-   requests go through the server's queue together, so they are batched.
+1. **Screening.** The candidates are numbered in a list (`Passage 7: <text>`, under a `[<group>]` line; the lines of a
+   text after its first are indented by two spaces, and a group name is put on one line, so neither can pass for an
+   entry) and packed, in their order, into requests of `chunk` candidates (default 50; a group stays in one request
+   when it fits). Each request's state is your state plus its list, and every candidate in it is one yes / no
+   question, `{candidate}` in the instructions naming it. A request reads its state once and judges its candidates
+   side by side, which makes their probabilities comparable; the paper found this gain levels off at about 50
+   candidates per request. All requests go through the server's queue together, so they are batched.
 2. **Final choice** (`top` >= 2, default 20): one choice question over the top candidates by P(yes), its options their
    names in the list. Its probabilities reorder them; the others keep their order. When one request held every
    candidate, the choice reads that request's state again: with `basal-serve --state-cache-gb N` the state is a cache
