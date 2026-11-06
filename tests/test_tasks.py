@@ -205,3 +205,12 @@ def test_task_language_from_state_then_instructions():
     assert none(tasks.expand({"state": "Kot śpi.", "questions": qs})[0]) == [pl, pl]
     assert none(tasks.expand({"state": "The cat sleeps.", "questions": qs})[0]) == [en, pl]
     assert none(tasks.expand({"state": "Kot śpi.", "questions": qs, "lang": "en"})[0]) == [en, en]
+
+
+@pytest.mark.parametrize("integer", [False, True])
+def test_a_number_too_large_for_a_float_is_no_value(integer):
+    """400 digits in an extract number / integer field are float inf, and int(inf) raised OverflowError: the request
+    got a 500. Such a number is no value, as text that is no number."""
+    from basal import tasks
+    assert tasks.parse_number("9" * 400, integer=integer) is None
+    assert tasks.parse_number("12 345", integer=integer) == 12345
