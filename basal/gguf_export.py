@@ -43,6 +43,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 ADDED_TOKEN_SCORE = -1000.0  # llama.cpp's converter scores the added tokens so; the -GGUF files keep it
@@ -140,7 +141,10 @@ def systemone_template(head, mid, tail, trims=False, specials=()):
     def text(v):
         return f"({v} if {v} is string else {v} | tojson)"
 
-    pl, codes = ", ".join(map(_lit, sorted(PL_CHARS))), ", ".join(map(_lit, CODES[:SYSTEMONE_MAX_OPTIONS]))
+    # the Polish letters, and their NFD spellings (a + U+0328 for "ą"; "ł" has none), which basal-serve normalises
+    # (prompt.lang_of) and a template cannot
+    nfd = sorted({unicodedata.normalize("NFD", c) for c in PL_CHARS} - PL_CHARS)
+    pl, codes = ", ".join(map(_lit, sorted(PL_CHARS) + nfd)), ", ".join(map(_lit, CODES[:SYSTEMONE_MAX_OPTIONS]))
     return "\n".join([
         "{#- basal prompt format 2 for llama.cpp's /v1/systemone, written by basal-export-gguf -#}",
         "{%- if options | length < 2 or options | length > " + str(SYSTEMONE_MAX_OPTIONS) + " -%}",
@@ -152,7 +156,7 @@ def systemone_template(head, mid, tail, trims=False, specials=()):
         # a request text cannot write a special token of the tokenizer (prompt.defang); Polish letters are not changed
         f"{{%- set s = {_fang('s', specials)} -%}}",
         f"{{%- set q = {_fang('q', specials)} -%}}",
-        # Polish when the state has a Polish letter, else when the question has one (basal-serve's rule)
+        # Polish when the state has a Polish letter (also in NFD), else when the question has one (basal-serve's rule)
         f"{{%- for c in [{pl}] -%}}{{%- if c in s -%}}{{%- set ns.pl = true -%}}{{%- endif -%}}{{%- endfor -%}}",
         "{%- if not ns.pl -%}",
         f"{{%- for c in [{pl}] -%}}{{%- if c in q -%}}{{%- set ns.pl = true -%}}{{%- endif -%}}{{%- endfor -%}}",
@@ -197,6 +201,11 @@ SYSTEMONE_PROBES = (
      {"type": "choice", "instructions": {"ask": "category"}, "criteria": {f"k{i}": None for i in range(26)}}),
     ('He said "stop" \\ and left.\n\nThen {{ nothing }} happened.',
      {"type": "choice", "instructions": "Who left?", "criteria": {"x": {"name": "X", "id": 7}, "y": "Y "}}),
+    # Polish in NFD, as macOS writes it ("o" + U+0301): in the state, then in the question only
+    (unicodedata.normalize("NFD", "Proszę o zwrot pieniędzy za zamówienie 1182."),
+     {"type": "noul", "instructions": "Is the customer asking for a refund?"}),
+    ("Order 1182: delivered on 3 May.",
+     {"type": "noul", "instructions": unicodedata.normalize("NFD", "Czy zamówienie jest już opóźnione?")}),
 )
 
 
