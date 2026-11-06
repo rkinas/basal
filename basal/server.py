@@ -28,6 +28,7 @@ branch over the state; the state is computed once per request. `act`, `multi` an
 """
 import argparse
 import asyncio
+import contextlib
 import functools
 import gc
 import hashlib
@@ -2488,6 +2489,26 @@ def error_body(e, error_format="basal"):
     return body, status
 
 
+CLIENT_GONE = ({"error": "client disconnected"}, 499)  # the answer to a request whose client left (nobody reads it)
+
+
+async def until_disconnect(request, coro, poll=0.25):
+    """The result of `coro` (the request's serve), or None when the HTTP client disconnects first. The serve task is
+    then cancelled, so the request's entries still in the queue are dropped before they reach the engine (ask cancels
+    their futures, the workers skip done futures); a batch already on the GPU finishes. Without it a client that timed
+    out left its request to run in full: 48 abandoned 6k-token requests kept the GPU busy for 74 s (#129)."""
+    task = asyncio.ensure_future(coro)
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=poll)
+        if done:
+            return task.result()
+        if await request.is_disconnected():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            return None
+
+
 def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     """The app of basal-serve: POST /v1/systemone and /v1/basal, POST /v1/decisions (OpenAI's Decisions API), GET
     /v1/models, /health and /metrics; mcp: (routes,
@@ -2520,7 +2541,10 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             counts["seconds"] += time.perf_counter() - t
             return failed(RequestError(f"the request body is not valid JSON: {e}"))
         try:
-            return JSONResponse(await srv.serve(body))
+            out = await until_disconnect(request, srv.serve(body))
+            if out is None:  # the client is gone: its queued work was dropped, no one reads an answer
+                return JSONResponse(*CLIENT_GONE)
+            return JSONResponse(out)
         except Exception as e:  # noqa: BLE001
             counts["failed"] += 1
             return failed(e)
@@ -2538,7 +2562,10 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
                 raise RequestError(f"the request body is not valid JSON: {e}") from None
             s1, specs = dec.to_systemone(body)
-            return JSONResponse(dec.to_decision(await srv.serve(s1), specs))
+            out = await until_disconnect(request, srv.serve(s1))
+            if out is None:  # the client is gone (as on /v1/systemone)
+                return JSONResponse(*CLIENT_GONE)
+            return JSONResponse(dec.to_decision(out, specs))
         except Exception as e:  # noqa: BLE001
             counts["failed"] += 1
             print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
