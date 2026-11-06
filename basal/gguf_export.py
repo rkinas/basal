@@ -342,6 +342,9 @@ def main(argv=None):
                     help="also write the decision metadata of llama.cpp's /v1/systemone (llama-server, LM Studio "
                          "0.4.26+): basal's prompt as a template and the calibrated temperatures; prompt-format-2 "
                          "models, at most 26 options per question")
+    ap.add_argument("--one-way", dest="one_way", action="store_true",
+                    help="export a two-way model (basal.json \"two_way\") for llama.cpp's one-way (causal) reading "
+                         "anyway: its answers then differ from basal-serve's")
     ap.add_argument("--calibration", default=None,
                     help="--systemone: the calibration file whose temperatures are written (default: the model's "
                          + ", else ".join(SYSTEMONE_CALIBRATIONS) + ")")
@@ -368,11 +371,22 @@ def main(argv=None):
                  '".[gguf-export]") or uv pip install "gguf>=0.19"')
     from huggingface_hub import snapshot_download
 
-    files = (MODEL_FILES if a.systemone else ["tokenizer.json"]) if a.gguf else None
+    files = (MODEL_FILES if a.systemone else ["tokenizer.json", "basal.json"]) if a.gguf else None
     model_dir = Path(a.model) if Path(a.model).exists() else Path(snapshot_download(
         a.model, revision=a.revision, allow_patterns=files))
     if not (model_dir / "tokenizer.json").is_file():
         ap.error(f"{a.model} has no tokenizer.json; pass the basal model the GGUF was converted from")
+    from .prompt import model_two_way
+    try:
+        two_way = model_two_way(model_dir)
+    except ValueError as e:
+        sys.exit(f"basal-export-gguf: {e}")
+    if two_way and not a.one_way:  # before the converter runs
+        sys.exit(f"basal-export-gguf: {a.model} is trained to read two ways (basal.json \"two_way\"), but llama.cpp "
+                 "reads a GGUF one way (causally), so its answers differ from basal-serve's (on a two-way model we "
+                 "measured, 61% of the top answers agreed). Pass --one-way to export it for that reading anyway.")
+    if a.one_way and not two_way:
+        ap.error("--one-way is for a two-way model (basal.json \"two_way\"); this one is read one way already")
     decision = cal = None
     if a.systemone:
         try:
@@ -395,6 +409,8 @@ def main(argv=None):
             sys.exit(f"basal-export-gguf: {e}")
         os.replace(part, out)
     print(f"wrote {out}: {ranked}/{total} token scores from BPE merges, add_space_prefix=false")
+    if two_way:
+        print("  read one way (--one-way): llama.cpp reads it causally, not two ways as basal-serve does")
     if decision:
         print(f"  decision model for /v1/systemone ({SYSTEMONE_TYPE}, at most {SYSTEMONE_MAX_OPTIONS} options), "
               f"temperatures from {cal.name}")
