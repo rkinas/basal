@@ -10,18 +10,23 @@ import pytest
 from starlette.requests import Request
 
 from basal import server
+from basal import think as T
 from tests.test_http_status import BODY, AppServer, Engine
 
 GONE = (499, {"error": "client disconnected"})  # the answer of a request whose client left
 
 
+IDLE = {"running": 0, "queued": 0}  # GET /health of a server with nothing in flight
+
+
 class CountingEngine(Engine):
     def __init__(self):
         super().__init__()
-        self.calls = 0
+        self.calls = self.groups = 0
 
     def run_shared(self, groups, policy=None):
         self.calls += 1
+        self.groups += len(groups)  # (one group per request: AppServer packs a request into one entry)
         return super().run_shared(groups, policy)
 
 
@@ -73,7 +78,9 @@ def run_abandoned(path, body):
                 gone.set()
                 status, out = await asyncio.wait_for(abandoned, 5)
                 engine.go.set()
-                return status, out, (await held).status_code
+                held = (await held).status_code
+                assert srv.load() == IDLE
+                return status, out, held
         finally:
             worker.cancel()
 
@@ -81,8 +88,9 @@ def run_abandoned(path, body):
     return status, out, held, engine.calls
 
 
-def test_a_request_abandoned_in_the_queue_never_reaches_the_engine():
-    status, out, held, calls = run_abandoned("/v1/systemone", BODY)
+@pytest.mark.parametrize("path", ["/v1/systemone", "/v1/basal"])
+def test_a_request_abandoned_in_the_queue_never_reaches_the_engine(path):
+    status, out, held, calls = run_abandoned(path, BODY)
     assert (status, out) == GONE
     assert held == 200
     assert calls == 1  # the held request only
@@ -96,6 +104,115 @@ def test_decisions_endpoint_drops_an_abandoned_request_too():
     assert (status, out) == GONE
     assert held == 200
     assert calls == 1
+
+
+async def until(cond, seconds=5):
+    for _ in range(int(seconds * 100)):
+        if cond():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out")
+
+
+def on_app(srv, fn):
+    """fn(app, httpx client) on http_app over srv with its batching worker -> its result."""
+    async def go():
+        worker = asyncio.get_running_loop().create_task(srv.worker())
+        try:
+            app = server.http_app(srv, "fast")
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://basal") as c:
+                return await fn(app, c)
+        finally:
+            worker.cancel()
+    return asyncio.run(go())
+
+
+def test_a_request_abandoned_while_its_batch_forms_never_reaches_the_engine():
+    """--wait-ms: the worker has taken the request from the queue and waits for more to join its call when the client
+    leaves. The call starts without it (forward skips done futures) and serves the request that joined after it."""
+    engine = CountingEngine()
+    srv = AppServer(engine)
+    srv.wait = 0.3
+
+    async def fn(app, c):
+        gone = asyncio.Event()
+        abandoned = asyncio.create_task(raw_post(app, "/v1/systemone", BODY, gone))
+        await until(lambda: srv.queued == 1 and srv.queue.empty())  # in the forming batch, not yet in a call
+        gone.set()
+        status, out = await asyncio.wait_for(abandoned, 5)
+        assert not engine.entered.is_set()  # (answered before the call started)
+        later = await c.post("/v1/systemone", json=BODY)  # joins the same batch
+        return status, out, later.status_code, srv.load()
+
+    status, out, later, load = on_app(srv, fn)
+    assert (status, out) == GONE
+    assert (later, load) == (200, IDLE)
+    assert (engine.calls, engine.groups) == (1, 1)  # the later request only
+
+
+def test_a_request_abandoned_on_the_gpu_answers_at_once_and_the_server_goes_on():
+    """The client leaves while its batch is on the engine: 499 without waiting for the engine, whose call finishes
+    (its answer for nobody); the next request is served and nothing stays counted in flight."""
+    engine = CountingEngine()
+    engine.go.clear()
+    srv = AppServer(engine)
+
+    async def fn(app, c):
+        gone = asyncio.Event()
+        abandoned = asyncio.create_task(raw_post(app, "/v1/systemone", BODY, gone))
+        await asyncio.get_running_loop().run_in_executor(None, engine.entered.wait, 5)
+        gone.set()
+        status, out = await asyncio.wait_for(abandoned, 5)  # the engine still holds its batch
+        engine.go.set()
+        later = await c.post("/v1/systemone", json=BODY)
+        return status, out, later.status_code, srv.load()
+
+    status, out, later, load = on_app(srv, fn)
+    assert (status, out) == GONE
+    assert (later, load) == (200, IDLE)
+    assert engine.calls == 2
+
+
+class Sidecar:
+    """The vLLM server of --think auto: its reasoning waits until it is cancelled (in basal-serve, httpx's request to
+    vLLM is cancelled with the serve, which closes its connection: vLLM then stops the generation)."""
+    max_len = 8192
+
+    def __init__(self):
+        self.reasoning, self.stopped = asyncio.Event(), False
+
+    async def reason(self, ids, max_tokens):
+        self.reasoning.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            self.stopped = True
+            raise
+
+
+class Thinking(T.ThinkServer, AppServer):
+    """ThinkServer.decide over the batching worker and the stub engine, with the stub sidecar."""
+
+    def __init__(self, engine):
+        AppServer.__init__(self, engine)
+        self.think, self.think_cal, self.think_cal_name, self.think_log = "auto", {}, "off", None
+        self.think_tokens, self.sidecar = 64, Sidecar()
+
+
+def test_a_think_request_abandoned_while_it_reasons_stops_the_reasoning():
+    srv = Thinking(CountingEngine())
+
+    async def fn(app, c):
+        gone = asyncio.Event()
+        abandoned = asyncio.create_task(raw_post(app, "/v1/systemone", dict(BODY, think="force"), gone))
+        await asyncio.wait_for(srv.sidecar.reasoning.wait(), 5)  # readout 1 done, the reasoning under way
+        gone.set()
+        status, out = await asyncio.wait_for(abandoned, 5)
+        return status, out, srv.sidecar.stopped, srv.load()
+
+    status, out, stopped, load = on_app(srv, fn)
+    assert (status, out) == GONE
+    assert (stopped, load) == (True, IDLE)
 
 
 def client(leave_after=None):
