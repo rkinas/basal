@@ -83,14 +83,17 @@ def fla_rule():
 
 
 def refused(quant=None, state_cache_gb=0, prefix=False, batches="default", lean=False, tree="dense",
-            readout_layer="off", template="off", device=True):
+            readout_layer="off", template="off", device=True, disk=False):
     """Why GDNGraphBackend cannot serve a Qwen3.5 model with these settings (None: it can), before anything is loaded.
     Only quantisation is refused: the state cache, the prefix cache, compact rows, template prefixes and the long lane
     run since 2.5 (their arguments stay for the callers). device: also check for a CUDA GPU and fla (the server checks
     the settings before the download, the engine both).
     --lean / --tree flex change nothing here, as for basal-omni's Gemma 4 forward: Qwen35Graph is lean already (one
     compiled function per layer kind, called with each layer's weights), and its pass 2 has no trie mask (one row per
-    leaf)."""
+    leaf). disk (--state-cache-dir): its cached states carry recurrent states, not the files' keys / values layout."""
+    if disk:
+        return ("--state-cache-dir is not available for Qwen3.5 (Gated DeltaNet) models: their cached states carry "
+                "recurrent states, not only attention keys and values; serve them without it")
     if quant:
         return (f"--mode {quant} is not available for Qwen3.5 (Gated DeltaNet) models: the CUDA graph engine serves "
                 "them in bf16 (--mode fast); --mode vllm runs their FP8 checkpoints")
@@ -678,17 +681,18 @@ class GDNGraphBackend(GraphBackend):
                  merge="auto", lean=False, tree="dense", state_cache_gb=0, prefix=False, batches="default",
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
-                 device=None, global_attn="flex", adapter=None):
+                 device=None, global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
+                 state_cache_signature=None):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
         # engine; quantisation is refused here. graph_memory_gb: the pass-2 graphs captured, _pin_memory). device:
-        # "mps" / "cpu" (GDNMPSBackend: no CUDA graphs, uncompiled)
+        # "mps" / "cpu" (GDNMPSBackend: no CUDA graphs, uncompiled). state_cache_dir ..: refused (refused(disk=))
         if compile == "layer":
             raise ValueError(f"{model_dir}: --compile-scope layer: the bf16 Llama forward only (Qwen3.5's compiled "
                              "code is per layer kind already)")
         if compile:
             persist_compile_cache()  # before anything compiles (GraphBackend.__init__)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template,
-                      device is None)  # before loading
+                      device is None, disk=state_cache_dir is not None)  # before loading
         if state_cache_bits != 16 and not why:
             why = "--state-cache-bits 8 is for attention keys and values; recurrent states are cached as computed"
         if global_attn != "flex" and not why:
