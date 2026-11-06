@@ -67,3 +67,31 @@ def test_exif_upside_down_is_applied():
 def test_no_exif_or_normal_orientation_is_unchanged(orientation):
     out = media._image(jpeg((40, 20), orientation), 0)
     assert out.size == (40, 20) and red(out.getpixel((2, 2)))
+
+
+def frames(fmt, n):
+    ims = [Image.new("RGB", (16, 16), c) for c in [(255, 0, 0), (0, 255, 0), (0, 0, 255)][:n]]
+    b = io.BytesIO()
+    ims[0].save(b, fmt, save_all=True, append_images=ims[1:], duration=100, loop=0)
+    return b.getvalue()
+
+
+@pytest.mark.parametrize("fmt", ["GIF", "TIFF", "PNG", "WEBP"])
+def test_an_animated_or_multi_page_image_is_refused(fmt):
+    with pytest.raises(ValueError, match="frame"):
+        media._image(frames(fmt, 3), 0)
+
+
+@pytest.mark.parametrize("fmt", ["GIF", "TIFF", "PNG"])
+def test_a_single_frame_image_is_accepted(fmt):
+    assert media._image(frames(fmt, 1), 0).size == (16, 16)
+
+
+def test_a_phone_photo_stored_as_mpo_is_accepted_as_its_first_frame():
+    """MPO (Ultra HDR gain map, depth map, burst) keeps several frames in one JPEG file; frame 0 is the photo."""
+    a, b = Image.new("RGB", (16, 16), (200, 0, 0)), Image.new("RGB", (8, 8), (0, 0, 200))
+    buf = io.BytesIO()
+    a.save(buf, "MPO", save_all=True, append_images=[b])
+    assert Image.open(io.BytesIO(buf.getvalue())).n_frames == 2  # the file really has two frames
+    im = media._image(buf.getvalue(), 0)
+    assert im.size == (16, 16) and im.getpixel((0, 0))[0] > 150
