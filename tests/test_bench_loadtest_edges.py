@@ -1,5 +1,6 @@
 """Edges of basal-agree, basal-bench and basal-loadtest: golds that are no option index, determinism under load."""
 import argparse
+import asyncio
 import contextlib
 import io
 import json
@@ -134,3 +135,19 @@ def test_determinism_warns_when_the_mixed_pass_repeats_the_probe(fake_http, monk
     with contextlib.redirect_stderr(err):
         lt.main()
     assert not seen["same"] or "distinct" in err.getvalue()
+
+
+def determinism_report(capsys, answers_for):
+    Client.count, Client.hook = 0, staticmethod(answers_for)
+    body = lt.body(dict(state="s", question="q", options=["a", "b"]))
+    asyncio.run(lt.determinism(ns(determinism=4, concurrency=2), [body] * 8))
+    return json.loads(capsys.readouterr().out)["determinism"]
+
+
+def test_an_answer_that_vanishes_under_load_is_not_identical(fake_http, capsys):
+    # the first 4 calls are the sequential "alone" pass, the rest run under load and lose an answer
+    assert determinism_report(capsys, lambda c: Reply(2 if c <= 4 else 1))["identical"] < 4
+
+
+def test_equal_answers_are_identical(fake_http, capsys):
+    assert determinism_report(capsys, lambda c: Reply(2))["identical"] == 4
