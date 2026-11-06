@@ -1442,7 +1442,8 @@ def refit(a, targets, reference, reference_name):
         if not isinstance(row, dict):
             raise SystemExit(f"{a.input}: line {i} is not a row written by basal-calibrate --save-rows")
         rows.append(row)
-    small = sample_size(rows, [], targets)
+    usable = [r for r in rows if not row_problem(r)]  # what fit() keeps (it reports the others): the counts below
+    small = sample_size(usable, [], targets)
     for w in small:
         print(f"warning: {w}", file=sys.stderr)
     base_file = None if a.no_calibration else (
@@ -1457,10 +1458,10 @@ def refit(a, targets, reference, reference_name):
                       a.min_blend, a.conformal)
     cal["gates"]["ece_reference"] = reference_name
     cal["engine"] = engine_name(head["kind"], head["quant"], head.get("vllm_preset"))
-    cal["fitted_on"] = dict(data=head["data"], decisions=sum(r["prim"] != "multi" for r in rows),
+    cal["fitted_on"] = dict(data=head["data"], decisions=sum(r["prim"] != "multi" for r in usable),
                             requests=head["requests"], fit=report["n_fit"], cert=report["n_cert"],
                             per_type={t: r["n"] for t, r in report["types"].items()},
-                            multi=sum(r["prim"] == "multi" for r in rows), date=datetime.date.today().isoformat(),
+                            multi=sum(r["prim"] == "multi" for r in usable), date=datetime.date.today().isoformat(),
                             model=head["model"], engine=head["engine"], orders=head["orders"],
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__} (--from-rows)")
     cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision") if head.get(k) is not None})
@@ -1647,11 +1648,12 @@ def main(argv=None):
             for x in [head] + rows:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")
     cal["engine"] = engine_name(kind, quant, preset)
-    cal["fitted_on"] = dict(data=Path(a.input).name, decisions=sum(r["prim"] != "multi" for r in rows),
+    usable = [r for r in rows if not row_problem(r)]  # what fit() kept (a NaN readout is left out and reported)
+    cal["fitted_on"] = dict(data=Path(a.input).name, decisions=sum(r["prim"] != "multi" for r in usable),
                             requests=len(bodies) - len(failed),
                             fit=report["n_fit"] if report else 0, cert=report["n_cert"] if report else 0,
                             per_type={t: r["n"] for t, r in report["types"].items()} if report else {},
-                            multi=sum(r["prim"] == "multi" for r in rows),
+                            multi=sum(r["prim"] == "multi" for r in usable),
                             date=datetime.date.today().isoformat(), model=model, engine=engine,
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__}")
     if revision:
