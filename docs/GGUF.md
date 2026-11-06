@@ -127,9 +127,14 @@ hf download Remek/basal-2.0-4.5B --local-dir basal-2.0-4.5B
 llama-quantize basal-2.0-4.5B-F16.gguf basal-2.0-4.5B-Q5_K_M.gguf Q5_K_M
 ```
 
+A model trained to read two ways (basal.json `"two_way"`) is refused. llama.cpp reads a GGUF one way (causally), so
+its answers differ from `basal-serve`'s: on a two-way model we measured, 61% of the top answers agreed. `--one-way`
+exports it for that reading anyway.
+
 `--gguf` fixes an existing file instead of converting the model: a stock conversion, a `llama-quantize` output, or
 the basal-1.0 files of [Files](#files), which carry the stock tokenizer. The model then only supplies
-`tokenizer.json`, downloaded without the weights; `--llama-cpp` is not needed and the output must be a new file:
+`tokenizer.json` and `basal.json`, downloaded without the weights; `--llama-cpp` is not needed and the output must be
+a new file:
 
 ```bash
 ~/gguf-env/bin/basal-export-gguf Remek/basal-1.0-4.5B fixed/basal-1.0-4.5B-F16.gguf --gguf basal-1.0-4.5B-F16.gguf

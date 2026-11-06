@@ -99,12 +99,37 @@ def test_cli_repairs_an_existing_gguf_without_the_converter(tmp_path, monkeypatc
     assert gguf.GGUFReader(out).fields["tokenizer.ggml.scores"].contents() == [-1000, 0, 0, -1, -2]
 
 
-def test_cli_repair_downloads_only_the_tokenizer(tmp_path, monkeypatch):
+def test_cli_repair_downloads_only_the_tokenizer_and_basal_json(tmp_path, monkeypatch):
     raw = write_model(tmp_path)
     calls = []
     monkeypatch.setattr("huggingface_hub.snapshot_download", lambda r, **kw: calls.append((r, kw)) or str(tmp_path))
     main(["Remek/never-downloaded-GGUF", str(tmp_path / "fixed.gguf"), "--gguf", str(raw), "--revision", "v1"])
-    assert calls == [("Remek/never-downloaded-GGUF", {"revision": "v1", "allow_patterns": ["tokenizer.json"]})]
+    assert calls == [("Remek/never-downloaded-GGUF",
+                      {"revision": "v1", "allow_patterns": ["tokenizer.json", "basal.json"]})]  # basal.json: two_way
+
+
+@pytest.mark.parametrize("two_way", [True, {"max_prompt": 2048}])
+def test_cli_refuses_a_two_way_model_unless_one_way(tmp_path, monkeypatch, capsys, two_way):
+    """llama.cpp reads a GGUF one way (causally): a model trained to read two ways then answers otherwise than in
+    basal-serve, so the export needs --one-way, the reading it will get. No file has attention.causal = false (Gemma 4
+    in stock llama.cpp then reads SWA only, further off still)."""
+    raw = write_model(tmp_path)
+    (tmp_path / "basal.json").write_text(json.dumps({"two_way": two_way}), encoding="utf-8")
+    monkeypatch.setattr("basal.gguf_export.subprocess.run", lambda *a, **k: pytest.fail("converter run"))
+    out = tmp_path / "fixed.gguf"
+    with pytest.raises(SystemExit) as e:
+        main([str(tmp_path), str(out), "--gguf", str(raw)])
+    assert "two ways" in str(e.value.code) and "--one-way" in str(e.value.code) and not out.exists()
+    main([str(tmp_path), str(out), "--gguf", str(raw), "--one-way"])
+    assert out.is_file() and not [k for k in gguf.GGUFReader(out).fields if k.endswith(".attention.causal")]
+    assert "read one way" in capsys.readouterr().out
+
+
+def test_cli_one_way_is_only_for_a_two_way_model(tmp_path, capsys):
+    raw = write_model(tmp_path)
+    with pytest.raises(SystemExit):
+        main([str(tmp_path), str(tmp_path / "x.gguf"), "--gguf", str(raw), "--one-way"])
+    assert "--one-way is for a two-way model" in capsys.readouterr().err
 
 
 def test_cli_rejects_a_model_without_tokenizer(tmp_path, monkeypatch, capsys):
