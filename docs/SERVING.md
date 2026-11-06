@@ -33,7 +33,13 @@ benchmarking a GPU.
   (2.3.2 refused them): the graph engine keeps each request state's recurrent state beside its keys and values and
   continues every question from it (one row per question and option order in the branch pass), with fla
   (flash-linear-attention) for the Gated DeltaNet layers. Without `--mode` they run `fast` on Hopper (H100, the GPU
-  class the port was gated on) when fla is installed, `eager` elsewhere. `--state-cache-gb` (2.5) keeps a request's
+  class the port was gated on) when fla is installed, `eager` elsewhere. fla picks each kernel's launch config by
+  timing, and a different pick rounds differently: on the H100 80 GB and the RTX PRO 6000 Blackwell `fast` and
+  `eager` take configs recorded on that GPU instead (the ready line says `fla configs pinned`), so every start gives
+  the same answers. On another GPU the first start times them (`fla configs timed`) and keeps its picks in
+  `~/.cache/basal/fla/`; later starts take those (`fla configs kept`) and answer as the first start did, while a start
+  with another home directory, or after that file is deleted, times them again and can answer a little differently
+  (`BASAL_FLA_PIN=0`: fla's own timing at every start). `--state-cache-gb` (2.5) keeps a request's
   state as a full-state checkpoint: the attention layers' keys and values and each Gated DeltaNet layer's recurrent
   state and convolution tail after the state; the same state again runs only its questions. A state that begins with
   a whole cached one (a growing agent trace) continues it from there; one that differs inside the cached tokens runs
