@@ -1771,6 +1771,8 @@ class Server:
                     cut = live[i][4] if len(live[i]) > 4 else None
                     groups.append((live[i][0], live[i][1]) + ((cut,) if cut else ()))
                 out = await loop.run_in_executor(None, functools.partial(backend.run_shared, groups, pol, **kw))
+                if len(out) != len(ix):  # a short result must not leave requests waiting (zip would drop them)
+                    raise RuntimeError(f"the engine returned {len(out)} results for {len(ix)} groups")
                 for i, o in zip(ix, out):
                     _answer(live[i][2], o)
         except Exception as e:  # noqa: BLE001
