@@ -212,3 +212,36 @@ def test_a_template_without_special_tokens_is_the_same_as_before_for_plain_reque
     t = G.systemone_template(*G.chat_frame(tok))
     q = {"type": "noul", "instructions": "Czy dotarło?"}
     assert G.render_systemone(t, "Zamówienie dotarło.\n\nTak.", q) == basal_prompt(tok, "Zamówienie dotarło.\n\nTak.", q)
+
+
+
+def nfd_case(state, question, lang):
+    """basal-serve's prompt for a noul question, and the template's, with the state and question in NFD."""
+    import unicodedata
+
+    from basal.prompt import render
+    from basal.server import to_items
+    state, question = unicodedata.normalize("NFD", state), unicodedata.normalize("NFD", question)
+    q, tok = {"type": "noul", "instructions": question}, Tok()
+    item = to_items(state, {"q": q}, max_opts=G.SYSTEMONE_MAX_OPTIONS)[0]
+    assert item["lang"] == lang
+    return render(tok, item["state"], item["question"], item["options"], item["lang"], fmt=2), \
+        G.render_systemone(template(tok), state, q)
+
+
+@pytest.mark.parametrize("state,question", [
+    ("Proszę o zwrot pieniędzy za zamówienie 1182.", "Is the customer asking for a refund?"),  # ę, ó in the state
+    ("Order 1182: delivered on 3 May.", "Czy zamówienie jest już opóźnione?"),  # ó, ż in the question only
+    ("ŻANETA ŚWIĘCKA, Kraków", "Who is it?"),  # capitals
+    ("Ćma i źdźbło", "?"),  # ć, ź (ł is not decomposed, but ć comes first)
+])
+def test_polish_written_in_nfd_gets_the_polish_prompt_as_in_basal_serve(state, question):
+    """Text in NFD (as macOS writes it: "o" + U+0301 for "ó") is Polish to basal-serve (prompt.lang_of normalises it),
+    so the template reads the decomposed letters too. None of these texts has an "ł", which has no decomposition."""
+    want, got = nfd_case(state.replace("ł", "l"), question, "pl")
+    assert got == want
+
+
+def test_an_acute_on_a_letter_polish_does_not_have_stays_english():
+    want, got = nfd_case("Café crème, déjà vu.", "Is it French?", "en")  # e + U+0301 is no Polish letter
+    assert got == want
