@@ -2403,7 +2403,7 @@ def parser():
                                       "questions together (HTTP 422 above; every 50 take one engine request through "
                                       "the shared queue). Default %(default)s")
     ap.add_argument("--api-keys", default=None, metavar="PATH",
-                    help="JSON API key file; when set, require a key for every endpoint except GET /health")
+                    help="JSON API key file; when set, require a key for every endpoint except GET and HEAD /health")
     ap.add_argument("--cors-origins", default="", help="comma-separated browser origins allowed by CORS")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
@@ -2629,7 +2629,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
 
     routes = [Route("/v1/systemone", systemone, methods=["POST"]), Route("/v1/basal", systemone, methods=["POST"]),
               Route("/v1/decisions", decisions, methods=["POST"]), Route("/v1/models", models),
-              Route("/health", health), Route("/metrics", metrics), *mcp_routes]
+              Route("/health", health), Route("/health/", health), Route("/metrics", metrics), *mcp_routes]
     return Starlette(routes=ui.routes(routes, counts) if ui is not None else routes, lifespan=lifespan)
 
 

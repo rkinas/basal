@@ -33,3 +33,9 @@ def test_a_valid_bearer_is_accepted_when_a_stale_x_api_key_header_is_also_sent(t
     assert status(tmp_path, "POST", "/v1/systemone", {"x-api-key": "stale", "authorization": "Bearer good"}) == 200
     assert status(tmp_path, "POST", "/v1/systemone", {"x-api-key": "stale"}) == 401
     assert status(tmp_path, "POST", "/v1/systemone", {"authorization": "Bearer good"}) == 200
+
+
+def test_a_load_balancer_probe_of_health_is_open(tmp_path):
+    for method, path in (("GET", "/health"), ("HEAD", "/health"), ("HEAD", "/health/")):
+        assert status(tmp_path, method, path, {}) == 200
+    assert status(tmp_path, "POST", "/v1/systemone", {}) == 401

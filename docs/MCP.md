@@ -42,6 +42,6 @@ path of `basal-mcp` in your environment):
 ```
 
 The HTTP and MCP endpoints are open by default. To protect them with `basal-serve --api-keys PATH`, pass the same key
-to the stdio bridge as `basal-mcp --api-key KEY`; `GET /health` remains open. Bind `--host 127.0.0.1` for agents on the
+to the stdio bridge as `basal-mcp --api-key KEY`; `GET /health` remains open (as do `HEAD /health` and `/health/`, for a load balancer's probe). Bind `--host 127.0.0.1` for agents on the
 same machine (the Host and Origin headers are then checked against DNS rebinding), or use the key file for remote
 access.

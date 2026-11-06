@@ -76,7 +76,7 @@ def protect(app, keys, cors_origins=()):
             await app(scope, receive, send)
             return
         path, method = scope["path"], scope["method"]
-        open_health = path == "/health" and method == "GET"
+        open_health = path in ("/health", "/health/") and method in ("GET", "HEAD")
         record = None
         if not open_health and keys is not None:
             headers = dict(scope.get("headers", ()))
