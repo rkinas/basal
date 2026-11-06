@@ -365,6 +365,7 @@ def main():
               f"{r.get('agree', float('nan')):>8.3f}{r.get('acc', float('nan')):>7.3f}"
               f"{float('nan') if r['mem_gb'] is None else r['mem_gb']:>6.1f}")
     if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(rows, indent=1, allow_nan=False), encoding="utf-8")
 
 
