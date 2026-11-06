@@ -1,6 +1,9 @@
 """basal-serve's start-up checks: the temperatures of a calibration file, a missing --api-keys file."""
+import sys
+
 import pytest
 
+from basal import server as S
 from basal.server import check_calibration
 
 
@@ -37,3 +40,16 @@ def test_the_question_types_of_a_request_are_the_ones_whose_temperatures_are_che
 @pytest.mark.parametrize("key", ["choice", "nobody_asks"])
 def test_a_bad_bucket_name_is_refused_under_any_key(key):
     assert refused({"prompt": 1, "temperature_per_bucket": {key: {"x": 1.0}}})
+
+
+def test_a_missing_api_keys_file_is_warned_about_at_start_up(monkeypatch, tmp_path, capsys):
+    def stop(*args):
+        raise SystemExit("stop after the warning")
+    monkeypatch.setattr(S, "exit_on_sigterm", lambda: None)  # no SIGTERM handler in the test process
+    monkeypatch.setattr(S, "refuse_lean_flex", stop)
+    monkeypatch.setattr(sys, "argv", ["basal-serve", "--api-keys", str(tmp_path / "keys.json")])
+    try:
+        S.main()
+    except SystemExit:
+        pass
+    assert "no such file" in capsys.readouterr().err
