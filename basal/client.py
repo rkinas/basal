@@ -65,6 +65,21 @@ def _error(r):
     return cls(r.status_code, message)
 
 
+def _json(r):
+    """The JSON of a 200 reply; a body that is not JSON (a proxy's HTML page) is a ServerError, as every other failure."""
+    try:
+        return r.json()
+    except ValueError:
+        raise ServerError(r.status_code, f"the reply is not JSON: {r.text[:200]!r}") from None
+
+
+def _answers(reply):
+    answers = reply.get("answers") if isinstance(reply, dict) else None
+    if not isinstance(answers, dict):
+        raise ServerError(200, f"the reply has no answers: {str(reply)[:200]!r}")
+    return answers
+
+
 # Questions, for decide with several of them; the keyword options are the question's own fields (API.md, TASKS.md).
 
 def choice(question, criteria, **opts):
@@ -194,7 +209,7 @@ class Basal(_Client):
         for attempt in range(self.retries + 1):
             r = self.http.request(method, url, **kw)
             if r.status_code == 200:
-                return r.json()
+                return _json(r)
             e = _error(r)
             if not isinstance(e, OutOfMemory) or attempt == self.retries:
                 raise e
@@ -206,7 +221,7 @@ class Basal(_Client):
 
     def decide(self, state, questions, **fields):
         """{name: answer} for {name: question}; fields: request fields (facts, lang, think, media, ...)."""
-        return {k: complete(a) for k, a in self.request(self._body(state, questions, fields))["answers"].items()}
+        return {k: complete(a) for k, a in _answers(self.request(self._body(state, questions, fields))).items()}
 
     def _one(self, state, q):
         return self.decide(state, {"q": q})["q"]
@@ -262,7 +277,7 @@ class AsyncBasal(_Client):
         for attempt in range(self.retries + 1):
             r = await self.http.request(method, url, **kw)
             if r.status_code == 200:
-                return r.json()
+                return _json(r)
             e = _error(r)
             if not isinstance(e, OutOfMemory) or attempt == self.retries:
                 raise e
@@ -272,7 +287,7 @@ class AsyncBasal(_Client):
         return await self._send("POST", self.url, json=body)
 
     async def decide(self, state, questions, **fields):
-        answers = (await self.request(self._body(state, questions, fields)))["answers"]
+        answers = _answers(await self.request(self._body(state, questions, fields)))
         return {k: complete(a) for k, a in answers.items()}
 
     async def _one(self, state, q):
