@@ -117,6 +117,7 @@ class EagerBackend:
     media_lock = threading.Lock()
     g4 = None  # basal/gemma4.py: the own Gemma 4 forward (shared prefixes, answer rows), None = the transformers forward
     sdpa_kernels = None  # eager_sdpa_kernels: the SDPA kernels of the transformers forward (None: every enabled one)
+    fla_configs = None  # Qwen3.5 on CUDA: fla's kernel configs "pinned" or "timed" (gdn_graph.eager_fla_configs)
 
     def __init__(self, model_dir, dtype="bfloat16", device=None, media=False, forward=None, ple_offload=False,
                  attn="math", adapter=None):
@@ -154,6 +155,10 @@ class EagerBackend:
             # every new prompt length (H100, torch 2.11: 573 ms for a new length, 20 ms for a repeated one), so
             # a Qwen3 model and basal-2.0 in eager paid ~0.45 s a request
             torch.backends.cuda.enable_cudnn_sdp(False)
+            # a Qwen3.5 model: fla's kernel configs pinned as in --mode fast (timed at every start, the starts' answers
+            # differed: basal-omni-pico on an RTX PRO 6000 Blackwell, 12 of 36 answers identical between two starts)
+            from .gdn_graph import eager_fla_configs
+            self.fla_configs = eager_fla_configs(model_dir)
         from .gemma4 import is_gemma4
         if is_gemma4(self.model):
             # Gemma 4 (basal-omni): SDPA's memory-efficient kernel returned wrong attention on real activations (omni

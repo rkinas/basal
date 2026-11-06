@@ -2704,9 +2704,10 @@ def main():
     rows = getattr(srv.backend, "compact_kernel", None)  # compact rows: their kernel, and the template prefix with them
     fwd = getattr(srv.backend, "forward", None)  # MLX: basal's forward (what it merged) or mlx-lm's
     conv = getattr(srv.backend, "conv_kernel", None)  # Qwen3.5: the Gated DeltaNet convolution's kernel
+    fla = getattr(srv.backend, "fla_configs", None)  # Qwen3.5 on CUDA: fla's kernel configs pinned or timed
     info = (f" attention {attn}" if attn else "") + (f" compact rows {rows}" if rows else "") \
         + (" template prefix" if rows and getattr(srv.backend, "template", None) else "") \
-        + (f" convolution {conv}" if conv else "") \
+        + (f" convolution {conv}" if conv else "") + (f" fla configs {fla}" if fla else "") \
         + (f" forward {fwd}" if isinstance(fwd, str) else "") \
         + (" compute bfloat16" if getattr(srv.backend, "compute", None) == "bfloat16" else "") \
         + (f" adapter {srv.adapter.name} ({srv.backend.adapter_modules} layers)" if srv.adapter else "") \

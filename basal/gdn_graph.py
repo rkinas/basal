@@ -34,6 +34,7 @@ import functools
 import inspect
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -254,11 +255,15 @@ def _varlen_sdpa(q, k, v, cu, scale, layer=0, impl=None):
 
 # fla's Triton kernels pick their launch config by timing the candidates at the first launch of every shape key
 # (triton.autotune), so two starts of the server could pick different configs, round differently and give different
-# probabilities (and a new shape stalled a request while it was timed). FLA_CONFIGS holds the configs an H100 picked for
-# the keys basal's pass shapes use (fla_record): with it every recorded fla kernel takes the recorded config of its
-# key, and its most common one for any other key, without timing (a kernel not in the table autotunes as before). Only
-# on the GPU and fla version it was recorded with.
+# probabilities (and a new shape stalled a request while it was timed). FLA_CONFIGS holds, per GPU, the configs that GPU
+# picked for the keys basal's pass shapes use (fla_record; the H100 80 GB and the RTX PRO 6000 Blackwell): with its
+# GPU's table every recorded fla kernel takes the recorded config of its key, and its most common one for any other
+# key, without timing (a kernel not in the table autotunes as before). Only on the GPU and fla version a table was
+# recorded with; on any other GPU the first start times them and keeps its picks for the next starts (fla_pin).
+# (On the RTX PRO 6000 Blackwell the three configs of chunk_fwd_kernel_o timed within 0.4% of each other, and its BK
+# 64 and 128 give other probabilities: before its table, pico's cold starts there landed in one of three answer sets.)
 FLA_CONFIGS = Path(__file__).parent / "fla_configs.json"
+FLA_PINNED = None  # what fla_pin did in this process: "pinned" (a recorded table), "kept" (an earlier start's), "timed"
 
 
 def _fla_autotuners():
@@ -287,20 +292,26 @@ def _config_dict(c):
                 maxnreg=c.maxnreg)
 
 
-def fla_record(path):
-    """Write the configs fla's autotuners picked so far (after a warm-up of every pass shape) as FLA_CONFIGS."""
+def _table(tuners):
+    """The configs these autotuners picked so far, as one table of this GPU (the format fla_record writes)."""
     import fla
     from collections import Counter
     kernels = {}
-    for name, t in sorted(_fla_autotuners().items()):
+    for name, t in sorted(tuners.items()):
         # (a key value JSON cannot hold is written as its str: that key then gets the kernel's default when pinned)
         entries = [json.loads(json.dumps([list(k), _config_dict(c)], default=str)) for k, c in t.cache.items()]
         if entries:
             common = Counter(json.dumps(c, sort_keys=True) for _, c in entries).most_common(1)[0][0]
             kernels[name] = dict(default=json.loads(common), keys=entries)
-    Path(path).write_text(json.dumps(dict(gpu=torch.cuda.get_device_name(), fla=fla.__version__, kernels=kernels),
-                                     indent=1, sort_keys=True), encoding="utf-8")
-    return len(kernels)
+    return dict(gpu=torch.cuda.get_device_name(), fla=fla.__version__, kernels=kernels)
+
+
+def fla_record(path):
+    """Write the configs fla's autotuners picked so far (after a warm-up of every pass shape) as one table of this GPU
+    (FLA_CONFIGS lists one per GPU; a prepared directory holds one)."""
+    table = _table(_fla_autotuners())
+    Path(path).write_text(json.dumps(table, indent=1, sort_keys=True), encoding="utf-8")
+    return len(table["kernels"])
 
 
 class _PinnedCache(dict):
@@ -317,30 +328,99 @@ class _PinnedCache(dict):
         return self.default
 
 
-def fla_pin(path=None):
-    """Give fla's autotuners the recorded configs (see FLA_CONFIGS; a prepared start-up's own table replaces it,
-    prepared.load) -> the number of kernels pinned, 0 when the table is for another GPU or fla version (they autotune
-    as before), or missing. Only the kernels in the table are pinned: a kernel the recording never launched has no
-    measured config (its first candidate may not even fit the GPU), so it autotunes as without a table.
-    BASAL_FLA_PIN=0 turns it off."""
-    path = path or FLA_CONFIGS
-    if os.environ.get("BASAL_FLA_PIN", "1") != "1" or not Path(path).exists() or not torch.cuda.is_available():
-        return 0
+def fla_tables(path):
+    """The tables of an fla configs file: one table (fla_record's; a prepared directory's) or a list of them, one per
+    GPU (the shipped FLA_CONFIGS)."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return data if isinstance(data, list) else [data]
+
+
+def kept_fla_configs():
+    """Where a GPU without a recorded table keeps its first start's fla picks: ~/.cache/basal/fla/<GPU>-<fla>.json
+    (None without a home directory)."""
     import fla
-    from triton.runtime.autotuner import Config
-    table = json.loads(Path(path).read_text(encoding="utf-8"))
-    if table.get("gpu") != torch.cuda.get_device_name() or table.get("fla") != fla.__version__:
+    try:
+        home = Path.home()
+    except (RuntimeError, KeyError):  # no home directory (RuntimeError), no account (KeyError)
+        return None
+    gpu = re.sub(r"[^0-9A-Za-z]+", "_", torch.cuda.get_device_name()).strip("_")
+    return home / ".cache" / "basal" / "fla" / f"{gpu}-{fla.__version__}.json"
+
+
+def _keep(tuner, tuners, path):
+    """After tuner times a new key, write every autotuner's picks to path (a temporary file renamed over it: never a
+    half-written table), so the next start takes them (fla_pin). A failed write leaves the start as it is."""
+    run = tuner.run
+
+    def kept(*args, **kwargs):
+        n = len(tuner.cache)
+        out = run(*args, **kwargs)
+        if len(tuner.cache) != n:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                tmp.write_text(json.dumps(_table(tuners), indent=1, sort_keys=True), encoding="utf-8")
+                os.replace(tmp, path)
+            except OSError:
+                pass
+        return out
+    tuner.run = kept
+
+
+def _this_gpu(tables):
+    """The table of this GPU and fla version among tables, None if there is none."""
+    import fla
+    gpu = torch.cuda.get_device_name()
+    return next((t for t in tables if t.get("gpu") == gpu and t.get("fla") == fla.__version__), None)
+
+
+def fla_pin(path=None):
+    """Give fla's autotuners the recorded configs of this GPU (see FLA_CONFIGS; a prepared start-up's own table replaces
+    it, prepared.load) -> the number of kernels pinned (FLA_PINNED says from where). Only the kernels in the table are
+    pinned: a kernel the recording never launched has no measured config (its first candidate may not even fit the
+    GPU), so it autotunes as without a table. A GPU without a recorded table takes the picks an earlier start on this
+    machine kept (kept_fla_configs); the kernels still timed keep theirs there for the next start, so a restart answers
+    as the first start did (they were timed anew at every start: another restart could round differently). Triton's
+    own autotune cache cannot do this: its directory follows TRITON_CACHE_DIR, which Inductor sets only in a start
+    that compiles, so the first restart looked elsewhere and timed again. BASAL_FLA_PIN=0 turns it all off."""
+    global FLA_PINNED
+    path = path or FLA_CONFIGS
+    if os.environ.get("BASAL_FLA_PIN", "1") != "1" or not torch.cuda.is_available():
         return 0
+    from triton.runtime.autotuner import Config
+    table = _this_gpu(fla_tables(path)) if Path(path).exists() else None
+    keep = None
+    if table is None:
+        keep = kept_fla_configs()
+        if keep is not None and keep.exists():
+            try:
+                table = _this_gpu(fla_tables(keep))
+            except (OSError, ValueError):  # a broken file: timed again, and written anew
+                table = None
     n = 0
     def cfg(d):
         return Config(d["kwargs"], num_warps=d["num_warps"], num_stages=d["num_stages"], num_ctas=d["num_ctas"],
                       maxnreg=d["maxnreg"])
-    for name, t in _fla_autotuners().items():
-        e = table["kernels"].get(name)
+    tuners = _fla_autotuners()
+    for name, t in tuners.items():
+        e = (table or {}).get("kernels", {}).get(name)
         if e is not None:
             t.cache = _PinnedCache({tuple(k): cfg(c) for k, c in e["keys"]}, cfg(e["default"]))
             n += 1
+        elif keep is not None:
+            _keep(t, tuners, keep)
+    FLA_PINNED = "timed" if not n else "kept" if keep is not None else "pinned"
     return n
+
+
+def eager_fla_configs(model_dir):
+    """--mode eager on CUDA: transformers runs a Qwen3.5 model's Gated DeltaNet layers on fla's kernels when fla is
+    installed, timed at their first launch as in the graph engine, so they get the same pinning (fla_pin) -> what it
+    did (FLA_PINNED: the start-up line), None for any other model or without fla."""
+    if not is_gdn(model_dir) or fla_rule() is None:
+        return None
+    fla_pin()
+    return FLA_PINNED
 
 
 def _gdn_out(h, o, z, gw, out_w, eps):
@@ -729,6 +809,9 @@ class GDNGraphBackend(GraphBackend):
         self.net = Qwen35Graph(self.model, compile=compile and cuda)
         self.conv_kernel = self.net.conv_kernel  # (reported at start-up)
         self.fla_pinned = fla_pin() if cuda else 0  # (after Qwen35Graph imported fla's kernels)
+        # (reported at start-up: pinned = this GPU's recorded configs, kept = an earlier start's, nothing timed either
+        # way; timed = at their first launch, and kept for the next start)
+        self.fla_configs = FLA_PINNED if cuda else None
         self.fwd, self.fwd_sfx = self.net.forward, self.net.forward_suffix
         if self.compact:
             if cuda:

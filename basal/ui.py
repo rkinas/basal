@@ -171,6 +171,7 @@ def facts(srv, a, mode):
         ["attention", getattr(b, "attn", None)],
         ["compact rows", getattr(b, "compact_kernel", None)],
         ["convolution", getattr(b, "conv_kernel", None)],
+        ["fla kernel configs", getattr(b, "fla_configs", None)],
         ["vLLM preset", getattr(b, "preset", None)],
         ["device", str(getattr(b, "dev", "")) or None],
         ["prompt format", getattr(srv, "fmt", None)],

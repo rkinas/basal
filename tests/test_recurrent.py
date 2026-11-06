@@ -632,6 +632,155 @@ def test_fla_pin_pins_only_the_recorded_kernels(monkeypatch, tmp_path):
     assert other.cache == {} and (64, "torch.bfloat16") not in other.cache  # timed at its first launch, as fla does
 
 
+def fake_fla(monkeypatch, gpu, names, home=None):
+    """fla's autotuners as fla_pin sees them, without Triton or fla: {name: tuner} for these kernel names on this GPU
+    (torch.cuda.get_device_name), fla 0.5.2, HOME at home. A tuner's run() times a new key as Triton would: its cache
+    gets the config that key's first launch picked (tuner.picks: key -> BT)."""
+    import sys
+    import types
+
+    class Config:
+        def __init__(self, kwargs, num_warps=4, num_stages=2, num_ctas=1, maxnreg=None):
+            self.kwargs, self.num_warps, self.num_stages, self.num_ctas, self.maxnreg = (kwargs, num_warps, num_stages,
+                                                                                           num_ctas, maxnreg)
+
+    triton = types.ModuleType("triton")
+    triton.runtime = types.ModuleType("triton.runtime")
+    triton.runtime.autotuner = types.ModuleType("triton.runtime.autotuner")
+    triton.runtime.autotuner.Config = Config
+    for name, mod in (("triton", triton), ("triton.runtime", triton.runtime),
+                      ("triton.runtime.autotuner", triton.runtime.autotuner)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setitem(sys.modules, "fla", types.SimpleNamespace(__version__="0.5.2"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda *a: gpu)
+    if home is not None:
+        monkeypatch.setenv("HOME", str(home))
+
+    class Tuner:
+        def __init__(self):
+            self.cache, self.configs, self.picks = {}, ["first"], {}
+
+        def run(self, key):
+            if key not in self.cache:
+                self.cache[key] = Config({"BT": self.picks.get(key, 64)})
+            return self.cache[key]
+
+    tuners = {n: Tuner() for n in names}
+    monkeypatch.setattr(gdn_module, "_fla_autotuners", lambda: tuners)
+    monkeypatch.setattr(gdn_module, "FLA_PINNED", None)  # (restored after the test)
+    return tuners
+
+
+@pytest.mark.parametrize("gpu, pinned", [("GPU Y", 1), ("GPU Z", 0)])
+def test_fla_pin_takes_the_table_of_this_gpu(monkeypatch, tmp_path, gpu, pinned):
+    """A file of several tables (the shipped one: one per GPU) pins the table of this GPU; a GPU without one is timed."""
+    launch = dict(num_warps=4, num_stages=2, num_ctas=1, maxnreg=None)
+
+    def table(g, bt):
+        return dict(gpu=g, fla="0.5.2", kernels={"fla.ops.k": dict(default=dict(kwargs={"BT": bt}, **launch), keys=[])})
+    (tmp_path / "fla.json").write_text(json.dumps([table("GPU X", 16), table("GPU Y", 32)]), encoding="utf-8")
+    tuners = fake_fla(monkeypatch, gpu, ["fla.ops.k"], home=tmp_path / "home")
+    assert gdn_module.fla_pin(tmp_path / "fla.json") == pinned
+    assert gdn_module.FLA_PINNED == ("pinned" if pinned else "timed")
+    t = tuners["fla.ops.k"]
+    assert (t.cache[(64, "torch.bfloat16")].kwargs == {"BT": 32}) if pinned else (t.cache == {})
+
+
+def test_a_gpu_without_a_table_keeps_its_first_start(monkeypatch, tmp_path):
+    """Without a recorded table for this GPU the first start times fla's kernels, and every new pick is written to
+    ~/.cache/basal/fla/; the next start pins them (nothing timed), so a restart answers as the first start did. Before,
+    every start timed them again (pico on an RTX PRO 6000 Blackwell: another set of answers after a restart). Triton's
+    own autotune cache could not do it: the first restart looked in another directory."""
+    home = tmp_path / "home"
+    first = fake_fla(monkeypatch, "GPU Z", ["fla.ops.k", "fla.ops.j"], home=home)
+    assert gdn_module.fla_pin(tmp_path / "none.json") == 0 and gdn_module.FLA_PINNED == "timed"
+    first["fla.ops.k"].picks[(128, "torch.bfloat16")] = 16
+    first["fla.ops.k"].run((128, "torch.bfloat16"))  # (the first start's timed picks)
+    first["fla.ops.k"].run((256, "torch.bfloat16"))
+    kept = home / ".cache" / "basal" / "fla" / "GPU_Z-0.5.2.json"
+    assert json.loads(kept.read_text())["kernels"]["fla.ops.k"]["keys"] == [
+        [[128, "torch.bfloat16"], dict(kwargs={"BT": 16}, num_warps=4, num_stages=2, num_ctas=1, maxnreg=None)],
+        [[256, "torch.bfloat16"], dict(kwargs={"BT": 64}, num_warps=4, num_stages=2, num_ctas=1, maxnreg=None)]]
+    again = fake_fla(monkeypatch, "GPU Z", ["fla.ops.k", "fla.ops.j"], home=home)  # (the restart)
+    again["fla.ops.k"].picks[(128, "torch.bfloat16")] = 32  # (what timing would pick this time)
+    assert gdn_module.fla_pin(tmp_path / "none.json") == 1 and gdn_module.FLA_PINNED == "kept"
+    assert again["fla.ops.k"].run((128, "torch.bfloat16")).kwargs == {"BT": 16}  # the first start's, not timed again
+    again["fla.ops.j"].run((8, "torch.float32"))  # a kernel the first start never launched: timed, and kept too
+    table = json.loads(kept.read_text())["kernels"]
+    assert sorted(table) == ["fla.ops.j", "fla.ops.k"] and len(table["fla.ops.k"]["keys"]) == 2
+
+
+def test_a_broken_kept_table_is_timed_and_written_again(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    kept = home / ".cache" / "basal" / "fla" / "GPU_Z-0.5.2.json"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("{not json")
+    tuners = fake_fla(monkeypatch, "GPU Z", ["fla.ops.k"], home=home)
+    assert gdn_module.fla_pin(tmp_path / "none.json") == 0 and gdn_module.FLA_PINNED == "timed"
+    tuners["fla.ops.k"].run((1,))
+    assert list(json.loads(kept.read_text())["kernels"]) == ["fla.ops.k"]
+
+
+def test_fla_pin_off_leaves_fla_alone(monkeypatch, tmp_path):
+    """BASAL_FLA_PIN=0: fla's own autotuning, timed at every start (nothing pinned, nothing kept)."""
+    tuners = fake_fla(monkeypatch, "GPU Z", ["fla.ops.k"], home=tmp_path)
+    monkeypatch.setenv("BASAL_FLA_PIN", "0")
+    assert gdn_module.fla_pin() == 0
+    tuners["fla.ops.k"].run((1,))
+    assert not (tmp_path / ".cache").exists()
+
+
+def test_eager_pins_fla_for_qwen35_models(monkeypatch, qwen35, llama):
+    """--mode eager on CUDA runs a Qwen3.5 model's Gated DeltaNet layers on fla's kernels (transformers routes them to
+    fla), so it pins them as --mode fast does: their timed picks gave other answers at every start (basal-omni-pico on
+    an RTX PRO 6000 Blackwell: 12 of 36 identical between two starts). Not for other models, nor without fla."""
+    calls = []
+
+    def pin(state):
+        def f(path=None):
+            calls.append(path)
+            monkeypatch.setattr(gdn_module, "FLA_PINNED", state)
+            return 7 if state != "timed" else 0
+        return f
+    monkeypatch.setattr(gdn_module, "fla_rule", lambda: object())
+    monkeypatch.setattr(gdn_module, "fla_pin", pin("pinned"))
+    assert gdn_module.eager_fla_configs(str(qwen35)) == "pinned" and calls == [None]
+    monkeypatch.setattr(gdn_module, "fla_pin", pin("timed"))
+    assert gdn_module.eager_fla_configs(str(qwen35)) == "timed"
+    assert gdn_module.eager_fla_configs(str(llama)) is None and len(calls) == 2
+    monkeypatch.setattr(gdn_module, "fla_rule", lambda: None)
+    assert gdn_module.eager_fla_configs(str(qwen35)) is None and len(calls) == 2
+
+
+def test_eager_on_the_cpu_leaves_fla_alone(monkeypatch, tmp_path):
+    """Without CUDA there are no fla kernels to pin (transformers' torch kernels run): nothing is said at start-up."""
+    monkeypatch.setattr(engine_module.AutoTokenizer, "from_pretrained", lambda *a, **k: Tok())
+    monkeypatch.setattr(gdn_module, "eager_fla_configs", lambda d: pytest.fail("called on the CPU"))
+    tiny_qwen35(tmp_path / "tiny")
+    assert EagerBackend(str(tmp_path / "tiny"), "float32", device="cpu").fla_configs is None
+
+
+# the fla kernels basal's Qwen3.5 passes launch (the forward of the Gated DeltaNet rule, the convolution, the l2 norm)
+PASS_KERNELS = ["fla.modules.conv.triton.kernels.causal_conv1d_fwd_kernel", "fla.modules.l2norm.l2norm_fwd_kernel",
+                "fla.ops.common.chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64",
+                "fla.ops.common.chunk_o.chunk_fwd_kernel_o",
+                "fla.ops.gated_delta_rule.chunk_fwd.chunk_gated_delta_rule_fwd_kkt_solve_kernel",
+                "fla.ops.gated_delta_rule.wy_fast.recompute_w_u_fwd_kernel",
+                "fla.ops.utils.cumsum.chunk_local_cumsum_scalar_kernel"]
+
+
+@pytest.mark.parametrize("gpu", ["NVIDIA H100 80GB HBM3", "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"])
+def test_shipped_fla_configs_pin_the_gated_gpus(monkeypatch, tmp_path, gpu):
+    """The shipped table pins every fla kernel of basal's passes on the GPUs --mode fast's answers are gated on (the
+    H100 80 GB, and the RTX PRO 6000 Blackwell, where pico's cold starts had landed in one of three answer sets):
+    nothing is timed, so every start has the same configs. A kernel outside the table is timed as fla does."""
+    tuners = fake_fla(monkeypatch, gpu, PASS_KERNELS + ["fla.ops.other_kernel"], home=tmp_path)
+    assert gdn_module.fla_pin() == len(PASS_KERNELS) and gdn_module.FLA_PINNED == "pinned"
+    assert all(isinstance(tuners[n].cache, gdn_module._PinnedCache) for n in PASS_KERNELS)
+    assert tuners["fla.ops.other_kernel"].cache == {}
+
+
 @pytest.mark.skipif(not torch.cuda.is_available() or gdn_module.fla_rule() is None, reason="needs CUDA and fla")
 @pytest.mark.parametrize("dtype, tol", [("float32", 1e-4), ("bfloat16", 0.03)])
 def test_graphs_equal_eager_on_cuda(monkeypatch, tmp_path, dtype, tol):
