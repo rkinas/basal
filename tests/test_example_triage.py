@@ -1,5 +1,7 @@
-"""examples/triage/run.py offline: the questions with and without RULES, the labelled requests for basal-calibrate, and
-the answers read as gold labels."""
+"""examples/triage offline: run.py's questions with and without RULES, the labelled requests for basal-calibrate and
+the answers read as gold labels; app.py's routing and its webhook over a mock basal. They live in the engine's suite on
+purpose: they need no model and take about 0.1 s, and a change of basal.presets or basal.client that breaks the
+example fails here, not in a reader's hands."""
 import importlib.util
 import json
 from pathlib import Path
