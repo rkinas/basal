@@ -31,7 +31,7 @@ otherwise keeps the file's temperatures without its thresholds (`max_error` defe
 answer `"calibration": "unvalidated"`. A format-2 model may ship an optional `CALIBRATION.o2.json` for `--orders 2`.
 `--url` refuses a server that applies temperatures (it reports them in `GET /v1/models`). Other options:
 
-- `--targets 0.01,0.05`: any `max_error` values.
+- `--targets 0.01,0.05`: any `max_error` values from 1e-6 up to (not including) 1.
 - `--min-per-type 50`.
 - `--min-blend 10`: a type (or option-count bucket) with fewer FIT decisions than `--min-per-type` but at least this
   many gets its fitted temperature blended with the shipped one (below). `0` keeps the shipped one, as before 2.2.
