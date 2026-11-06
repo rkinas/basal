@@ -5,9 +5,12 @@ import asyncio
 import json
 
 import httpx
+from starlette.requests import Request
 
-from basal.server import CLIENT_GONE, http_app, until_disconnect
+from basal import server
 from tests.test_http_status import BODY, AppServer, Engine
+
+GONE = (499, {"error": "client disconnected"})  # the answer of a request whose client left
 
 
 class CountingEngine(Engine):
@@ -53,7 +56,7 @@ def run_abandoned(path, body):
     async def go():
         worker = asyncio.get_running_loop().create_task(srv.worker())
         try:
-            app = http_app(srv, "fast")
+            app = server.http_app(srv, "fast")
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://basal") as c:
                 held = asyncio.create_task(c.post("/v1/systemone", json=BODY))
@@ -78,7 +81,7 @@ def run_abandoned(path, body):
 
 def test_a_request_abandoned_in_the_queue_never_reaches_the_engine():
     status, out, held, calls = run_abandoned("/v1/systemone", BODY)
-    assert (out, status) == CLIENT_GONE
+    assert (status, out) == GONE
     assert held == 200
     assert calls == 1  # the held request only
 
@@ -88,18 +91,26 @@ def test_decisions_endpoint_drops_an_abandoned_request_too():
             "questions": [{"type": "choice", "name": "q", "instructions": "Which?",
                            "choices": [{"value": "a", "description": "Alpha"}, {"value": "b", "description": "Beta"}]}]}
     status, out, held, calls = run_abandoned("/v1/decisions", body)
-    assert (out, status) == CLIENT_GONE
+    assert (status, out) == GONE
     assert held == 200
     assert calls == 1
 
 
-class Request:
-    def __init__(self, gone_after=None):
-        self.polls, self.gone_after = 0, gone_after
+def client(leave_after=None):
+    """The Request of a handler whose body has been read: receive() waits as uvicorn's does, and says
+    http.disconnect `leave_after` seconds after its first call (never with None). .receives counts its calls."""
+    left = asyncio.Event()
 
-    async def is_disconnected(self):
-        self.polls += 1
-        return self.gone_after is not None and self.polls >= self.gone_after
+    async def receive():
+        request.receives += 1
+        if leave_after is not None and request.receives == 1:
+            asyncio.get_running_loop().call_later(leave_after, left.set)
+        await left.wait()
+        return {"type": "http.disconnect"}
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive)
+    request.receives = 0
+    return request
 
 
 def test_until_disconnect_returns_the_answer_and_raises_its_errors():
@@ -110,9 +121,9 @@ def test_until_disconnect_returns_the_answer_and_raises_its_errors():
     async def broken():
         raise ValueError("bad")
 
-    assert asyncio.run(until_disconnect(Request(), answer(), poll=0.005)) == {"ok": 1}
+    assert asyncio.run(server.until_disconnect(client(), answer())) == {"ok": 1}
     try:
-        asyncio.run(until_disconnect(Request(), broken(), poll=0.005))
+        asyncio.run(server.until_disconnect(client(), broken()))
     except ValueError as e:
         assert str(e) == "bad"
     else:
@@ -129,5 +140,41 @@ def test_until_disconnect_cancels_the_serve_when_the_client_leaves():
             state["cancelled"] = True
             raise
 
-    assert asyncio.run(until_disconnect(Request(gone_after=2), serve(), poll=0.005)) is None
+    assert asyncio.run(server.until_disconnect(client(leave_after=0.02), serve())) is None
     assert state == {"cancelled": True}
+
+
+def test_a_cancelled_handler_cancels_its_serve():
+    """The handler's own cancellation (a server shutting down) reaches the serve, as when the handler awaited it: a
+    serve left running would put its entries on the engine for nobody."""
+    state = {}
+
+    async def serve():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
+
+    async def go():
+        handler = asyncio.ensure_future(server.until_disconnect(client(), serve()))
+        await asyncio.sleep(0.05)
+        handler.cancel()
+        await asyncio.wait({handler})
+        await asyncio.sleep(0.05)
+        return handler.cancelled(), dict(state)  # (before asyncio.run cancels whatever is left at its end)
+
+    assert asyncio.run(go()) == (True, {"cancelled": True})
+
+
+def test_a_waiting_request_costs_one_receive():
+    """The wait for the disconnect is one receive() for the whole serve, not a poll every 0.25 s (about 40 us of
+    the event loop each: 15% of a core with 1,024 requests waiting)."""
+    request = client()
+
+    async def serve():
+        await asyncio.sleep(0.6)
+        return {"ok": 1}
+
+    assert asyncio.run(server.until_disconnect(request, serve())) == {"ok": 1}
+    assert request.receives == 1
