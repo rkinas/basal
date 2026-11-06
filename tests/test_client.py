@@ -247,8 +247,15 @@ def test_errors_raise_with_the_body():
 
 
 def test_api_key_sets_bearer_header():
-    client = Basal(api_key="secret")
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers["authorization"])
+        return httpx.Response(200, json={"answers": {}})
+    client = Basal(api_key="secret", transport=httpx.MockTransport(handler))
     try:
-        assert client.http.headers["authorization"] == "Bearer secret"
+        client.request({"state": "s", "questions": {}})
+        assert seen == ["Bearer secret"]  # on the request; the headers of the client stay without the key
+        assert "authorization" not in client.http.headers
     finally:
         client.http.close()
