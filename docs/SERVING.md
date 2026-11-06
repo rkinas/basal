@@ -199,10 +199,8 @@ benchmarking a GPU.
     concurrent requests at ~8% of the throughput at 8 clients, see WHATS_NEW 2.5's known limits; `--state-cache-dir
     DIR`: also every cached state as a `.safetensors` file under DIR, one subdirectory per model signature, read back
     on a memory miss and by later servers over the same directory, here and on `--mode mlx`, not for Qwen3.5;
-    `--state-cache-disk-gb G` bounds it, default 20, least recently used files out first; `--state-cache-import
-    any-engine` also reads the files the other engine wrote for the same bf16 checkpoint, CUDA graph engine <->
-    `--mode mlx`, whose answers are close to, not equal to, the uncached answers; the default `same-engine` reads only
-    its own engine's files), `--prefix-cache`, `--long-lane`. Measurements:
+    `--state-cache-disk-gb G` bounds it, default 20, least recently used files out first; each engine reads only the
+    files it wrote), `--prefix-cache`, `--long-lane`. Measurements:
     [HARDWARE.md](HARDWARE.md#kernels-of-the-cuda-graph-engine-one-h100),
     [disk tier](HARDWARE.md#state-cache-disk-tier).
 - **vLLM options (2.3):** `--vllm-preset default | deterministic` (deterministic: batch-invariant kernels, no prefix
