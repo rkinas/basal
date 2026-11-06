@@ -3632,8 +3632,8 @@ class MLXBackend:
         self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute, adapter).result()
         if self.state_cache is not None and not self._cache_rope_ok():
             raise SystemExit("--state-cache-gb / --prefix-cache on --mode mlx need a RoPE that does not depend on the "
-                             "sequence length in every layer (default, linear, llama3, Gemma 4's proportional): cached "
-                             "keys are continued in forwards of other lengths")
+                             "sequence length in every layer (default, linear, llama3, yarn, longrope, Gemma 4's "
+                             "proportional; not dynamic NTK): cached keys are continued in forwards of other lengths")
 
     def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto", adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
@@ -3754,13 +3754,17 @@ class MLXBackend:
 
     def _cache_rope_ok(self):
         """Whether cached keys can be continued: every layer's RoPE rotates a position the same way at any length of the
-        forward (_static_rope, or Gemma 4's proportional RoPE with its fixed frequencies). A dynamic NTK base, for one,
-        grows with the length of the call, so a state's keys from its own forward would not match the longer one."""
-        from mlx_lm.models.rope_utils import ProportionalRoPE
+        forward, i.e. its frequencies are fixed when it is built: mlx-lm's RoPE (default, linear), Llama3RoPE, YarnRoPE,
+        SuScaledRoPE (longrope) and Gemma 4's ProportionalRoPE (tests/test_mlx_state_cache.py rotates each split and
+        whole). A dynamic NTK base grows with the length of the call, so a state's keys from its own forward would not
+        match the longer one; a RoPE of any other kind is refused as well."""
+        import mlx.nn as nn
+        from mlx_lm.models import rope_utils as ru
+        fixed = (nn.RoPE, ru.Llama3RoPE, ru.YarnRoPE, ru.SuScaledRoPE, ru.ProportionalRoPE)
         for layer in self.lm.model.layers:
             rope = getattr(getattr(layer, "self_attn", None), "rope", None)
             rope = getattr(rope, "rope", rope)  # under --mlx-packed's PositionRoPE
-            if rope is None or not (self._static_rope(rope) or type(rope) is ProportionalRoPE):
+            if rope is None or type(rope) not in fixed:
                 return False
         return True
 

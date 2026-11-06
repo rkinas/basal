@@ -344,11 +344,14 @@ def test_a_state_cached_by_another_request_gives_the_uncached_bits(tmp_path, for
     ({"rope_type": "llama3", "rope_theta": 1e6, "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
       "original_max_position_embeddings": 64}, True),
     ({"rope_type": "dynamic", "rope_theta": 1e6, "factor": 2.0}, False),  # base depends on the length of the call
-    ({"rope_type": "yarn", "rope_theta": 1e6, "factor": 2.0, "original_max_position_embeddings": 64}, False),
+    ({"rope_type": "yarn", "rope_theta": 1e6, "factor": 2.0, "original_max_position_embeddings": 64}, True),
+    ({"rope_type": "longrope", "rope_theta": 1e6, "original_max_position_embeddings": 64, "long_factor": [1.5] * 8,
+      "short_factor": [1.0] * 8}, True),
 ])
 def test_the_cache_needs_a_static_rope(tmp_path, monkeypatch, rope, ok):
     """Cached keys are continued in forwards of other lengths, so the server refuses the cache for a RoPE that depends
-    on the sequence length; Gemma 4's proportional RoPE (basal-omni) has fixed frequencies and is accepted."""
+    on the sequence length (dynamic NTK); mlx-lm's yarn and longrope have fixed frequencies (see below) and are
+    accepted, as is Gemma 4's proportional RoPE (basal-omni)."""
     pytest.importorskip("mlx.core")
     from types import SimpleNamespace
 
@@ -366,3 +369,33 @@ def test_the_cache_needs_a_static_rope(tmp_path, monkeypatch, rope, ok):
         assert engine.MLXBackend(tmp_path).state_cache is None  # without the cache it serves as before
     tiny_gemma4(tmp_path / "g4")
     assert mlx_stub(tmp_path / "g4")._cache_rope_ok()
+
+
+@pytest.mark.parametrize("cfg, fixed", [
+    (None, True),
+    ({"rope_type": "linear", "factor": 2.0}, True),
+    ({"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+      "original_max_position_embeddings": 32}, True),
+    ({"rope_type": "yarn", "factor": 2.0, "original_max_position_embeddings": 32}, True),
+    ({"rope_type": "longrope", "original_max_position_embeddings": 32, "long_factor": [1.5] * 8,
+      "short_factor": [1.0] * 8}, True),
+    ({"rope_type": "proportional", "partial_rotary_factor": 0.25}, True),
+    ({"rope_type": "dynamic", "factor": 2.0}, False),
+], ids=lambda v: v.get("rope_type") if isinstance(v, dict) else str(v))
+def test_the_accepted_ropes_rotate_a_continued_state_as_the_whole(cfg, fixed):
+    """What the cache relies on, per RoPE kind of the installed mlx-lm: the keys of a state rotated in its own forward,
+    then the rest at its offset, equal the whole sequence rotated in one forward, past max_position_embeddings too.
+    The kinds _cache_rope_ok accepts must keep this; dynamic NTK does not."""
+    mx = pytest.importorskip("mlx.core")
+    from mlx_lm.models.rope_utils import initialize_rope
+    rope = initialize_rope(16, 1e4, False, cfg, max_position_embeddings=64)
+    be = MLXBackend.__new__(MLXBackend)
+    be.model = type("M", (), {"model": type("D", (), {"layers": [
+        type("L", (), {"self_attn": type("A", (), {"rope": rope})()})()]})()})()
+    assert be._cache_rope_ok() is fixed
+    mx.random.seed(0)
+    x = mx.random.normal((1, 2, 200, 16))
+    whole = rope(x)
+    same = all(mx.array_equal(mx.concatenate([rope(x[:, :, :k]), rope(x[:, :, k:], offset=k)], axis=2), whole).item()
+               for k in (8, 40, 100, 150))
+    assert same is fixed
