@@ -147,15 +147,21 @@ EXAMPLES = Path(__file__).resolve().parent / "examples"  # installed with the pa
 DEFAULT_QUESTIONS = [str(EXAMPLES / f) for f in ("questions.jsonl", "choice.jsonl", "noul.jsonl", "score.jsonl")]
 
 
+def numbered_questions(paths, n, seed=0):
+    """load_questions with the place of each item, for a message about it: ("file:line", item) pairs, the same items
+    in the same order."""
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    qs = [(f"{p}:{i}", json.loads(line)) for p in paths for i, line in enumerate(read_lines(p), 1) if line.strip()]
+    qs = [(where, q) for where, q in qs if "options" in q]
+    random.Random(seed).shuffle(qs)  # the permutation depends on the length only: the order of load_questions
+    return qs[:n]
+
+
 def load_questions(paths, n, seed=0):
     """Simple-format items {"state", "question", "options", "gold"?} from one or more JSONL files (full-request lines
     with "questions" are skipped)."""
-    if isinstance(paths, (str, Path)):
-        paths = [paths]
-    qs = [json.loads(line) for p in paths for line in read_lines(p) if line.strip()]
-    qs = [q for q in qs if "options" in q]
-    random.Random(seed).shuffle(qs)
-    return qs[:n]
+    return [q for _, q in numbered_questions(paths, n, seed)]
 
 
 def groups_for(tok, qs, fmt=1):
