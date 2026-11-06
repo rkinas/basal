@@ -3,8 +3,10 @@ queue never reach the engine, it answers 499, and the requests around it are ans
 basal-serve (http_app) with its batching worker and a stub engine that holds the first batch on the GPU."""
 import asyncio
 import json
+import sys
 
 import httpx
+import pytest
 from starlette.requests import Request
 
 from basal import server
@@ -178,3 +180,34 @@ def test_a_waiting_request_costs_one_receive():
 
     assert asyncio.run(server.until_disconnect(request, serve())) == {"ok": 1}
     assert request.receives == 1
+
+
+@pytest.mark.parametrize("path", ["/v1/systemone", "/v1/decisions"])
+def test_a_client_that_leaves_while_sending_its_body_answers_499(path, capsys):
+    """The connection closed in the middle of the body: 499 as for a client that leaves later, not a 500 with a
+    traceback in the log (a server error that is none)."""
+    srv = AppServer(Engine())
+    app = server.http_app(srv, "fast")
+    messages = [{"type": "http.request", "body": json.dumps(BODY).encode()[:10], "more_body": True},
+                {"type": "http.disconnect"}]
+    sent = []
+
+    async def receive():
+        return messages.pop(0)
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": path, "raw_path": path.encode(), "query_string": b"",
+             "headers": [(b"content-type", b"application/json")], "http_version": "1.1", "scheme": "http",
+             "server": ("basal", 80), "client": ("test", 1), "root_path": ""}
+    try:
+        asyncio.run(app(scope, receive, send))
+    except Exception as e:  # noqa: BLE001  (Starlette raises a handler's error again after its 500)
+        print(f"raised {type(e).__name__}", file=sys.stderr)
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    out = json.loads(b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body"))
+    assert (status, out) == GONE
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and "raised" not in err and "request failed" not in err
+    assert not srv.backend.entered.is_set()

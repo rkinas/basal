@@ -2534,6 +2534,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     from contextlib import asynccontextmanager, nullcontext
 
     from starlette.applications import Starlette
+    from starlette.requests import ClientDisconnect
     from starlette.responses import JSONResponse, PlainTextResponse
     from starlette.routing import Route
     from . import __version__
@@ -2561,6 +2562,9 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         counts["requests"] += 1  # (a body that is not JSON counts too, as on /v1/decisions)
         try:
             body = await request.json()
+        except ClientDisconnect:  # the client left while sending the body: as when it leaves later (not a 500)
+            counts["seconds"] += time.perf_counter() - t
+            return JSONResponse(*CLIENT_GONE)
         except (ValueError, RecursionError) as e:  # not JSON (or not UTF-8), or nested too deeply
             counts["failed"] += 1
             counts["seconds"] += time.perf_counter() - t
@@ -2591,6 +2595,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             if out is None:  # the client is gone (as on /v1/systemone)
                 return JSONResponse(*CLIENT_GONE)
             return JSONResponse(dec.to_decision(out, specs))
+        except ClientDisconnect:  # the client left while sending the body (as on /v1/systemone)
+            return JSONResponse(*CLIENT_GONE)
         except Exception as e:  # noqa: BLE001
             counts["failed"] += 1
             report(e)
