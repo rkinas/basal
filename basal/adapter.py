@@ -26,6 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .textio import read_text
+
 MLX_WEIGHTS, PEFT_WEIGHTS, CONFIG = "adapters.safetensors", "adapter_model.safetensors", "adapter_config.json"
 # a text decoder's layer under the prefixes of mlx-lm, PEFT and transformers (model., base_model.model.model.,
 # language_model.model., base_model.model.model.language_model. ...); anything else (vision_tower.encoder.layers.N,
@@ -398,7 +400,7 @@ def main():
     check_space(md, out, f"--out {out}: the merged checkpoint has the size of the model's weights")
     n = fuse_checkpoint(md, ad, out)
     for f in sorted(ad.path.glob("CALIBRATION*.json")):  # fitted with this adapter
-        cal = fused_calibration(json.loads(f.read_text(encoding="utf-8")), ad, out)
+        cal = fused_calibration(json.loads(read_text(f)), ad, out)
         if cal is None:
             print(f"basal-fuse-adapter: {f.name} was fitted with another adapter than {ad.identity}: not copied")
         else:

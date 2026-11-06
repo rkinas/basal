@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 
 from .tasks import units
+from .textio import encoding
 
 SUFFIXES = {".md": "markdown", ".markdown": "markdown", ".html": "html", ".htm": "html", ".txt": "text",
             ".jsonl": "jsonl"}
@@ -187,7 +188,7 @@ def documents(inputs, skip=()):
                 raise ValueError(f"{f}: unknown document type (one of {', '.join(SUFFIXES)})")
             rel = f.relative_to(root) if root.is_dir() else Path(f.name)
             if kind == "jsonl":
-                with open(f, encoding="utf-8") as h:
+                with open(f, encoding=encoding(f)) as h:  # a BOM (Notepad) or UTF-16 (PowerShell 5) too
                     for n, line in enumerate(h):
                         if not line.strip():
                             continue

@@ -40,6 +40,7 @@ from .jsonl import read_lines
 from .prompt import PREFILL, RequestError, render
 from .server import (Server, act_answer, certified, check_calibration, refuse_lean_flex, temper, temperature,
                      to_items)
+from .textio import read_text
 from .tools import answer as tool_answer
 
 TYPES = ("choice", "noul", "score", "act", "tool")  # single-readout types
@@ -144,7 +145,7 @@ def think_calibration(md, path):
             raise SystemExit(f"--think-calibration {path}: no such file")
         print(f"basal think: warning: no {p.name} in the model; readout 2 is served uncalibrated", flush=True)
         return {}, "missing"
-    return json.loads(p.read_text(encoding="utf-8")), p.name
+    return json.loads(read_text(p)), p.name
 
 
 def answer(q, pl, cal):

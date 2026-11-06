@@ -2,6 +2,8 @@
 in strings (text pasted from a word processor or a PDF), and str.splitlines cut such a valid line in two."""
 import json
 
+import pytest
+
 from basal import calibrate
 from basal.bench import load_questions
 from basal.jsonl import read_lines
@@ -39,3 +41,64 @@ def test_calibrate_reads_the_line_whole_and_keeps_line_numbers(tmp_path):
     bodies, decisions = calibrate.load(f)
     assert [b["state"] for b in bodies] == [STATE, "dwa"]
     assert [d["line"] for d in decisions] == [1, 2]
+
+
+# Notepad saves UTF-8 with a BOM, PowerShell 5 (`>`, Out-File) UTF-16 with a BOM, little-endian; big-endian for good
+# measure. Every JSONL reader takes them, and still splits at "\n" only.
+CODECS = {"utf-8-bom": lambda s: ("﻿" + s).encode("utf-8"), "utf-16": lambda s: s.encode("utf-16"),
+          "utf-16-be": lambda s: ("﻿" + s).encode("utf-16-be")}
+
+
+def write_as(path, records, codec, newline="\n"):
+    path.write_bytes(CODECS[codec]("".join(json.dumps(r, ensure_ascii=False) + newline for r in records)))
+    return path
+
+
+@pytest.mark.parametrize("codec", CODECS)
+def test_read_lines_takes_a_bom_and_utf_16(tmp_path, codec):
+    recs = [{"id": 1, "state": STATE}, {"id": 2, "state": "two"}]
+    for newline in ("\n", "\r\n"):
+        lines = read_lines(write_as(tmp_path / "a.jsonl", recs, codec, newline))
+        assert [json.loads(x) for x in lines] == recs
+
+
+def test_read_lines_of_a_plain_file_is_unchanged(tmp_path):
+    (tmp_path / "a.jsonl").write_bytes(b'{"a": 1}\r{"a": 2}\n\xef\xbb\xbf')  # a lone "\r" ends a line, as before
+    assert read_lines(tmp_path / "a.jsonl") == ['{"a": 1}', '{"a": 2}', "﻿"]  # only a leading BOM is dropped
+    (tmp_path / "b.jsonl").write_bytes(b"\xff\xfe")  # an empty UTF-16 file
+    assert read_lines(tmp_path / "b.jsonl") == []
+
+
+@pytest.mark.parametrize("codec", CODECS)
+def test_bench_and_calibrate_read_a_bom_and_utf_16(tmp_path, codec):
+    f = write_as(tmp_path / "q.jsonl", [{"state": STATE, "question": "Ile?", "options": ["1", "3"], "gold": 1}], codec)
+    assert [q["state"] for q in load_questions([f], 10)] == [STATE]
+    f = write_as(tmp_path / "l.jsonl", [
+        {"state": STATE, "questions": {"q": {"type": "noul", "instructions": "Trzy akapity?", "gold": "yes"}}}], codec)
+    bodies, decisions = calibrate.load(f)
+    assert [b["state"] for b in bodies] == [STATE] and [d["line"] for d in decisions] == [1]
+
+
+@pytest.mark.parametrize("codec", CODECS)
+def test_run_reads_a_bom_and_utf_16(tmp_path, codec):
+    from basal.run import lines
+    recs = [{"id": "a", "state": STATE, "question": "q", "options": ["x", "y"]}, {"id": "b", "state": "two"}]
+    assert list(lines(write_as(tmp_path / "in.jsonl", recs, codec, "\r\n"))) == recs
+
+
+@pytest.mark.parametrize("codec", CODECS)
+def test_navigate_and_navtree_read_a_bom_and_utf_16(tmp_path, codec):
+    from basal.navigate import Tree
+    from basal.navtree import documents
+    nodes = [{"id": "r", "text": "root"}, {"id": "x", "parent": "r", "text": STATE}]
+    assert Tree.load(write_as(tmp_path / "t.jsonl", nodes, codec)).nodes["x"]["text"] == STATE
+    docs = list(documents([str(write_as(tmp_path / "d.jsonl", [{"id": "d1", "text": STATE}], codec))]))
+    assert [(d[0], d[4]) for d in docs] == [("d1", STATE)]
+
+
+@pytest.mark.parametrize("codec", CODECS)
+def test_the_think_calibration_reads_a_bom_and_utf_16(tmp_path, codec):
+    from basal.think import think_calibration
+    cal = {"temperature_per_prim": {"choice": 1.25}, "note": STATE}
+    (tmp_path / "c.json").write_bytes(CODECS[codec](json.dumps(cal, ensure_ascii=False)))
+    assert think_calibration(None, str(tmp_path / "c.json")) == (cal, "c.json")
