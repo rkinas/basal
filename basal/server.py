@@ -2334,8 +2334,9 @@ def add_engine_args(ap):
     ap.add_argument("--nvfp4-scope", dest="nvfp4_scope", choices=["all", "mlp"], default="all",
                     help="--mode nvfp4 with --nvfp4-amax: all decoder projections, or gate / up / down only")
     ap.add_argument("--fp8-accum", dest="fp8_accum", choices=["fast", "full"], default="fast",
-                    help="FP8 checkpoints in the CUDA graph engine: cuBLAS fast accumulation (rounding depends on the "
-                         "batch's kernel) or full accumulation (decisions independent of batching, as --deterministic)")
+                    help="FP8 checkpoints in the CUDA graph engine: cuBLAS fast or full accumulation. Under load the "
+                         "answers depend on the batch with either; --deterministic (full, one request per forward) "
+                         "makes them independent of it")
     ap.add_argument("--context-overflow", dest="context_overflow", choices=["truncate", "refuse"], default="truncate",
                     help="a prompt longer than the context: truncate = drop the middle of the state (its head and tail "
                          "kept, the questions and options whole; marked in usage.truncated), refuse = HTTP 422")

@@ -187,6 +187,8 @@ benchmarking a GPU.
   - `--merge auto|on|off` merges the q/k/v and gate/up projections into one GEMM each (`auto`: on for bf16 weights,
     off for FP8 checkpoints).
   - `--fp8-accum fast|full`: FP8 GEMM accumulation in the default mode (`--deterministic` always uses `full`).
+    `full` alone does not make answers independent of batching: under load they still depend on the batch.
+    `--deterministic` does, because it runs one request per forward.
   - Opt-in, off by default: `--compile-scope layer` (each decoder layer compiled instead of the whole model: about
     half the start-up on basal-2.0, single questions up to 2-3% slower on an RTX 4060 Ti, probabilities within bf16
     rounding; bf16 Llama models, plain rows; on an H100 basal-2.0-mini started in 47 s instead of 228 s, with the same
