@@ -196,7 +196,9 @@ benchmarking a GPU.
     `--lean on|pass2` (one compiled layer function: faster start-up, slower
     under load), `--tree flex` (a FlexAttention mask for the branches of a request), `--readout-layer on`,
     `--state-cache-gb N` (a state cache across requests; 2.3.1: also for states that begin with a cached one, e.g.
-    agent traces, which then compute only their new tokens; 2.5: `--state-cache-bits 8` keeps ~1.7x as many
+    agent traces, which then compute only their new tokens; shared by all clients, so a client can tell from the
+    response time whether a state it guesses is cached: keep it off where clients must not learn about each other's
+    states; 2.5: `--state-cache-bits 8` keeps ~1.7x as many
     states per GB, answers close to the uncached ones; `--state-cache-lock on` removes a rare HTTP 500 under
     concurrent requests at ~8% of the throughput at 8 clients, see WHATS_NEW 2.5's known limits), `--prefix-cache`,
     `--long-lane`. Measurements:

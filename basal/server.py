@@ -2301,7 +2301,8 @@ def add_engine_args(ap):
                     help="CUDA graph engine and --mode mlx: keep the keys and values of request states on the GPU "
                          "up to this many GB (least recently used evicted); a later request with the same state "
                          "computes only its questions and options, one whose state begins with a cached one only its "
-                         "new tokens (0: off)")
+                         "new tokens (0: off). The cache is shared by all clients: a client can tell from the response "
+                         "time whether a state it guesses is cached")
     ap.add_argument("--state-cache-lock", dest="state_cache_lock", choices=["off", "on"], default="off",
                     help="--state-cache-gb in the CUDA graph engine: on continues cached states under the engine's "
                          "launch lock, which removes a rare HTTP 500 under concurrent requests (a torch.compile "
