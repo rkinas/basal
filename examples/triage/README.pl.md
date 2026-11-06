@@ -260,6 +260,12 @@ Dla MCP `basal-serve --mcp on` udostępnia `/mcp`, a `basal-mcp` łączy z hosta
 
 ## Wyniki
 
+> **Wersje.** Wszystkie liczby w tej części zmierzono 3 listopada 2026 r. z basalem 2.5.2 (pomiary na GB10 tego
+> samego dnia). Kolejne wersje poprawiają błędy, a poprawka może zmienić część odpowiedzi (każdą taką zmianę
+> opisuje [WHATS_NEW.md](../../docs/WHATS_NEW.md)); dane kontaktowe w czterech zgłoszeniach (adresy e-mail, numer
+> telefonu) zastąpiono potem. Traktuj tabele jako wynik tego zestawu w tamtym dniu, nie jako obietnicę: `run.py`
+> zmierzy Twoją wersję basala na Twoich zgłoszeniach.
+
 Pomiary na Apple M1 Max, basal 2.5.2, basal-2.0-4.5B-MLX-8bit, `--lang pl`.
 
 - **Zgłoszenia:** 300. Zgłoszenia 1-100 są krótkie i jasne. Zgłoszenia 101-300 pochodzą z czterech rodzajów firm:

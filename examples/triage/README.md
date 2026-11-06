@@ -259,6 +259,12 @@ For MCP, `basal-serve --mcp on` serves `/mcp`, and `basal-mcp` bridges to hosts 
 
 ## Results
 
+> **Versions.** Every number in this section was measured on 3 November 2026 with basal 2.5.2 (the GB10 runs on
+> the same day). Later versions fix bugs, and a fix can move some answers (each such change is listed in
+> [WHATS_NEW.md](../../docs/WHATS_NEW.md)); the contact data of four tickets (e-mail addresses, a phone number) was
+> replaced afterwards. Read the tables as what this setup gave then, not as a promise: `run.py` measures your basal
+> version on your own tickets.
+
 Measured on an Apple M1 Max with basal 2.5.2 and basal-2.0-4.5B-MLX-8bit, `--lang pl`.
 
 - **The tickets:** 300 in all. Tickets 1-100 are short and clear. Tickets 101-300 come from four kinds of business:
