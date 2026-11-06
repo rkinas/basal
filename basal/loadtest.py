@@ -12,6 +12,7 @@ import asyncio
 import json
 import math
 import statistics
+import sys
 import time
 from pathlib import Path
 
@@ -151,7 +152,12 @@ def main():
     if a.concurrency < 1:
         raise SystemExit("basal-loadtest: --concurrency must be at least 1")
     if a.determinism:
-        return asyncio.run(determinism(a, request_bodies(a, 2 * a.determinism)))
+        n = a.determinism
+        bodies = request_bodies(a, 2 * n)
+        if len({json.dumps(b, sort_keys=True) for b in bodies[:2 * n]}) < 2 * n:  # probe and mixed-in requests
+            print("warning: fewer than 2 x N distinct requests: the mixed pass repeats requests of the probe "
+                  "(a weaker test; give more questions or --synthetic)", file=sys.stderr)
+        return asyncio.run(determinism(a, bodies))
     asyncio.run(run(a))
 
 
