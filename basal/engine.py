@@ -3760,7 +3760,8 @@ class MLXBackend:
         match the longer one; a RoPE of any other kind is refused as well."""
         import mlx.nn as nn
         from mlx_lm.models import rope_utils as ru
-        fixed = (nn.RoPE, ru.Llama3RoPE, ru.YarnRoPE, ru.SuScaledRoPE, ru.ProportionalRoPE)
+        names = ("Llama3RoPE", "YarnRoPE", "SuScaledRoPE", "ProportionalRoPE")  # a kind a later mlx-lm renames is refused
+        fixed = (nn.RoPE, *(c for c in (getattr(ru, n, None) for n in names) if c is not None))
         for layer in self.lm.model.layers:
             rope = getattr(getattr(layer, "self_attn", None), "rope", None)
             rope = getattr(rope, "rope", rope)  # under --mlx-packed's PositionRoPE
