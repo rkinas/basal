@@ -1297,7 +1297,10 @@ class GraphBackend(EagerBackend):
     softcap = None                # the model's final logit softcap (Gemma), applied to the fp32 code logits
     _out = None                   # Llama graphs: the output buffers their captures share (_shared_out)
     _side = None                  # the stream the captures warm up on (one: each new stream pins a cuBLAS workspace)
-    _deferred = None              # warm(): graphs warmed up, captured the largest first (_capture_deferred)
+    _deferred = None              # warm(): graphs waiting for their capture, the largest first (_capture_deferred)
+    _warmed = None                # warm(): the shapes per graph family warmed up (_needs_warm_up); the others: _cold
+    _cold = None                  # warm(): the keys captured without a warm-up call (_record_cold)
+    COLD_CAPTURE = True           # capture shapes past a family's first ones without a warm-up call (_needs_warm_up)
     stream = None                 # a lane's own CUDA stream (lane(); None: every thread's current stream)
     frozen = False                # a serving lane: a graph missing at run time runs eagerly instead of being captured
     state_cache_off = False       # --state-cache-gb given but not used (state_cache_used): requests are not cut
@@ -1719,11 +1722,13 @@ class GraphBackend(EagerBackend):
 
     def warm(self):
         """Capture every plain graph of the grid, and with `shared` the pass-2 graphs for roots up to the largest of
-        LENS (Gemma 4: of PLAIN_LENS, _warm_long_sfx). Every graph is warmed up here in this order and captured
-        afterwards (_capture_deferred): the plain and compact graphs the largest first, then the pass-2 graphs the
-        smallest first while PASS2_RESERVE stays free; Gemma 4's pass-2 graphs over the longer roots after those, one at
-        a time, as _warm_long_sfx keeps the pool growth they add within PASS2_POOL and the reserve free."""
+        LENS (Gemma 4: of PLAIN_LENS, _warm_long_sfx). The graphs are warmed up here in this order (each family's first
+        shapes: _needs_warm_up) and captured afterwards (_capture_deferred): the plain and compact graphs the largest
+        first, then the pass-2 graphs the smallest first while PASS2_RESERVE stays free; Gemma 4's pass-2 graphs over
+        the longer roots after those, one at a time, as _warm_long_sfx keeps the pool growth they add within PASS2_POOL
+        and the reserve free."""
         self._deferred = {}  # key -> (function, static inputs), in warm-up order
+        self._warmed, self._cold = {}, set()
         if self.compact:  # plain graphs only for pass 1 of branched units (at most TREE_ROWS[-1] roots)
             for T in self.COMPACT_LENS:
                 self._graph_c(T)
@@ -2113,11 +2118,15 @@ class GraphBackend(EagerBackend):
         return self._forward_layered(ids, kv, step=self._layer_step)
 
     def _capture(self, key, fn, *static):
-        """Warm fn up and capture it as graph `key`; in warm() the capture waits for _capture_deferred, and a key
-        already waiting is not warmed up again (with --prefix-cache the two pass-2 families share some shapes)."""
+        """Warm fn up (or not: _needs_warm_up) and capture it as graph `key`; in warm() the capture waits for
+        _capture_deferred, and a key already waiting is not warmed up again (with --prefix-cache the two pass-2
+        families share some shapes)."""
         if self._deferred is not None:
             if key not in self._deferred:
-                self._warm_up(fn, static)
+                if self._needs_warm_up(key):
+                    self._warm_up(fn, static)
+                else:
+                    self._cold.add(key)
                 self._deferred[key] = (fn, static)
             return None
         if self.frozen:  # a capture would collide with the other lanes' work on the GPU: the forward runs eagerly,
@@ -2141,12 +2150,52 @@ class GraphBackend(EagerBackend):
             fn(*static)
         torch.cuda.current_stream().wait_stream(st)
 
+    def _needs_warm_up(self, key):
+        """Whether warm() calls graph `key`'s forward once before its capture. What only a first call does (Dynamo
+        compiles, Inductor tunes, cuBLAS and Triton set up) happens at a family's first shapes: the forwards are
+        compiled with dynamic shapes, specialised only for one row, so the plain forward compiles twice at its first
+        length (one row, then more) and the compact forward once; pass 2 runs uncompiled. Warmed up, in the grid's order
+        as before: plain shapes of the first two lengths, compact shapes of the first two, pass-2 shapes of every
+        (rows, branch length) at their first root length. The others are captured without a warm-up call, which only
+        ran the same kernels once more (_record_cold). Every shape is warmed up for Gemma 4 (flex attention compiled per
+        shape class) and where COLD_CAPTURE is off (Qwen3.5: fla tunes per shape at first launch; fast-exit)."""
+        if not self.COLD_CAPTURE or self.gemma is not None:
+            return True
+        if self._warmed is None:
+            self._warmed = {}
+        if key[0] == "x":
+            fam, shape, keep = ("x", key[1], key[2]), key[3], 1
+        else:
+            fam, shape, keep = key[0], key[-1], 2
+        seen = self._warmed.setdefault(fam, [])
+        if shape in seen or len(seen) < keep:
+            if shape not in seen:
+                seen.append(shape)
+            return True
+        return False
+
     def _record(self, key, fn, static):
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g, pool=self.pool, stream=getattr(self, "_capture_stream", None)):  # (None: torch's)
             out = fn(*static)
         self.graphs[key] = (g, *static, out)
         return self.graphs[key]
+
+    def _record_cold(self, key, fn, static):
+        """_record of a shape whose forward has not run before. A compiled forward that would compile again for it
+        raises inside the capture (fail_on_recompile: a RuntimeError) instead of compiling there, as does what else a
+        capture cannot do (CUDA's capture errors); then the shape is warmed up and captured as before, and a line says
+        so. Running out of memory, which a warm-up cannot help, and errors of other kinds are raised as before."""
+        try:
+            with torch.compiler.set_stance("fail_on_recompile"):
+                return self._record(key, fn, static)
+        except torch.OutOfMemoryError:
+            raise
+        except RuntimeError as e:
+            self.graphs.pop(key, None)
+            print(f"basal: graph {key} needed a warm-up call ({type(e).__name__}: {str(e)[:120]})", flush=True)
+            self._warm_up(fn, static)
+            return self._record(key, fn, static)
 
     def _capture_deferred(self):
         """warm(): capture the graphs warmed up so far, the one with the most tokens first. Every graph's memory stays
@@ -2163,9 +2212,13 @@ class GraphBackend(EagerBackend):
         which therefore did not start on a 16 GB card. A pass 2 without its graph runs uncompiled, as one beyond the
         grid does (_tree_hidden); the plain and compact graphs, which a forward cannot do without, are all captured."""
         deferred, self._deferred = self._deferred, None
+        cold = self._cold or ()
+
+        def rec(key):
+            self._measured(self._record_cold if key in cold else self._record, key, *deferred[key])
         keys = sorted(deferred, key=_graph_tokens, reverse=True)
         for key in (k for k in keys if k[0] != "x"):
-            self._measured(self._record, key, *deferred[key])
+            rec(key)
         pass2 = [k for k in reversed(keys) if k[0] == "x"]
         if pass2 and self.dev.type == "cuda":
             torch.cuda.empty_cache()  # (blocks the warm-up calls left cached are no graph's)
@@ -2174,7 +2227,7 @@ class GraphBackend(EagerBackend):
                 print(f"basal: {n} of {len(pass2)} pass-2 graphs captured, {self.PASS2_RESERVE >> 20} MiB of GPU "
                       "memory kept free; the other shapes run pass 2 without a graph", flush=True)
                 break
-            self._measured(self._record, key, *deferred[key])
+            rec(key)
 
     _capture_cost = 0  # the GPU memory the last measured capture took (_measured): the estimate for the next one
 
@@ -3034,6 +3087,7 @@ class ExitGraphBackend(GraphBackend):
     final layer, or an agreement level calibrated in advance ("0.999", "0.995", "0.99", "0.98")."""
 
     streams, inflight = False, 1  # its own run_shared: no early readouts, one call at a time
+    COLD_CAPTURE = False  # its segments warm up every shape, as before
 
     LENS = [128, 192, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 3072]
     BATCHES = [1, 2, 4, 8, 16, 32]

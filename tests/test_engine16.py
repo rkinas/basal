@@ -342,12 +342,13 @@ def test_each_graph_warmed_up_once_before_its_capture(monkeypatch):
 
 
 @pytest.mark.parametrize("prefix", [False, True])
-def test_warm_captures_largest_first_after_every_warm_up(prefix):
-    """warm() (Llama) runs every graph's warm-up calls first, in the grid's order (torch.compile compiles there, so
-    the compiled kernels do not change), then captures the plain graphs, the most tokens first, so each capture can
-    reuse the pool blocks a larger one freed, then the pass-2 graphs, the smallest first (_capture_deferred's memory
-    budget keeps the commonest); replays still answer as separate forwards. With --prefix-cache the two pass-2
-    families share shapes: each graph is still warmed up and captured once."""
+def test_warm_warms_each_familys_first_shapes_then_captures_largest_first(prefix):
+    """warm() (Llama) warms up, in the grid's order (torch.compile compiles there, so the compiled kernels do not
+    change), the plain shapes of the first two lengths and the pass-2 shapes of every (rows, branch length) at its
+    first root length, before any capture; then captures every graph once (the others without a warm-up call): the
+    plain graphs the most tokens first, so each capture can reuse the pool blocks a larger one freed, then the pass-2
+    graphs, the smallest first (_capture_deferred's memory budget keeps the commonest); replays still answer as
+    separate forwards. With --prefix-cache the two pass-2 families share shapes: each graph is still captured once."""
     from basal.engine import _graph_tokens
 
     class Order(Stub):
@@ -359,7 +360,7 @@ def test_warm_captures_largest_first_after_every_warm_up(prefix):
             return GraphBackend._capture(self, key, fn, *static)
 
         def _warm_up(self, fn, static):
-            self.events.append(("warm", None))
+            self.events.append(("warm", self.events[-1][1]))
             fn(*static)
 
         def _record(self, key, fn, static):
@@ -376,13 +377,54 @@ def test_warm_captures_largest_first_after_every_warm_up(prefix):
     first = kinds.index("capture")
     caps = [k for kind, k in be.events if kind == "capture"]
     requests = [k for kind, k in be.events if kind == "request"]
-    assert "warm" not in kinds[first:] and kinds.count("warm") == len(caps) == len(set(caps)) == len(set(requests)) > 20
+    warmed = [k for kind, k in be.events if kind == "warm"]
+    assert "warm" not in kinds[first:] and len(caps) == len(set(caps)) == len(set(requests)) > 20
     assert (len(requests) > len(set(requests))) == prefix  # the shared shapes asked for twice
+    firsts = {}
+    for k in (k for k in dict.fromkeys(requests) if k[0] == "x"):
+        firsts.setdefault(k[1:3], k[3])
+    want = [k for k in dict.fromkeys(requests) if k[0] == "p" and k[2] in be.PLAIN_LENS[:2] or
+            k[0] == "x" and k[3] == firsts[k[1:3]]]
+    assert warmed == want and len(warmed) < len(caps)  # the grid's order, each once
     plain, pass2 = [k for k in caps if k[0] != "x"], [k for k in caps if k[0] == "x"]
     assert caps == plain + pass2 and plain and pass2
     assert [_graph_tokens(k) for k in plain] == sorted(map(_graph_tokens, plain), reverse=True)
     assert [_graph_tokens(k) for k in pass2] == sorted(map(_graph_tokens, pass2))
     check(be, groups(random.Random(7)))
+
+
+def test_a_cold_capture_that_fails_is_warmed_up_and_captured_again(monkeypatch, capsys):
+    """A shape captured without a warm-up call whose forward would compile again raises inside the capture under
+    fail_on_recompile (the stub recompiles only when that stance is off: it records the stance it runs under), is
+    warmed up and captured again, and a line says so; shapes that are warmed up never take that path. Running out of
+    memory, which a warm-up cannot help, is raised as before."""
+    from torch._dynamo import eval_frame
+    calls = []
+    be = GraphBackend.__new__(GraphBackend)
+    be.graphs, be._warmed, be._cold, be._deferred = {}, {}, set(), {}
+    be._warm_up = lambda fn, static: calls.append("warm")
+
+    def record(key, fn, static):
+        calls.append(eval_frame._stance.stance)
+        if eval_frame._stance.stance == "fail_on_recompile" and "warm" not in calls[2:]:  # its first call: no warm-up
+            raise RuntimeError("Detected recompile when torch.compile stance is 'fail_on_recompile'")
+        be.graphs[key] = ("graph",)
+        return be.graphs[key]
+    be._record = record
+    for key in (("p", 1, 16), ("p", 1, 32), ("p", 1, 48)):  # the third length: captured cold
+        GraphBackend._capture(be, key, None)
+    assert be._cold == {("p", 1, 48)} and calls == ["warm", "warm"]
+    GraphBackend._record_cold(be, ("p", 1, 48), None, ())
+    assert calls == ["warm", "warm", "fail_on_recompile", "warm", "default"] and ("p", 1, 48) in be.graphs
+    assert "needed a warm-up call" in capsys.readouterr().out
+
+    def oom(key, fn, static):
+        calls.append("oom")
+        raise torch.OutOfMemoryError("CUDA out of memory")
+    be._record = oom
+    with pytest.raises(torch.OutOfMemoryError):
+        GraphBackend._record_cold(be, ("p", 1, 64), None, ())
+    assert calls[-1] == "oom"  # no warm-up, no second capture
 
 
 @pytest.mark.parametrize("card", [24, 1000])

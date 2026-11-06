@@ -4,7 +4,8 @@ at every later start, so a server starts warm and with the same kernels every ti
 A start compiles the engine's layer functions (torch.compile / Inductor: code generation and the autotuning of its
 kernels by timing) and, for Qwen3.5 models, times fla's Triton kernels at their first launch. That is most of the
 150-600 s a server needs before it answers, and the timing can pick other kernels in another start (other last bits).
-`basal-prepare` starts the engine once (its warm-up runs every graph shape) and writes into one directory:
+`basal-prepare` starts the engine once (its warm-up compiles every graph family at its first shapes, where every
+compile happens, and captures every shape; Qwen3.5 warms every shape) and writes into one directory:
 
 - inductor.bin: Inductor's cache artifacts (torch.compiler.save_cache_artifacts: compiled graphs, Triton kernels and
   autotuning results);
