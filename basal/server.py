@@ -2503,10 +2503,18 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
     counts = {"requests": 0, "failed": 0, "seconds": 0.0}  # GET /metrics
     cache_seen = {"stats": None, "at": 0}  # the last state-cache snapshot /metrics read, and its Unix time
 
-    def failed(e):
+    def report(e):
+        """The failed request on stderr: one line, plus the traceback for a server error (HTTP 500), whose cause is
+        in the server (the line alone hid a TypeError deep in the engine). The reply never carries the traceback."""
         print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
+        if http_status(e) == 500:
+            traceback.print_exception(type(e), e, e.__traceback__, file=sys.stderr)
+            sys.stderr.flush()
         if isinstance(e, torch.OutOfMemoryError):  # the failed forward's blocks back to the GPU: kept by the
             torch.cuda.empty_cache()  # allocator, they failed the next requests too (ultra, 20 Oct)
+
+    def failed(e):
+        report(e)
         body, status = error_body(e, error_format)
         return JSONResponse(body, status_code=status)
 
@@ -2541,9 +2549,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             return JSONResponse(dec.to_decision(await srv.serve(s1), specs))
         except Exception as e:  # noqa: BLE001
             counts["failed"] += 1
-            print(f"basal: request failed: {type(e).__name__}: {str(e)[:300]}", file=sys.stderr, flush=True)
-            if isinstance(e, torch.OutOfMemoryError):
-                torch.cuda.empty_cache()
+            report(e)
             status = 400 if isinstance(e, RequestError) else http_status(e)
             return JSONResponse(dec.error_body(e, status), status_code=status)
         finally:

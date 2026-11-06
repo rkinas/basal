@@ -137,6 +137,46 @@ def test_server_errors_answer_500_and_out_of_memory_503(error, status, code):
     assert srv.load() == {"running": 0, "queued": 0}
 
 
+class Faulty(Engine):
+    """An engine bug deep in run_shared, as #1's TypeError was."""
+
+    def run_shared(self, groups, policy=None):
+        return _engine_bug()
+
+
+def _engine_bug():
+    return 1 + "layer"
+
+
+DECISION = {"model": "basal", "input": "Invoice 1240 PLN.",
+            "questions": [{"type": "predicate", "name": "paid", "instructions": "Is it paid?"}]}
+
+
+@pytest.mark.parametrize("path,body,status", [("/v1/systemone", BODY, 500), ("/v1/decisions", DECISION, 500)])
+def test_a_server_error_logs_its_traceback_but_answers_without_it(capsys, path, body, status):
+    """#3: a 500 prints the traceback on stderr, so its cause shows (#1 showed only "request failed: TypeError");
+    the reply is as before, with no traceback in it."""
+    async def go(c):
+        return await c.post(path, json=body)
+
+    r = asyncio.run(on_app(AppServer(Faulty()), go))
+    err = capsys.readouterr().err
+    assert r.status_code == status and "unsupported operand" in r.text
+    assert "Traceback" not in r.text and "_engine_bug" not in r.text
+    assert "basal: request failed: TypeError: unsupported operand" in err
+    assert "Traceback (most recent call last)" in err and "in _engine_bug" in err and 'return 1 + "layer"' in err
+
+
+@pytest.mark.parametrize("error,body", [
+    (None, {"state": "s", "questions": {"q": dict(Q, type="chioce")}}),  # 422: the client's error
+    (torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB"), BODY),  # 503: a retry may succeed
+])
+def test_a_client_error_or_out_of_memory_logs_one_line(capsys, error, body):
+    r = post(AppServer(Engine(error)), body)
+    err = capsys.readouterr().err
+    assert r.status_code in (422, 503) and err.count("basal: request failed:") == 1 and "Traceback" not in err
+
+
 def test_a_valid_request_answers_200_without_error_fields():
     r = post(AppServer(Engine()), BODY)
     assert r.status_code == 200 and r.json()["answers"]["q"]["choice"] in ("a", "b")
