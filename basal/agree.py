@@ -99,6 +99,9 @@ def compare(ref, got):
     probability), near-tie disagreements."""
     agree, dps, ties = 0, [], 0
     for r, g in zip(ref, got):
+        if any(x != x or abs(x) == float("inf") for x in g):  # a NaN readout disagrees, with the largest change
+            dps.append(1.0)
+            continue
         a, b = top(r), top(g)
         agree += a == b
         if a != b:
