@@ -152,16 +152,39 @@ def numbered_questions(paths, n, seed=0):
     in the same order."""
     if isinstance(paths, (str, Path)):
         paths = [paths]
-    qs = [(f"{p}:{i}", json.loads(line)) for p in paths for i, line in enumerate(read_lines(p), 1) if line.strip()]
-    qs = [(where, q) for where, q in qs if "options" in q]
+    qs = []
+    for p in paths:
+        for i, line in enumerate(read_lines(p), 1):
+            if not line.strip():
+                continue
+            try:
+                q = json.loads(line)
+            except ValueError as e:
+                raise ValueError(f"{p}:{i}: not JSON ({e})") from None
+            if isinstance(q, (str, list)):  # a text or a list is no question: skipped, as it always was
+                continue
+            if not isinstance(q, dict):
+                raise ValueError(f"{p}:{i}: a line must be a JSON object, not {type(q).__name__}")
+            if "options" in q:
+                qs.append((f"{p}:{i}", q))
     random.Random(seed).shuffle(qs)  # the permutation depends on the length only: the order of load_questions
     return qs[:n]
 
 
 def load_questions(paths, n, seed=0):
     """Simple-format items {"state", "question", "options", "gold"?} from one or more JSONL files (full-request lines
-    with "questions" are skipped)."""
+    with "questions" are skipped). A line that is not JSON, or JSON that is no object, is a ValueError naming its file
+    and line."""
     return [q for _, q in numbered_questions(paths, n, seed)]
+
+
+def questions_or_exit(paths, n, located=False):
+    """load_questions (numbered_questions with located) for a command: its ValueError (file:line and what is wrong)
+    ends the command with that message, not a traceback."""
+    try:
+        return (numbered_questions if located else load_questions)(paths, n)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
 
 
 def check_gold(located):
@@ -300,7 +323,7 @@ def main():
             raise SystemExit(adapter_refused(adapter.name, f"--modes {m}", why))
     md = resolve(a.model, metadata_only=all(MODES.get(m.split("@")[0], ("",))[0] in GGUF_KINDS for m in a.modes))
     vm = resolve(a.vllm_model) if a.vllm_model else None
-    located = numbered_questions(a.questions, a.n)
+    located = questions_or_exit(a.questions, a.n, located=True)
     check_gold(located)
     qs = [q for _, q in located]
     if len(qs) < MIN_ITEMS:  # before any engine is loaded

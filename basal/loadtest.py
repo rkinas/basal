@@ -19,7 +19,7 @@ from pathlib import Path
 import httpx
 
 from . import synth
-from .bench import DEFAULT_QUESTIONS, load_questions
+from .bench import DEFAULT_QUESTIONS, questions_or_exit
 
 
 def body(q, early_exit=None, questions=1):
@@ -41,7 +41,7 @@ def body(q, early_exit=None, questions=1):
 def request_bodies(a, n):
     """n request bodies: synthetic items, or the simple items of --questions (a small file reused); SystemExit when
     there is none (a file of full requests only, or an empty one), which would loop for ever doubling no bodies."""
-    qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else load_questions(a.questions, n)
+    qs = synth.items(n, a.synthetic, a.seed, long_frac=a.long_frac) if a.synthetic else questions_or_exit(a.questions, n)
     bodies = [body(q, a.early_exit, a.questions_per_request) for q in qs]
     if not bodies and n > 0:
         raise SystemExit(f"basal-loadtest: no simple items in {' '.join(map(str, a.questions))} (lines with \"state\", "

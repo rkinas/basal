@@ -128,7 +128,7 @@ def run(be, qs, fmt, averages, lat_n):
 
 
 def main(argv=None):
-    from .bench import DEFAULT_QUESTIONS, build, device_name, load_questions
+    from .bench import DEFAULT_QUESTIONS, build, device_name, questions_or_exit
     from .server import default_mode
     ap = argparse.ArgumentParser(prog="basal-bench --order-check", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -147,7 +147,7 @@ def main(argv=None):
     mode = a.mode or default_mode(a.model)
     md = resolve(a.model)
     fmt = model_format(md)
-    qs = load_questions(a.questions, a.n)
+    qs = questions_or_exit(a.questions, a.n)
     t0 = time.time()
     be = build(mode, md, fmt=fmt)
     r = dict(mode=mode, model=a.model, gpu=device_name(be), load_s=round(time.time() - t0, 1),

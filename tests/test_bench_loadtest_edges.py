@@ -114,7 +114,7 @@ class Client:
 def fake_http(monkeypatch):
     Client.count, Client.hook = 0, staticmethod(lambda count: Reply())
     monkeypatch.setattr(lt.httpx, "AsyncClient", Client)
-    monkeypatch.setattr(lt, "load_questions", lambda p, n: [dict(state="s", question="q", options=["a", "b"])] * n)
+    monkeypatch.setattr(lt, "questions_or_exit", lambda p, n: [dict(state="s", question="q", options=["a", "b"])] * n)
     return Client
 
 

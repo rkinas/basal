@@ -46,7 +46,7 @@ def client(calls, fail_on=None):
 @pytest.fixture
 def questions(monkeypatch):
     one = dict(state="s", question="q", options=["a", "b"])
-    monkeypatch.setattr(loadtest, "load_questions", lambda path, n: [one] * n)
+    monkeypatch.setattr(loadtest, "questions_or_exit", lambda path, n: [one] * n)
 
 
 def test_n_seq_zero_stops_before_any_request(monkeypatch, questions):
