@@ -421,6 +421,28 @@ def test_spawned_replicas_listen_on_localhost_unless_given_a_host(monkeypatch, a
         assert given == [host] and argv[-len(args):] == args
 
 
+@pytest.mark.parametrize("mask, gpus, want", [
+    ("2,3", ["0", "1"], ["2", "3"]),  # --gpus indexes the GPUs the user left visible
+    (None, ["0", "1"], ["0", "1"]),
+    (None, ["GPU-abc"], ["GPU-abc"]),
+    ("2,3", ["5"], ["5"]),  # beyond the mask: the plain index
+])
+def test_replicas_start_on_the_gpus_of_the_users_cuda_mask(monkeypatch, mask, gpus, want):
+    seen = []
+
+    class Popen:
+        def __init__(self, argv, env=None, **_):
+            seen.append(env["CUDA_VISIBLE_DEVICES"])
+
+    monkeypatch.setattr(R.subprocess, "Popen", Popen)
+    if mask is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", mask)
+    R.spawn(gpus, 9000, [])
+    assert seen == want
+
+
 @posix
 def test_spawned_replicas_have_their_own_process_groups(tmp_path, monkeypatch):
     monkeypatch.setenv("PIDDIR", str(tmp_path))
