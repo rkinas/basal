@@ -214,6 +214,7 @@ def test_bridge_model_flag_configures_remote(monkeypatch):
     monkeypatch.setattr(mcp_server, "available", lambda: None)
     monkeypatch.setattr(mcp_server, "remote", remote)
     monkeypatch.setattr(mcp_server, "build", lambda decide, model: Bridge())
+    monkeypatch.setattr(mcp_server, "serve_stdio", lambda server: server.run("stdio"))
     mcp_server.main()
     assert captured == {"remote": ("http://127.0.0.1:8000", 60.0, "Remek/m"), "transport": "stdio"}
 
@@ -257,6 +258,7 @@ def test_bridge_cli_api_key_uses_bearer_header(monkeypatch):
         return "m"
     monkeypatch.setattr(mcp_server, "model_name", model_name)
     monkeypatch.setattr(mcp_server, "build", lambda decide, model: Runner(decide))
+    monkeypatch.setattr(mcp_server, "serve_stdio", lambda server: server.run("stdio"))
     mcp_server.main()
     assert seen == ["Bearer secret"]
 
@@ -267,3 +269,43 @@ def test_mcp_without_the_package_fails_before_model_loading(monkeypatch):
     monkeypatch.setattr(server_module, "resolve", lambda *_, **__: pytest.fail("must reject before loading a model"))
     with pytest.raises(SystemExit, match=r"basal\[mcp\]"):
         server_module.main()
+
+
+def test_the_stdio_bridge_answers_every_line_it_cannot_read():
+    """basal-mcp over stdio: a line the MCP SDK cannot read got no reply, so the client waited for ever. A lone
+    surrogate ("\\ud800", valid JSON to Python but not to the SDK) and invalid JSON are parse errors (-32700) with the
+    line's id when it has one; JSON that is no JSON-RPC message is an invalid request (-32600); the bridge goes on."""
+    import os
+    import subprocess
+    from pathlib import Path
+
+    from mcp.types import LATEST_PROTOCOL_VERSION
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": LATEST_PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
+    lines = [json.dumps(init), json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+             '{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "decide", '
+             '"arguments": {"state": "a\\ud800b", "question": "Late?"}}}',
+             "not json", '{"id": 8, "hello": 1}', json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"})]
+    root = Path(__file__).resolve().parents[1]
+    p = subprocess.Popen([sys.executable, "-m", "basal.mcp_server", "--url", "http://127.0.0.1:9", "--timeout", "1"],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                         cwd=root, env={**os.environ, "PYTHONPATH": str(root)})
+    got, done = [], threading.Event()
+
+    def read():
+        for out in p.stdout:
+            got.append(json.loads(out))
+            if got[-1].get("id") == 9:
+                break
+        done.set()
+    threading.Thread(target=read, daemon=True).start()
+    try:
+        p.stdin.write("\n".join(lines) + "\n")
+        p.stdin.flush()
+        done.wait(60)
+    finally:
+        p.kill()
+        p.wait()
+    errors = [(m["id"], m["error"]["code"]) for m in got if "error" in m]
+    assert errors == [(7, -32700), (None, -32700), (8, -32600)], got
+    assert got[0]["id"] == 1 and "result" in got[0] and got[-1] == {"jsonrpc": "2.0", "id": 9, "result": {}}

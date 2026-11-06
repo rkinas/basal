@@ -9,6 +9,7 @@ Tools: `decide` (one question) and `decide_many` (several questions over one sta
 API). Both are read-only. Needs the optional extra: `uv pip install "basal[mcp]"`."""
 import argparse
 import inspect
+import json
 from typing import Annotated, Any, Literal
 
 INSTALL = 'MCP needs the mcp package: uv pip install "basal[mcp]"'
@@ -188,6 +189,53 @@ def model_name(url, timeout=5.0, api_key=None):
         return "basal"
 
 
+def unreadable(exc):
+    """The JSON-RPC error reply to a stdin line the MCP SDK could not read. The SDK only logs such a line, so the
+    client waited for ever for its answer. Invalid JSON is a parse error (-32700), and so is a lone surrogate
+    ("\\ud800"), which Python's json reads but the SDK's parser refuses; JSON that is no JSON-RPC message is an invalid
+    request (-32600). The reply carries the line's id when json reads one, else null."""
+    from mcp.shared.message import SessionMessage
+    from mcp.types import INVALID_REQUEST, PARSE_ERROR, ErrorData, JSONRPCError
+    errors = exc.errors() if callable(getattr(exc, "errors", None)) else []
+    line = errors[0].get("input") if errors else None
+    rid = None
+    try:
+        msg = json.loads(line) if isinstance(line, (str, bytes)) else line  # the line, or the JSON the SDK read
+        rid = msg.get("id") if isinstance(msg, dict) else None
+        if isinstance(rid, str):
+            rid.encode("utf-8")  # an id with a lone surrogate cannot be written back
+    except (ValueError, RecursionError):  # not JSON (UnicodeEncodeError is a ValueError)
+        rid = None
+    if isinstance(rid, bool) or not isinstance(rid, (int, str)):
+        rid = None
+    parse = any(e.get("type") == "json_invalid" for e in errors) or not errors
+    code, text = (PARSE_ERROR, "Parse error: the line is not valid JSON (a lone surrogate such as \\ud800 is not "
+                               "allowed)") if parse else (INVALID_REQUEST, "Invalid Request: not a JSON-RPC message")
+    return SessionMessage(JSONRPCError(jsonrpc="2.0", id=rid, error=ErrorData(code=code, message=text)))
+
+
+def serve_stdio(server):
+    """server.run("stdio"), with an error reply (unreadable) to every stdin line the SDK cannot read."""
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    async def run():
+        low = server._lowlevel_server  # as the SDK's own run_stdio_async (mcp 2.3)
+        async with stdio_server() as (read, write):
+            send, recv = anyio.create_memory_object_stream(0)
+
+            async def pump():
+                async with send:
+                    async for item in read:
+                        await (write.send(unreadable(item)) if isinstance(item, Exception) else send.send(item))
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(pump)
+                await low.run(recv, write, low.create_initialization_options())
+
+    anyio.run(run)
+
+
 def main():
     ap = argparse.ArgumentParser(description="basal over MCP (stdio): a bridge to a running basal server for agent "
                                              "hosts that start MCP servers as local processes")
@@ -200,7 +248,7 @@ def main():
     if msg:
         raise SystemExit(msg)
     name = a.model or model_name(a.url, api_key=a.api_key)
-    build(remote(a.url, a.timeout, model=a.model, api_key=a.api_key), name).run("stdio")
+    serve_stdio(build(remote(a.url, a.timeout, model=a.model, api_key=a.api_key), name))
 
 
 if __name__ == "__main__":
