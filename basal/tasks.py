@@ -276,7 +276,7 @@ NUM = re.compile(r"[-+]?\d[\d\s .,']*")
 
 
 def parse_number(text, integer=False):
-    m = NUM.search(text or "")
+    m = NUM.search((text or "").replace("\u2212", "-"))  # U+2212, the minus of typeset text, is a minus
     if not m:
         return None
     s = re.sub(r"[\s ']", "", m.group(0)).rstrip(".,")

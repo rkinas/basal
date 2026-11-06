@@ -214,3 +214,13 @@ def test_a_number_too_large_for_a_float_is_no_value(integer):
     from basal import tasks
     assert tasks.parse_number("9" * 400, integer=integer) is None
     assert tasks.parse_number("12 345", integer=integer) == 12345
+
+
+def test_the_typeset_minus_is_a_minus():
+    """U+2212, the minus of typeset text, was dropped: "−5" read as 5."""
+    assert parse_number("Temperatura: \u22125 stopni") == -5
+    assert parse_number("\u22123,5") == -3.5
+
+
+def test_the_ascii_minus_and_a_plain_number_are_unchanged():
+    assert parse_number("-5") == -5 and parse_number("5") == 5
