@@ -242,7 +242,9 @@ def cached_reference(path, make, sets):
     free(be)
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(ref), encoding="utf-8")
+        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")  # a kill mid-write must not leave a truncated cache
+        tmp.write_text(json.dumps(ref), encoding="utf-8")
+        os.replace(tmp, path)
     return ref, False
 
 
