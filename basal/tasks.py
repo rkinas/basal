@@ -15,6 +15,7 @@ spans is the value (second_round), so a value is always exact source text, with 
 calibration file ("task_thresholds"); basal-calibrate fits them on labelled task questions.
 """
 import json
+import math
 import re
 
 from .prompt import lang_of, reads_request
@@ -289,6 +290,8 @@ def parse_number(text, integer=False):
     try:
         v = float(s)
     except ValueError:
+        return None
+    if not math.isfinite(v):  # 309 digits or more are float inf, and int(inf) raises OverflowError
         return None
     if integer:
         return int(v) if v == int(v) else None
