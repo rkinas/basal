@@ -682,7 +682,7 @@ class GDNGraphBackend(GraphBackend):
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=2,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
                  device=None, global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
-                 state_cache_signature=None):
+                 state_cache_import="same-engine", state_cache_signature=None):
         # (fp8_scaling .. quant_load: GraphBackend's quantisation options, which basal-serve passes to every graph
         # engine; quantisation is refused here. graph_memory_gb: the pass-2 graphs captured, _pin_memory). device:
         # "mps" / "cpu" (GDNMPSBackend: no CUDA graphs, uncompiled). state_cache_dir ..: refused (refused(disk=))

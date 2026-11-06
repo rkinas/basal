@@ -1071,7 +1071,7 @@ def cache_signature(model_dir, name, revision, adapter, quant, kv_dtype):
     """The compatibility signature of a model's cached states on disk (--state-cache-dir), a JSON string: two servers
     reuse each other's files only when it is equal. weights: config.json and the names and sizes of the weight files
     (not their bytes: the signature is computed at every start-up). The engine that wrote a file is not part of it
-    (DiskTier keeps it per file)."""
+    (DiskTier keeps it per file, --state-cache-import)."""
     md = Path(model_dir)
     files = "\n".join(f"{p.name}:{p.stat().st_size}" for p in sorted(md.glob("*.safetensors")))
     cfg = md / "config.json"
@@ -1090,25 +1090,26 @@ class DiskTier:
     headers (scan), bounded by budget_bytes with least-recently-used eviction of the files this process knows.
 
     engine: "graph" or "mlx", in each file's name and metadata (the two engines' states of one key differ in their last
-    bits, so they never share a file); a tier reads only its own engine's files. pack(kv) -> [(name, dtype, shape,
-    bytes)] runs on the caller's thread (device reads); unpack(path) -> (kv, metadata). A state's tag (save(tag=),
-    JSON) is kept in its file and indexed with it (tag()): what the engine needs to know about how the state was
-    computed (MLX: the uncached row count, MLXBackend._state)."""
+    bits, so they never share a file); accept_engines None reads only this engine's files, "any" every file of this
+    signature, this engine's first (foreign()). pack(kv) -> [(name, dtype, shape, bytes)] runs on the caller's thread
+    (device reads); unpack(path) -> (kv, metadata); after_load(kv, tokens) adapts a loaded entry to the engine (Gemma
+    4's trimmed sliding layers). A state's tag (save(tag=), JSON) is kept in its file and indexed with it (tag()):
+    what the engine needs to know about how the state was computed (MLX: the uncached row count, MLXBackend._state)."""
 
     VERSION = "1"
     QUEUE = 16
     SUBDIRS = "0123456789abcdef"
     TMP_AGE = 600  # seconds: a leftover temporary file older than this is a crashed writer's
 
-    def __init__(self, root, budget_bytes, signature, engine, pack, unpack):
+    def __init__(self, root, budget_bytes, signature, engine, pack, unpack, accept_engines=None, after_load=None):
         import queue
         from collections import OrderedDict
-        self.signature, self.engine = signature, engine
+        self.signature, self.engine, self.accept = signature, engine, accept_engines
         self.root = Path(root) / hashlib.sha256(signature.encode()).hexdigest()[:16]
         for s in self.SUBDIRS:
             (self.root / s).mkdir(parents=True, exist_ok=True)
         self.budget, self.used = int(budget_bytes), 0
-        self.pack, self.unpack = pack, unpack
+        self.pack, self.unpack, self.after_load = pack, unpack, after_load
         self.entries, self.index, self.lock = OrderedDict(), {}, threading.Lock()  # key -> (path, size, tokens, blocks)
         self.tags = {}  # key -> its file's tag (only tagged entries)
         self.loads = self.prefix_loads = self.writes = self.write_drops = self.errors = self.evictions = 0
@@ -1137,9 +1138,9 @@ class DiskTier:
         return json.loads(raw)
 
     def _accepts(self, md, engine):
-        """Whether a file's metadata is of this signature and of this engine, the one its name says."""
+        """Whether a file's metadata is of this signature and of an accepted engine, the one its name says."""
         return (md.get("basal_state_cache") == self.VERSION and md.get("signature") == self.signature
-                and md.get("engine") == engine == self.engine)
+                and md.get("engine") == engine and (self.accept == "any" or engine == self.engine))
 
     def scan(self):
         """Indexes the files of this signature not indexed yet, oldest first (their mtime); removes temporary files of
@@ -1159,7 +1160,7 @@ class DiskTier:
                     if p.suffix != ".safetensors" or p in known:
                         continue
                     name, _, engine = p.stem.partition(".")
-                    if engine != self.engine:  # (another engine's file of this key: never read)
+                    if engine != self.engine and self.accept != "any":  # (another engine's file: not read)
                         continue
                     key = bytes.fromhex(name)
                     md = self.header(p).get("__metadata__") or {}
@@ -1170,15 +1171,17 @@ class DiskTier:
                         raise ValueError(f"{p}: {len(tokens)} token ids, {md['tokens_n']} in its metadata")
                     blocks = [bytes.fromhex(h) for h in json.loads(md["blocks"])]
                     tag = json.loads(md["tag"]) if "tag" in md else None
-                    found.append((st.st_mtime, key, p, st.st_size, tokens, blocks, tag))
+                    found.append((st.st_mtime, key, p, st.st_size, tokens, blocks, tag, engine == self.engine))
                 except FileNotFoundError:
                     continue  # removed by another process meanwhile
                 except (OSError, ValueError, KeyError, TypeError):
                     with self.lock:
                         self.errors += 1
         with self.lock:
-            for _, key, p, size, tokens, blocks, tag in sorted(found, key=lambda f: f[0]):
-                if key not in self.entries:
+            for _, key, p, size, tokens, blocks, tag, own in sorted(found, key=lambda f: f[0]):
+                e = self.entries.get(key)
+                # (--state-cache-import any-engine: a key with files of both engines keeps this engine's)
+                if e is None or (own and not e[0].name.endswith(f".{self.engine}.safetensors")):
                     self._add(key, p, size, tokens, blocks, tag)
             self._evict()
 
@@ -1335,6 +1338,9 @@ class DiskTier:
                 raise ValueError(f"{path}: not the indexed state")
             if len(kv) != int(md["layers"]):
                 raise ValueError(f"{path}: {len(kv)} layers")
+            n = len(own)
+            if self.after_load is not None:
+                kv = self.after_load(kv, n)
         except Exception:  # (FileNotFoundError: evicted by another process; safetensors' own errors: a corrupt file)
             with self.lock:
                 self.errors += 1
@@ -1373,6 +1379,12 @@ class DiskTier:
         """The tag of a state's file (None: not on disk, or untagged)."""
         with self.lock:
             return self.tags.get(key)
+
+    def foreign(self, key):
+        """Whether a state's indexed file is another engine's (--state-cache-import any-engine)."""
+        with self.lock:
+            e = self.entries.get(key)
+            return e is not None and not e[0].name.endswith(f".{self.engine}.safetensors")
 
     def delete(self, key):
         """Removes an entry's file; one still queued is removed once written."""
@@ -1618,6 +1630,10 @@ class StateCache:
         """The tag a state was stored with on disk (put(tag=)), or None."""
         return None if self.disk is None else self.disk.tag(key)
 
+    def foreign(self, key):
+        """Whether a state was read from another engine's file (--state-cache-import any-engine)."""
+        return self.disk is not None and self.disk.foreign(key)
+
     @staticmethod
     def _full(kv, n):
         """Whether every layer holds all n tokens (the token axis is -2 in the torch and the MLX layout)."""
@@ -1773,7 +1789,7 @@ class GraphBackend(EagerBackend):
                  readout_layer="off", template="off", gemma_attn="auto", fp8_scaling="auto", fp8_bf16_layers=FP8_BF16_LAYERS,
                  nvfp4_amax=None, nvfp4_scope="all", quant_load="gpu", state_cache_bits=16, graph_memory_gb=None,
                  global_attn="flex", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
-                 state_cache_signature=None):
+                 state_cache_import="same-engine", state_cache_signature=None):
         if compile:
             persist_compile_cache()  # before anything compiles
         what = recurrent_layers(model_dir)  # before anything is loaded
@@ -1899,7 +1915,8 @@ class GraphBackend(EagerBackend):
         self.state_cache = None
         if gb and shared:
             disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature, "graph",
-                            *torch_codec(self.dev)) \
+                            *torch_codec(self.dev), after_load=self._trim,
+                            accept_engines="any" if state_cache_import == "any-engine" else None) \
                 if state_cache_dir else None
             salt = hashlib.sha256(state_cache_signature.encode()).digest() if state_cache_signature else b""
             self.state_cache = StateCache(gb * 2 ** 30, salt=salt, bits=state_cache_bits, disk=disk)
@@ -2495,6 +2512,13 @@ class GraphBackend(EagerBackend):
         # (sliding layers copied out of their room of window + MARGIN + CHUNK: what the state cache holds is what it counts)
         return [(kb[0, :, :c], vb[0, :, :c]) if f else (kb[0, :, :c].clone(), vb[0, :, :c].clone())
                 for (kb, vb), c, f in zip(bufs, cur, full)], h
+
+    def _trim(self, kv, n):
+        """A state of n tokens read from disk (every layer whole) as this engine caches it: Gemma 4's sliding layers of a
+        long state hold its last kv_lens tokens only."""
+        if self.gemma is None:
+            return kv
+        return [(k[:, -t:].contiguous(), v[:, -t:].contiguous()) for (k, v), t in zip(kv, self.gemma.kv_lens(n))]
 
     def _usable(self, kv, m, n):
         """The common prefix m of a cached state of n tokens that its keys / values can continue (0: none): Gemma 4's
@@ -4080,7 +4104,7 @@ class MLXBackend:
 
     def __init__(self, model_dir, max_rows=None, quant=None, packed=False, forward="mlx-lm", state_cache_gb=0,
                  prefix=False, compute="auto", adapter=None, state_cache_dir=None, state_cache_disk_gb=20.0,
-                 state_cache_signature=None):
+                 state_cache_import="same-engine", state_cache_signature=None):
         from concurrent.futures import ThreadPoolExecutor
         self.prefix = bool(prefix)
         gb = max(state_cache_gb, self.PREFIX_GB if self.prefix else 0)
@@ -4094,7 +4118,8 @@ class MLXBackend:
         self.pool.submit(self._load, Path(model_dir), quant, packed, forward, compute, adapter).result()
         if self.state_cache is not None and state_cache_dir:  # (mlx is imported by _load; files read on the MLX thread)
             self.state_cache.disk = DiskTier(state_cache_dir, state_cache_disk_gb * 2 ** 30, state_cache_signature,
-                                             "mlx", *mlx_codec(self.mx))
+                                             "mlx", *mlx_codec(self.mx),
+                                             accept_engines="any" if state_cache_import == "any-engine" else None)
 
     def _load(self, md, quant=None, packed=False, forward="mlx-lm", compute="auto", adapter=None):
         """quant: None, or "q8": MLX affine 8-bit weights (group size 64) of the decoder blocks' linear layers, made at
@@ -4460,12 +4485,16 @@ class MLXBackend:
         other row counts (another request about the same state: a single question, then other questions) is not
         returned; the root's first entry keeps the plain key (StateCache.has, the server's cut), an entry at other
         bits is keyed by the root and its kernels. The row count is also kept in the state's file
-        (StateCache.put(tag=)), so a later server process tells the same of a state it reads from disk."""
+        (StateCache.put(tag=)), so a later server process tells the same of a state it reads from disk. A state from
+        another engine's file (--state-cache-import any-engine) has other bits whatever its row count, and is used as
+        it is: that import is close to, not equal to, the uncached answers by its contract."""
         mx, cache = self.mx, self.state_cache
         refs = self.__dict__.setdefault("_refs", {})  # entry key -> the uncached row count its rows were computed for
         bits = self._kernels(ref)
 
         def same_bits(old):
+            if cache.foreign(old):
+                return True
             return self._kernels(refs[old] if old in refs else cache.tag(old)) == bits
         key = cache.key(root)
         if bits and cache.has(key) and not same_bits(key):

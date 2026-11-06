@@ -1,7 +1,7 @@
 """The state cache's disk tier (--state-cache-dir): every state cached with its token ids is also a .safetensors file
 under the directory, found again (exactly and as the longest prefix) by a later cache over the same directory, in this
-process or another one, within a disk budget; files of another model signature or of another engine are ignored; a
-broken file is a miss, never an error. Engines: the graph engine's
+process or another one, within a disk budget; files of another model signature, or (without --state-cache-import
+any-engine) of another engine, are ignored; a broken file is a miss, never an error. Engines: the graph engine's
 Gemma 4 forward (CPU) and the MLX engine (Apple Silicon) answer over a state read back from disk as over the one they
 computed; the server's flags, refusals and metrics; tools/state_cache/compare.py."""
 import errno
@@ -46,8 +46,8 @@ class Maker:
         self.sig = cache_signature(model_dir(path), "tiny", None, None, None, "bf16")
         self.made = []
 
-    def tier(self, engine="graph", budget=1 << 30, signature=None, **kw):
-        t = DiskTier(self.dir, budget, signature or self.sig, engine, *torch_codec("cpu"), **kw)
+    def tier(self, engine="graph", accept=None, budget=1 << 30, signature=None, **kw):
+        t = DiskTier(self.dir, budget, signature or self.sig, engine, *torch_codec("cpu"), accept_engines=accept, **kw)
         self.made.append(t)
         return t
 
@@ -141,9 +141,10 @@ def test_other_signature_is_ignored(mk):
     assert other.stats()["disk_entries"] == 0 and copy.exists() and f.exists()
 
 
-def test_other_engine_is_ignored(mk):
+def test_other_engine_needs_any_engine(mk):
     stored(mk)
     assert mk.tier(engine="mlx").stats()["disk_entries"] == 0
+    assert mk.tier(engine="mlx", accept="any").stats()["disk_entries"] == 1
 
 
 def test_tokens_required_to_persist(mk):
@@ -291,8 +292,9 @@ def test_delete_cancels_a_state_queued_twice(mk):
 
 
 def test_two_engines_share_a_directory(mk):
-    """The graph engine's and MLX's states of one key are two files: neither overwrites the other, each tier reads only
-    its own, and a file whose metadata names another engine than its name is never served."""
+    """The graph engine's and MLX's states of one key are two files: neither overwrites the other, a same-engine tier
+    reads only its own, any-engine prefers its own, and a file whose metadata names another engine than its name is
+    never served."""
     toks = list(range(300))
     ref = StateCache(1, salt=b"s")
     k, blocks = ref.key(toks), ref._blocks(toks)
@@ -304,6 +306,8 @@ def test_two_engines_share_a_directory(mk):
     m.flush()
     assert sorted(p.name.split(".")[1] for p in files(g)) == ["graph", "mlx"]
     assert (g.load(k)[0][0][0] == 0).all() and (m.load(k)[0][0][0] == 1).all()
+    assert (mk.tier("graph", accept="any").load(k)[0][0][0] == 0).all()
+    assert (mk.tier("mlx", accept="any").load(k)[0][0][0] == 1).all()
     g._path(k).write_bytes(m._path(k).read_bytes())  # an MLX file under the graph engine's name: indexed, then read
     assert g.load(k) is None and g.stats()["disk_errors"] == 1 and not g._path(k).exists()
     g._path(k).write_bytes(m._path(k).read_bytes())  # (again, before a new tier indexes the directory)
@@ -415,6 +419,27 @@ def test_close_drains_the_queue(mk):
     assert c.stats()["disk_write_drops"] == 1 and len(files(c.disk)) == 5
 
 
+def test_codec_round_trip_torch_mlx(tmp_path):
+    mx = pytest.importorskip("mlx.core")
+    import numpy as np
+    t = torch.randn(2, 50, 8).bfloat16()
+    tpack, tunpack = torch_codec("cpu")
+    mpack, munpack = mlx_codec(mx)
+    DiskTier._write(tmp_path / "t.safetensors", tpack([(t, t * 2)]), {"layers": "1"})
+    (k, v), = munpack(tmp_path / "t.safetensors")[0]
+    assert k.shape == (1, 2, 50, 8) and k.dtype == mx.bfloat16
+    assert (np.array(mx.view(k[0], mx.int16)) == t.view(torch.int16).numpy()).all()
+    assert (np.array(mx.view(v[0], mx.int16)) == (t * 2).view(torch.int16).numpy()).all()
+    a = mx.random.normal((1, 2, 50, 8)).astype(mx.bfloat16)
+    DiskTier._write(tmp_path / "m.safetensors", mpack([(a, a)]), {"layers": "1"})
+    (k, _), = tunpack(tmp_path / "m.safetensors")[0]
+    assert list(k.shape) == [2, 50, 8] and k.dtype == torch.bfloat16
+    assert (k.view(torch.int16).numpy() == np.array(mx.view(a[0], mx.int16))).all()
+    DiskTier._write(tmp_path / "w.safetensors", mpack([(a, a)]), {"layers": "2"})
+    with pytest.raises(ValueError, match="2 tensors for 2 layers"):
+        munpack(tmp_path / "w.safetensors")
+
+
 def test_signature_changes_with_weights_and_adapter(tmp_path):
     md = model_dir(tmp_path)
     base = cache_signature(md, "tiny", None, None, None, "bf16")
@@ -429,16 +454,35 @@ def test_signature_changes_with_weights_and_adapter(tmp_path):
 
 # -- T2: the graph engine's Gemma 4 forward (CPU) ----------------------------------------------------------------------
 
-def gemma_stub(mk, margin=2):
+def gemma_stub(mk, accept=None, margin=2):
     from tests.test_gemma4_graph import Stub, tiny
     be = Stub(tiny("e4b", torch.float32))
     be.gemma.MARGIN = margin
-    be.state_cache = StateCache(1 << 30, salt=b"s", disk=mk.tier())
+    be.state_cache = StateCache(1 << 30, salt=b"s", disk=mk.tier(after_load=be._trim, accept=accept))
     return be
 
 
 STATE12 = [1, 5, 9, 11, 3, 4, 6, 12, 13, 14, 15, 16]
 LIDS2 = [[7, 8], [7, 8]]
+
+
+def test_gemma4_graph_import_is_trimmed(mk):
+    from tests.test_gemma4_graph import Stub, separate, tiny
+    src = Stub(tiny("e4b", torch.float32))  # MARGIN 256: every layer holds the 12 tokens
+    src.state_cache = StateCache(1 << 30, salt=b"s")
+    src.run_shared([([STATE12 + [20, 21, 30 + o, 31 - o] for o in range(2)], LIDS2, 12)])
+    key = src.state_cache.key(STATE12)
+    full = src.state_cache.entries[key][0]
+    assert [k.shape[1] for k, _ in full] == [12] * len(full)
+    mlx = mk.tier(engine="mlx")
+    mlx.save(key, full, STATE12, src.state_cache._blocks(STATE12))
+    mlx.flush()
+    assert gemma_stub(mk).state_cache.stats()["disk_entries"] == 0  # (same-engine)
+    be = gemma_stub(mk, accept="any")
+    assert [k.shape[1] for k, _ in be.state_cache.get(key)] == be.gemma.kv_lens(12) == [7, 7, 12, 7]
+    toks = [STATE12 + [22, 23, 24, 30 + o] for o in range(2)]
+    for r, e in zip(be.run_shared([(toks, LIDS2, 12)])[0], separate(be.model, toks, LIDS2)):
+        assert torch.allclose(torch.tensor(r), e, atol=1e-4)
 
 
 def test_gemma4_graph_trimmed_entry_not_exported(mk):
@@ -466,11 +510,12 @@ def test_gemma4_graph_restart_is_bit_identical(mk):
 
 # -- T3: the MLX engine (Apple Silicon) --------------------------------------------------------------------------------
 
-def mlx_cached(path, sc, forward="mlx-lm"):
+def mlx_cached(path, sc, accept=None, forward="mlx-lm"):
     import mlx.core as mx
     from tests.test_mlx_state_cache import cached_stub
     be = cached_stub(path, forward=forward)
-    be.state_cache = StateCache(1 << 30, salt=b"s", disk=DiskTier(sc, 1 << 30, "sig", "mlx", *mlx_codec(mx)))
+    be.state_cache = StateCache(1 << 30, salt=b"s", disk=DiskTier(sc, 1 << 30, "sig", "mlx", *mlx_codec(mx),
+                                                                  accept_engines=accept))
     return be
 
 
@@ -535,6 +580,33 @@ def test_mlx_prefix_from_disk_continues_the_root(tmp_path):
     be2.state_cache.close()
 
 
+@pytest.mark.parametrize("row_bits", [False, True])
+def test_mlx_imports_graph_entry_with_any_engine(tmp_path, monkeypatch, row_bits):
+    """row_bits: the bits depend on the uncached row count (MLXBackend._kernels, as on a real model); another engine's
+    state never has MLX's bits, and is still used (any-engine is close to the uncached answers, not equal)."""
+    pytest.importorskip("mlx.core")
+    from basal.engine import MLXBackend
+    from tests.test_mlx import LIDS, STATE, TOKS, reference, tiny_llama
+    from tests.test_mlx_state_cache import close
+    if row_bits:
+        monkeypatch.setattr(MLXBackend, "_kernels", lambda self, ref: None if ref is None else (ref,))
+    m = tiny_llama(tmp_path)
+    with torch.no_grad():
+        pkv = m(input_ids=torch.tensor([STATE]), use_cache=True).past_key_values
+    kv = [(layer.keys[0], layer.values[0]) for layer in pkv.layers]
+    writer = DiskTier(tmp_path / "sc", 1 << 30, "sig", "graph", *torch_codec("cpu"))
+    ref = StateCache(1, salt=b"s")
+    writer.save(ref.key(STATE), kv, STATE, ref._blocks(STATE))
+    writer.close()
+    be = mlx_cached(tmp_path, tmp_path / "sc")
+    assert be.state_cache.stats()["disk_entries"] == 0
+    be = mlx_cached(tmp_path, tmp_path / "sc", accept="any")
+    warm = be.run_shared([(TOKS, LIDS, len(STATE))])[0]
+    assert be.state_cache.stats()["disk_loads"] == 1
+    assert close(reference(m, TOKS, LIDS), warm, tol=2e-3)
+    be.state_cache.close()
+
+
 def test_mlx_single_prompt_cut_hits_disk(tmp_path):
     pytest.importorskip("mlx.core")
     from tests.test_mlx import LIDS, STATE, TOKS, reference, tiny_llama
@@ -574,7 +646,7 @@ def test_dir_flag_refused_for_qwen35():
 def test_defaults():
     from basal.server import parser
     a = parser().parse_args([])
-    assert (a.state_cache_dir, a.state_cache_disk_gb) == (None, 20)
+    assert (a.state_cache_dir, a.state_cache_disk_gb, a.state_cache_import) == (None, 20, "same-engine")
 
 
 def test_metrics_report_the_disk(mk):
