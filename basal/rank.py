@@ -7,11 +7,13 @@ a choice question.
    "choice_context": "auto" | "screen" | "shortlist", "order": "state_first" | "candidates_first",
    "prior": {key: weight}, "limit": 100}
 
-Screening: the candidates are numbered in a list ("Passage 7: <text>", under a "[<group>]" line when they have one) and
-packed, in their order, into requests of `chunk` candidates (a group stays in one request when it fits). Each request's
-state is the request's own state and its list; every candidate in it is one yes / no question ("{candidate}" in the
-instructions names it), so the request reads its state once (SOAM) and judges its candidates side by side. All requests
-go through the server's queue together. A candidate's score is its calibrated P(yes), times its `prior` weight.
+Screening: the candidates are numbered in a list ("Passage 7: <text>", under a "[<group>]" line when they have one; a
+text of several lines keeps them, each line after the first indented by two spaces so that it cannot pass for an
+entry, and a group name is put on one line) and packed, in their order, into requests of `chunk` candidates (a group
+stays in one request when it fits). Each request's state is the request's own state and its list; every candidate in
+it is one yes / no question ("{candidate}" in the instructions names it), so the request reads its state once (SOAM)
+and judges its candidates side by side. All requests go through the server's queue together. A candidate's score is
+its calibrated P(yes), times its `prior` weight.
 
 Final choice (`top` >= 2): one choice question over the top `top` candidates by score, whose options are their names in
 the list; its probabilities reorder them, the others keep their score order. Its context is the screening request's
@@ -148,16 +150,24 @@ def chunks(cands, size):
     return out
 
 
+def _flat(text):
+    """One line: every line break str.splitlines knows becomes a space
+    (\\n \\r \\x0b \\x0c \\x1c-\\x1e \\x85 U+2028 U+2029)."""
+    return " ".join(text.splitlines())
+
+
 def listing(cands, idx, label, title):
-    """The numbered list of the candidates idx (1, 2, ... in this list) under their group lines -> text, {idx: name}."""
+    """The numbered list of the candidates idx (1, 2, ... in this list) under their group lines -> text, {idx: name}.
+    A candidate's lines after its first are indented (no line of its text can pass for an entry or a group line)."""
     lines, names, group = ([title + ":"] if title else []), {}, None
     for n, i in enumerate(idx, 1):
         g = cands[i][2]
+        g = None if g is None else _flat(g)
         if g is not None and g != group:
-            lines.append(f"[{g}]")
+            lines.append("[" + g + "]")
         group = g
         names[i] = f"{label} {n}"
-        lines.append(f"{names[i]}: {cands[i][1]}")
+        lines.append(f"{names[i]}: " + "\n  ".join(cands[i][1].splitlines()))
     return "\n".join(lines), names
 
 
