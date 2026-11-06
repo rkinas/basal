@@ -260,7 +260,7 @@ QUESTION_TYPES = ("choice", "noul", "score", "act", "multi", "tool")  # the type
 
 
 @reads_request
-def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
+def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None, langs=None):
     """Questions of a request -> readout items (options as a list) + keys to assemble the answer. Every item has
     `branches` = [(question text, options)]: one for the decision types, one per label for `multi`. max_opts: the
     model's prompt format limit (10 for format 1, 255 for format 2). force_lang: the request's "lang" ("pl" / "en")
@@ -273,7 +273,7 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None):
         if t not in QUESTION_TYPES:
             raise RequestError(f"question {name!r}: unknown type {t!r}")
         instr = _text(q.get("instructions", ""))
-        lang = force_lang or ("pl" if state_pl else lang_of(instr))
+        lang = force_lang or (langs or {}).get(name) or ("pl" if state_pl else lang_of(instr))
         extra = {}
         lim = limits(name, q, t)
         if t == "multi":  # one yes/no branch per label
@@ -2031,10 +2031,10 @@ class Server:
             if t is None:
                 break
             truncation = t
-            langs = [q["lang"] for q in qs]
-            qs = to_items(state, body["questions"], self.max_options, force_lang=body.get("lang"))
-            for q, lang in zip(qs, langs):
-                q["lang"] = lang  # the language of the whole state
+            langs = {q["name"]: q["lang"] for q in qs}
+            qs = to_items(state, body["questions"], self.max_options, force_lang=body.get("lang"), langs=langs)
+            for q in qs:
+                q["lang"] = langs[q["name"]]  # the language of the whole state
                 stored_fallback(self.cal, q)
             branches = [self.branch(i, bi, q) for i, q in enumerate(qs) for bi in range(len(q["branches"]))]
             n_tok, longest = self.encode(branches)
