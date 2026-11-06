@@ -60,7 +60,7 @@ def _raw(data, n):
 
 
 def _image(raw, n):
-    from PIL import Image, UnidentifiedImageError
+    from PIL import Image, ImageOps, UnidentifiedImageError
     Image.MAX_IMAGE_PIXELS = MAX_PIXELS
     try:
         im = Image.open(io.BytesIO(raw))
@@ -68,6 +68,7 @@ def _image(raw, n):
         if w * h > MAX_PIXELS:
             raise ValueError(f"media {n}: {w}x{h} pixels, more than {MAX_PIXELS:,}")
         im.load()
+        im = ImageOps.exif_transpose(im)  # a phone photo is stored sideways with an Orientation tag
         if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:  # onto white, not onto black
             rgba = im.convert("RGBA")
             im = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba)
