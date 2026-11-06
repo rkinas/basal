@@ -48,8 +48,8 @@ import torch
 from . import adapter as adapter_module
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
-                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, recurrent_layers, recurrent_refused,
-                     resolve, set_fp8_fast_accum)
+                     VLLM_PRESETS, VLLMBackend, cache_signature, fp8_refused, gemma_fast_kernels, recurrent_layers,
+                     recurrent_refused, resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
 from .facts import MAX_CHARS as FACTS_MAX_CHARS, inject as inject_facts
@@ -1172,6 +1172,12 @@ class Server:
             raise SystemExit("--state-cache-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4) or "
                              "--mode mlx and is not combined with --deterministic (a cached state changes the shapes of "
                              "the forwards)")
+        if getattr(a, "state_cache_dir", None) is not None:
+            if not (getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on"):
+                raise SystemExit("--state-cache-dir needs --state-cache-gb or --prefix-cache on")
+            if kind not in ("graph", "mlx"):
+                raise SystemExit("--state-cache-dir works with the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
+                                 "nvfp4) and --mode mlx")
         if getattr(a, "layout", None) not in (None, "canonical"):
             refuse_layout_caches(a.layout, a)
         if getattr(a, "prefix_cache", "off") == "on" and (a.deterministic or kind not in ("graph", "mlx")):
@@ -1227,7 +1233,8 @@ class Server:
                 why = gdn_refused(a.quant or quant, getattr(a, "state_cache_gb", 0),
                                   getattr(a, "prefix_cache", "off") == "on", getattr(a, "batches", "default"),
                                   lean_arg(getattr(a, "lean", "off")), getattr(a, "tree", "dense"),
-                                  getattr(a, "readout_layer", "off"), getattr(a, "template_prefix", "off"))
+                                  getattr(a, "readout_layer", "off"), getattr(a, "template_prefix", "off"),
+                                  disk=getattr(a, "state_cache_dir", None) is not None)
                 # --long-lane on Qwen3.5: bf16 answers 0.12 pt further from fp32 than eager's (five questions per state),
                 # so only with --long-lane-gdn on
                 if not why and getattr(a, "long_lane", "off") == "on" and getattr(a, "long_lane_gdn", "off") != "on":
@@ -1294,6 +1301,15 @@ class Server:
             self.prepared = prepared.startup(md, fields, getattr(a, "prepared", "auto"), a.model, a.revision)
             print(f"basal: prepared start-up: {self.prepared or 'none for this GPU and version (basal-prepare writes it)'}",
                   flush=True)
+        # --state-cache-dir: the compatibility signature of the cached states' files (engine.cache_signature)
+        disk_kwargs = dict(state_cache_dir=getattr(a, "state_cache_dir", None),
+                           state_cache_disk_gb=getattr(a, "state_cache_disk_gb", 20.0),
+                           state_cache_signature=None)
+        if disk_kwargs["state_cache_dir"] is not None:
+            kv_dtype = "bf16" if kind == "mlx" else {"bfloat16": "bf16", "float16": "f16", "float32": "f32"}.get(
+                a.dtype, a.dtype)
+            disk_kwargs["state_cache_signature"] = cache_signature(md, *model_identity(a.model, md), self.adapter,
+                                                                   quant, kv_dtype)
         if kind == "eager":
             self.backend = EagerBackend(md, a.dtype, device=a.device, media=getattr(a, "media", "off") == "on",
                                         forward=getattr(a, "eager_forward", None),
@@ -1315,7 +1331,8 @@ class Server:
                                       forward=getattr(a, "mlx_forward", "mlx-lm"),
                                       compute=getattr(a, "mlx_compute", "auto"),
                                       state_cache_gb=getattr(a, "state_cache_gb", 0),
-                                      prefix=getattr(a, "prefix_cache", "off") == "on", adapter=self.adapter)
+                                      prefix=getattr(a, "prefix_cache", "off") == "on", adapter=self.adapter,
+                                      **disk_kwargs)
         elif kind == "mps":
             self.backend = MPSBackend(md, a.dtype, shared=shared, device=a.device, adapter=self.adapter)
         elif kind == "gguf":
@@ -1348,7 +1365,7 @@ class Server:
                                         quant_load=getattr(a, "quant_load", "gpu"),
                                         state_cache_bits=getattr(a, "state_cache_bits", 16),
                                         graph_memory_gb=getattr(a, "graph_memory_gb", None), **nvfp4_args(a, md, quant),
-                                        adapter=self.adapter)
+                                        adapter=self.adapter, **disk_kwargs)
             if getattr(a, "state_cache_lock", "off") == "on":  # before lane() copies the backend
                 self.backend.state_cache_lock = True
         self.lanes = None  # --lanes N: the backend and N - 1 copies (GraphBackend.lane), each serving one request
@@ -2286,6 +2303,13 @@ def add_engine_args(ap):
                     help="--state-cache-gb / --prefix-cache: 16 keeps the cached keys and values as computed; 8 stores "
                          "them as 8-bit integers with a scale per group (keys per channel, values per token): about "
                          "1.7x more cached states per GB, answers close to (not equal to) the uncached ones")
+    ap.add_argument("--state-cache-dir", dest="state_cache_dir", default=None,
+                    help="with --state-cache-gb / --prefix-cache on: also keep every cached state as a .safetensors "
+                         "file under this directory (one subdirectory per model signature), read back on a memory "
+                         "miss, also by later server processes; least recently used files evicted at "
+                         "--state-cache-disk-gb")
+    ap.add_argument("--state-cache-disk-gb", dest="state_cache_disk_gb", type=float, default=20.0,
+                    help="--state-cache-dir: GiB of state files kept on disk (default 20)")
     ap.add_argument("--prefix-cache", dest="prefix_cache", choices=["on", "off"], default="off",
                     help="CUDA graph engine and --mode mlx: compute the template prefix (chat template, system "
                          "prompt, the header up to the state) once and run short requests over its cached keys and "
@@ -2600,6 +2624,24 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                        [({}, st["prefix_hits"])]),
                       ("basal_state_cache_evictions_total", "states evicted for the budget", "counter",
                        [({}, st["evictions"])])]
+                if "disk_entries" in st:  # --state-cache-dir
+                    m += [("basal_state_cache_disk_bytes", "bytes of state files on disk", "gauge",
+                           [({}, st["disk_bytes"])]),
+                          ("basal_state_cache_disk_budget_bytes", "--state-cache-disk-gb", "gauge",
+                           [({}, st["disk_budget_bytes"])]),
+                          ("basal_state_cache_disk_entries", "state files on disk", "gauge", [({}, st["disk_entries"])]),
+                          ("basal_state_cache_disk_loads_total", "states read from disk", "counter",
+                           [({}, st["disk_loads"])]),
+                          ("basal_state_cache_disk_prefix_loads_total", "states read from disk as a prefix", "counter",
+                           [({}, st["disk_prefix_loads"])]),
+                          ("basal_state_cache_disk_writes_total", "state files written", "counter",
+                           [({}, st["disk_writes"])]),
+                          ("basal_state_cache_disk_write_drops_total", "state files not written (queue full)",
+                           "counter", [({}, st["disk_write_drops"])]),
+                          ("basal_state_cache_disk_errors_total", "state files that could not be written or read",
+                           "counter", [({}, st["disk_errors"])]),
+                          ("basal_state_cache_disk_evictions_total", "state files evicted for the disk budget",
+                           "counter", [({}, st["disk_evictions"])])]
             m.append(("basal_state_cache_snapshot_timestamp_seconds", "Unix time of the cache values above (0: none "
                       "read yet)", "gauge", [({}, cache_seen["at"])]))
         return PlainTextResponse(prometheus(m), media_type="text/plain; version=0.0.4")
@@ -2615,6 +2657,9 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
             yield
         for task in tasks:
             task.cancel()
+        cache = getattr(srv.backend, "state_cache", None)
+        if cache is not None:  # --state-cache-dir: the states queued for writing reach the disk
+            cache.close()
 
     routes = [Route("/v1/systemone", systemone, methods=["POST"]), Route("/v1/basal", systemone, methods=["POST"]),
               Route("/v1/decisions", decisions, methods=["POST"]), Route("/v1/models", models),
