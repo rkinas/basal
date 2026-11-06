@@ -28,7 +28,7 @@ from pathlib import Path
 import httpx
 
 from .cli import positive
-from .textio import encoding
+from .textio import open_text
 
 LOCAL = ("id", "gold", "group", "family")  # a line's own fields (as basal-calibrate reads them), never sent
 
@@ -86,7 +86,7 @@ def same_file(a, b):
 def lines(path):
     """The item of every non-blank line (or the error of a line that is not a JSON object), read as they go and split
     at "\n" only (U+2028 inside a string stays in its line); UTF-8 with or without a BOM, or UTF-16 with its BOM."""
-    with open(path, encoding=encoding(path), newline="\n") as f:
+    with open_text(path, newline="\n") as f:
         for n, line in enumerate(f, 1):
             if not line.strip():
                 continue

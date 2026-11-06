@@ -1,6 +1,8 @@
 """JSONL readers split at "\n" only: json.dumps(..., ensure_ascii=False) leaves U+2028, U+2029 and U+0085 unescaped
 in strings (text pasted from a word processor or a PDF), and str.splitlines cut such a valid line in two."""
 import json
+import os
+import threading
 
 import pytest
 
@@ -102,3 +104,56 @@ def test_the_think_calibration_reads_a_bom_and_utf_16(tmp_path, codec):
     cal = {"temperature_per_prim": {"choice": 1.25}, "note": STATE}
     (tmp_path / "c.json").write_bytes(CODECS[codec](json.dumps(cal, ensure_ascii=False)))
     assert think_calibration(None, str(tmp_path / "c.json")) == (cal, "c.json")
+
+
+# A pipe can be read once: `basal-run --input <(jq ...)`, `--input /dev/stdin`, `navigate --queries <(...)`. The
+# codec is picked from bytes the reader keeps, not from a first open that eats them.
+RECS = [{"id": "a", "state": STATE, "question": "q", "options": ["x", "y"]}, {"id": "b", "state": "two"}]
+PIPED = {"utf-8": lambda s: s.encode(), **CODECS}
+
+
+def piped(data):
+    """data behind a pipe, as the shell's <(...) hands it over: /dev/fd/N, no seeking, read once."""
+    r, w = os.pipe()
+    os.write(w, data)
+    os.close(w)
+    return r, f"/dev/fd/{r}"
+
+
+@pytest.mark.skipif(not os.path.isdir("/dev/fd") or os.name == "nt", reason="no /dev/fd")
+@pytest.mark.parametrize("codec", PIPED)
+def test_a_pipe_is_read_once_with_its_first_record_whole(codec):
+    from basal.navigate import Tree
+    from basal.run import lines
+    from basal.textio import read_text
+    text = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in RECS)
+    nodes = [{"id": "r", "text": "root"}, {"id": "x", "parent": "r", "text": STATE}]
+    cases = [(text, lambda p: [json.loads(x) for x in read_lines(p)], RECS), (text, lambda p: list(lines(p)), RECS),
+             (json.dumps(RECS[0], ensure_ascii=False), lambda p: json.loads(read_text(p)), RECS[0]),
+             ("".join(json.dumps(n) + "\n" for n in nodes), lambda p: Tree.load(p).nodes["x"]["text"], STATE)]
+    for data, read, want in cases:
+        r, path = piped(PIPED[codec](data))
+        try:
+            assert read(path) == want
+        finally:
+            os.close(r)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs")
+def test_a_fifo_is_read_once(tmp_path):
+    path = tmp_path / "in.jsonl"
+    os.mkfifo(path)
+    data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in RECS).encode("utf-8")
+
+    def write():
+        with open(path, "wb") as f:  # opens once a reader does
+            f.write(data)
+    threading.Thread(target=write, daemon=True).start()
+    got = []
+    reader = threading.Thread(target=lambda: got.append([json.loads(x) for x in read_lines(path)]), daemon=True)
+    reader.start()
+    reader.join(5)
+    if reader.is_alive():  # a second open waits for a writer that never comes: give it an end of file
+        open(path, "wb").close()
+        reader.join(5)
+    assert got == [RECS]

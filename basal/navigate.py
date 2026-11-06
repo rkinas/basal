@@ -43,7 +43,7 @@ import time
 
 from .prompt import lang_of
 from .rank import chunks
-from .textio import encoding
+from .textio import open_text
 
 LABELS = {
     "en": {"topic": ("Topic", "Topics"), "page": ("Page", "Pages"), "section": ("Section", "Sections"),
@@ -114,7 +114,7 @@ class Tree:
 
     @classmethod
     def load(cls, path):
-        with open(path, encoding=encoding(path)) as f:  # a BOM (Notepad) or UTF-16 (PowerShell 5) too
+        with open_text(path) as f:  # a BOM (Notepad) or UTF-16 (PowerShell 5) too
             return cls(json.loads(line) for line in f if line.strip())
 
     def save(self, path):
@@ -447,7 +447,7 @@ def main(argv=None):
                 print(f"{n:>3}  {h['score']:.3f}  {h['id']}  {h['text'][:100]}")
             print(f"{r['latency_ms']:.0f} ms, {sum(s['requests'] for s in r['stages'])} requests", file=sys.stderr)
             return
-        with open(a.queries, encoding=encoding(a.queries)) as f:
+        with open_text(a.queries) as f:
             for line in f:
                 if not line.strip():
                     continue

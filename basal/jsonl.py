@@ -4,7 +4,7 @@ from .textio import read_text
 
 def read_lines(path):
     """The lines of a JSONL file, split at "\n" only (a "\r" before it is dropped; no empty last line). The file is
-    UTF-8 with or without a BOM, or UTF-16 with its BOM (textio.encoding).
+    UTF-8 with or without a BOM, or UTF-16 with its BOM (textio.open_text).
 
     str.splitlines also splits at U+2028, U+2029 and U+0085, which json.dumps(..., ensure_ascii=False) leaves
     unescaped inside strings (text pasted from a word processor or a PDF), and so cut a valid line in two."""
