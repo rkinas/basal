@@ -98,8 +98,9 @@ file from a server you trust.)
 - *max |dp|* against the fp32 reference is larger and normal for a quantised file: 0.35 for this file's Q8_0
   (mean 0.06), with the top option unchanged on all 60 questions. The model card of the GGUF repository gives the
   agreement on a large set.
-- Requests the server had to cut (`usage.truncated`, the context was shorter than the prompt) are left out and counted;
-  raise `-c`.
+- Requests the server had to cut (`usage.truncated`, the context was shorter than the prompt) are left out of the
+  comparison and counted; raise `-c`. When more than half of the requests were cut the check exits 1 (FAIL), as it does
+  for a failed request or a question the server left unanswered.
 - The seconds per request are for your orientation only.
 
 ## What was tested
