@@ -141,3 +141,28 @@ def test_safety_tickets_are_a_blind_set_with_labelled_risks():
     assert len(safety) == 40 and sum(t["gold"]["danger"] == "yes" for t in safety) == 12
     assert not seen & {t["state"] for t in safety}
     assert all(t["gold"]["urgency"] == 2 for t in safety if t["gold"]["danger"] == "yes")
+
+
+def test_webhook_answers_422_to_a_body_that_is_no_ticket_and_413_to_a_huge_one():
+    """People copy this webhook into production: a body that is not JSON, not an object, or whose text is not a string
+    answered 500 (and the body was read whole whatever its size). basal is never asked for any of them."""
+    import asyncio
+
+    import httpx
+
+    from basal.client import AsyncBasal
+    sent = []
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, json={"model": "m", "usage": {}, "answers": answers()})
+    basal = AsyncBasal("http://basal", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    web = app_mod.make_app(basal, max_error=0.05, lang="pl")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=web), base_url="http://app") as c:
+            bodies = [b"not json", b"[1, 2]", b'{"text": 5}', b'"text"', b"[" * 100_000 + b"]" * 100_000,
+                      b'{"text": "' + b"x" * (2 << 20) + b'"}']
+            return [(await c.post("/ticket", content=b, headers={"content-type": "application/json"})).status_code
+                    for b in bodies]
+    assert asyncio.run(go()) == [422, 422, 422, 422, 422, 413] and not sent

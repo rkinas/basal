@@ -10,8 +10,11 @@ The answer: {"id", "queue", "priority", "category", "urgency", "needs_human", "a
 - needs_human: the yes/no answer as true / false, or null when it abstains;
 - automated: true when no answer abstained, so nobody needs to look at the ticket before it is routed.
 
+A body that is not a JSON object with a text answers 422, a body over MAX_BODY bytes 413.
+
 Environment: BASAL_URL (http://127.0.0.1:8000), BASAL_API_KEY, MAX_ERROR (0.05; "" turns it off), LANG_PRESET (pl).
 """
+import json
 import os
 import sys
 from pathlib import Path
@@ -24,6 +27,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from run import SAFETY_AT, predicted, triage_questions  # noqa: E402
 
 from basal.client import AsyncBasal, BasalError  # noqa: E402
+
+
+MAX_BODY = 1 << 20  # bytes of a ticket's JSON body (413 beyond)
 
 
 def route(answers):
@@ -52,7 +58,17 @@ def make_app(basal=None, max_error=None, lang=None):
                                 api_key=os.environ.get("BASAL_API_KEY"), retries=2)
 
     async def ticket(request):
-        body = await request.json()
+        raw = b""
+        async for chunk in request.stream():  # read at most MAX_BODY bytes, whatever the client sends
+            raw += chunk
+            if len(raw) > MAX_BODY:
+                return JSONResponse({"error": f"the body is over {MAX_BODY} bytes"}, status_code=413)
+        try:
+            body = json.loads(raw)
+        except (ValueError, RecursionError):  # (RecursionError: JSON nested thousands deep)
+            return JSONResponse({"error": "the body is not JSON"}, status_code=422)
+        if not isinstance(body, dict) or not isinstance(body.get("text") or "", str):
+            return JSONResponse({"error": 'the body must be a JSON object {"id": ..., "text": "..."}'}, status_code=422)
         text = (body.get("text") or "").strip()
         if not text:
             return JSONResponse({"error": "text is required"}, status_code=422)
