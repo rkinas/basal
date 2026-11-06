@@ -416,7 +416,8 @@ Answer: `tools` (the selected keys), `call` (true when the set contains a tool),
 
 - the full form, `{action: {outcome: cost}}`, where each action gives a cost for every outcome;
 - the short form, `{"wrong": W, "defer": D}`: every outcome is also an action, costing 0 when right and W when wrong,
-  and the action `defer` costs D for every outcome.
+  and the action `defer` costs D for every outcome. Its only defer action is `defer`, so `defer_action` may only name
+  it, and no outcome may be called `defer`.
 
 The action is the one with the lowest expected cost under the calibrated outcome probabilities. Answer: `action`,
 `expected_costs`, `answer` (the most probable outcome), `probabilities` and `confidence`.
@@ -560,7 +561,7 @@ with `question '<name>': `.
 | `option_keys` | `option_keys must be "show" or "hide", got '…'` |
 | `multi` | `multi needs criteria`; unknown `objective`; `threshold` with another objective; `min` / `max` not non-negative integers, `min` > labels or > `max`; `exclusive` / `fallback` keys not among the criteria; `fallback_threshold` without a fallback or outside 0..1 |
 | `tool` | `tools` missing or empty; a definition that is not an object, has a type other than `function`, a name that is empty or contains whitespace, or a non-string description; a schema that is not a JSON-schema object (`type` other than `"object"`, `properties` not an object of schemas, `required` not distinct names among the properties); duplicate tool names; unknown or duplicate extras; extras that clash with tool names; `rank` outside 1..options; `description_chars` not a non-negative integer; `max_error` with a tool set or outside (0, 1); `criteria` given to a tool question |
-| `act` | `act needs costs`; `costs['a'] must give a cost for every outcome [...]`; `max_error needs a defer action ("defer"/"human" or defer_action)` |
+| `act` | `act needs costs`; `costs['a'] must give a cost for every outcome [...]`; `max_error needs a defer action ("defer"/"human" or defer_action)`; in the short form, a `defer_action` other than `defer` (or without a `defer` cost), and an outcome named `defer` next to a `defer` cost |
 | codes | `option letters are not single tokens for this tokenizer` |
 
 The context check counts each prompt as rendered: template, state, question, options and prefill. With several
