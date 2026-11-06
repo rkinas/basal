@@ -33,6 +33,7 @@ import httpx
 import torch
 
 from . import rank, server, tasks
+from .cli import positive
 from .engine import resolve
 from .facts import inject as inject_facts
 from .jsonl import read_lines
@@ -317,7 +318,7 @@ def rows_main(argv):
     ap.add_argument("--out", required=True)
     ap.add_argument("--think", choices=["auto", "off", "force"], default="auto")
     ap.add_argument("--text", action="store_true", help="keep the reasoning in the rows")
-    ap.add_argument("--concurrency", type=int, default=32)
+    ap.add_argument("--concurrency", type=positive, default=32, help="requests in flight (at least 1)")
     a = ap.parse_args(argv)
     bodies, decisions = load(a.data)
     lines = read_lines(a.data)
