@@ -12,6 +12,7 @@ import pytest
 from basal import agree
 from basal import bench
 from basal import loadtest as lt
+from basal import metrics
 from basal.jsonl import read_lines
 
 
@@ -151,3 +152,8 @@ def test_an_answer_that_vanishes_under_load_is_not_identical(fake_http, capsys):
 
 def test_equal_answers_are_identical(fake_http, capsys):
     assert determinism_report(capsys, lambda c: Reply(2))["identical"] == 4
+
+
+def test_help_text_is_escaped_like_a_label_value():
+    out = metrics.prometheus([("basal_x", "a\\b\nc", "gauge", [({}, 1)])])
+    assert out.count("\n") == 3 and "a\\\\b\\nc" in out
