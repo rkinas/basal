@@ -18,6 +18,7 @@ reads the options as a choice question (as a yes/no question per tool with "mult
 model's prompt format: up to 255 options with prompt-format-2 models, 10 with format 1.
 """
 import re
+from collections import Counter
 
 EXTRA = {
     "answer_directly": {"en": "Answer directly without calling a tool",
@@ -105,7 +106,7 @@ def parse(name, q, lang):
         raise ValueError(f"question {name!r}: tool needs \"tools\", a non-empty list of tool definitions")
     defs = [_definition(name, i, t) for i, t in enumerate(tools)]
     names = [d[0] for d in defs]
-    dup = sorted({n for n in names if names.count(n) > 1})
+    dup = sorted(n for n, k in Counter(names).items() if k > 1)  # (once: names.count per tool was quadratic)
     if dup:
         raise ValueError(f"question {name!r}: duplicate tool names {dup}")
     extra = q.get("extra", [] if q.get("multi") else list(EXTRA))

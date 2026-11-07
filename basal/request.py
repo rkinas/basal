@@ -10,6 +10,7 @@ Also the request helpers both read alike: a value as text (text_of), the options
 (named_options) and a body read once (read_json for basal-serve, parse_body for the router)."""
 import json
 import math
+from collections import Counter
 
 from .prompt import RequestError
 
@@ -156,7 +157,7 @@ def named_options(crit, option_keys="show"):
     if option_keys not in ("show", "hide"):
         raise RequestError(f'option_keys must be "show" or "hide", got {option_keys!r}')
     texts = [str(k) if v is None else text_of(v) for k, v in crit.items()]
-    dup = {t for t in texts if texts.count(t) > 1}
+    dup = {t for t, n in Counter(texts).items() if n > 1}  # (once: texts.count per option took 4.5 s for 32,000)
     shown = [t if v is None or (option_keys == "hide" and t not in dup) else f"{k}: {t}"
              for (k, v), t in zip(crit.items(), texts)]
     return list(crit), shown

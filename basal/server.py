@@ -376,6 +376,8 @@ def to_items(state, questions, max_opts=MAX_OPTIONS, force_lang=None, langs=None
                 if isinstance(crit, list):
                     crit = listed_options(name, crit)
                 keys, opts = named_options(crit, q.get("option_keys", "show"))
+            if not 2 <= len(opts) <= max_opts:  # (before act_spec: its cost matrix is outcomes x outcomes)
+                raise RequestError(f"question {name!r}: {len(opts)} options (supported: 2..{max_opts})")
             extra = dict(base=base, act=act_spec(name, q, keys))
         elif t == "noul":  # yes/no; optional criteria {"true": ..., "false": ...}; answer = P(true)
             keys, opts = yes_no(lang, q.get("criteria"))

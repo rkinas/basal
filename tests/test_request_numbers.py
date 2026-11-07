@@ -62,3 +62,29 @@ def test_256_labels_and_other_objectives_are_accepted():
     validate("q", "f1", keys[:256])
     validate("q", "exact", keys)
     validate("q", "threshold", keys)
+
+
+N = 20_000
+TOO_MANY = {
+    "choice": {"type": "choice", "instructions": "x", "criteria": {f"k{i}": f"o{i}" for i in range(N)}},
+    "choice list": {"type": "choice", "instructions": "x", "criteria": [f"o{i}" for i in range(N)]},
+    "act": {"type": "act", "instructions": "x", "criteria": {f"k{i}": f"o{i}" for i in range(N)},
+            "costs": {"wrong": 1, "defer": 0.5}},
+    "tool": {"type": "tool", "tools": [{"type": "function", "function": {"name": f"f{i}", "description": "d"}}
+                                       for i in range(N)]},
+}
+
+
+@pytest.mark.parametrize("kind", list(TOO_MANY))
+def test_a_question_with_far_more_options_than_the_cap_is_refused_in_linear_time(kind):
+    """The options of a question are read in Server.admit, on the event loop, before the cap (255) refuses them: in
+    linear time (each option's text counted in the whole list, each tool's name too, and act's outcome x outcome
+    cost matrix built before the count took 2-12 s here, 30 s for 32,000 outcomes)."""
+    import time
+
+    from basal.prompt import RequestError
+    from basal.server import to_items
+    t = time.perf_counter()
+    with pytest.raises(RequestError, match=r"question 'q': 2000\d options"):  # (a tool question: and 3 extra options)
+        to_items("", {"q": TOO_MANY[kind]}, 255, force_lang="en")
+    assert time.perf_counter() - t < 1.0
