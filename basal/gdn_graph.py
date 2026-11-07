@@ -1132,9 +1132,13 @@ class GDNGraphBackend(GraphBackend):
         cannot be cut there."""
         if not keys or self.state_cache is None:
             return
+        unstored = {}
         na = len(self.kv_shapes)
         for k, key in enumerate(keys):
             if key is None or k in hits:
+                continue
+            if key in unstored:
+                hits[k] = unstored[key]
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
@@ -1159,6 +1163,8 @@ class GDNGraphBackend(GraphBackend):
                    + [(s[0], c[0]) for s, c in st])
             self.state_cache.put(key, new, tokens=root, replaces=old)
             hits[k] = new
+            if not self.state_cache.has(key):
+                unstored[key] = new  # already owned by hits; no additional checkpoint allocation
 
     @staticmethod
     def _entry(kv, st, r, p):
@@ -1180,24 +1186,30 @@ class GDNGraphBackend(GraphBackend):
                 cb[r].copy_(ce, non_blocking=True)
 
     @torch.no_grad()
-    def _tree_hidden(self, packs, idx, keys=None, hits=None):
+    def _tree_hidden(self, packs, idx, keys=None, hits=None, prefills=None):
         """Branched units -> hidden states at their readout positions. Pass 1: the roots in a plain graph that also
         writes their keys, values and recurrent states (beyond the largest graph: one uncaptured forward into fresh
         buffers). Pass 2: one row per leaf of each unit's trie, over its root, in pass-2 graphs of up to LEAF_ROWS[-1]
         rows (uncaptured beyond them). keys / hits (--state-cache-gb): per unit, the state-cache key of its root and its
         cached entry; when every root is cached and no prompt ends inside one, pass 1 is skipped (_load); roots computed
-        here are stored (_entry)."""
+        here are stored (_entry). Identical keyed roots share one pass-1 row; prefills retains raw checkpoints for
+        repeated keys across forwards of the same run_shared call."""
         P = [packs[k][2].index(1) for k in idx]  # block 0 (the root) comes first and is contiguous
         b = len(idx)
         roots = [packs[k][0][:p] for k, p in zip(idx, P)]
         keys, hits = keys or [None] * b, hits or [None] * b
+        if prefills:
+            hits = [e if e is not None else prefills.get(key) for key, e in zip(keys, hits)]
         leaves = [self._leaves(packs[k], p) for k, p in zip(idx, P)]
+        share_cached = all(e is not None for e in hits) and all(q is not None for _, reads in leaves for q, _ in reads)
+        first = {}
+        row = [first.setdefault(key if key is not None and (share_cached or key in (prefills or {})) else r,
+                                len(first)) for r, key in enumerate(keys)]
+        one = [row.index(r) for r in range(len(first))]
         # a prompt that is a root itself is read out in pass 1, so its unit needs pass 1
-        cached = all(e is not None for e in hits) and all(q is not None for _, reads in leaves for q, _ in reads)
-        row = list(range(b))  # each unit's root row; cached: units over the same root (a template prefix) share one
-        if cached:
-            first = {}
-            row = [first.setdefault(key, len(first)) for key in keys]
+        needs_hidden = {row[r] for r, (_, reads) in enumerate(leaves) if any(q is None for q, _ in reads)}
+        cold = [r for r in one if hits[r] is None or row[r] in needs_hidden]
+        cached = not cold
         captured = self.pool is not None and max(P) <= self.PLAIN_LENS[-1] and max(row) < self.TREE_ROWS[-1]
         h1 = None
         if cached:
@@ -1208,14 +1220,13 @@ class GDNGraphBackend(GraphBackend):
             else:
                 L2 = max(P)
                 kv, st = self._fresh(max(row) + 1, L2)
-            one = [row.index(r) for r in range(max(row) + 1)]  # a unit of each root row
             self._load(kv, st, [hits[u] for u in one], [P[u] for u in one])
         elif captured:
             self._count("pass1", captured)
-            L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(b, self.BATCHES)
+            L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(len(cold), self.BATCHES)
             L2 = self._root_len(L)
             g, s_ids, s_lens, h1 = self._graph(B, L)
-            ids, lens = self._rows_in(roots, L, B)
+            ids, lens = self._rows_in([roots[r] for r in cold], L, B)
             s_ids.copy_(self._to_dev(ids), non_blocking=True)
             s_lens.copy_(self._to_dev(lens), non_blocking=True)
             g.replay()
@@ -1223,16 +1234,28 @@ class GDNGraphBackend(GraphBackend):
         else:
             self._count("pass1", captured)
             L2 = max(P)
-            kv, st = self._fresh(b, L2)
-            ids, lens = self._rows_in(roots, L2)
-            h1 = self.fwd(self._to_dev(ids), self._to_dev(lens), kv, st)
-        if self.state_cache is not None and not cached:  # the roots computed here, as full-state checkpoints
-            for r, key in enumerate(keys):
-                if key is not None and hits[r] is None:
-                    self.state_cache.put(key, self._entry(kv, st, r, P[r]), tokens=roots[r])
+            kv, st = self._fresh(len(one), L2)
+            ids, lens = self._rows_in([roots[r] for r in cold], L2)
+            h1 = self.fwd(self._to_dev(ids), self._to_dev(lens),
+                          [(k[:len(cold)], v[:len(cold)]) for k, v in kv],
+                          [(s[:len(cold)], c[:len(cold)]) for s, c in st])
+        if not cached:
+            computed = {}
+            for j, r in enumerate(cold):
+                key = keys[r]
+                if key is not None or len(cold) != len(one):
+                    e = self._entry(kv, st, j, P[r])
+                    computed[r] = e
+                    if key is not None and self.state_cache is not None:
+                        self.state_cache.put(key, e, tokens=roots[r])
+                    self._retain_prefill(prefills, key, e)
+            if len(cold) != len(one):
+                # _entry cloned every computed source before _load can overwrite its static root row.
+                self._load(kv, st, [computed[r] if r in computed else hits[r] for r in one], [P[r] for r in one])
+        read_row = {r: j for j, r in enumerate(cold)}
         rows, sel = [], []  # rows: (unit, token indices); sel: per readout (pass, row, column), in unit order
         for r, (leaf, reads) in enumerate(leaves):
-            sel += [(1, r, c) if q is None else (2, len(rows) + q, c) for q, c in reads]
+            sel += [(1, read_row[one[row[r]]], c) if q is None else (2, len(rows) + q, c) for q, c in reads]
             rows += [(r, ix) for ix in leaf]
         width = h1.shape[-1] if h1 is not None else self._hidden_size
         out = torch.empty((len(sel), width), dtype=self._dtype if h1 is None else h1.dtype, device=self.dev)

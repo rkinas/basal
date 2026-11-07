@@ -2053,8 +2053,12 @@ class GraphBackend(EagerBackend):
         end, and used as a hit."""
         if not keys or self.state_cache is None:
             return
+        unstored = {}
         for k, key in enumerate(keys):
             if key is None or k in hits:
+                continue
+            if key in unstored:
+                hits[k] = unstored[key]
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
@@ -2079,6 +2083,8 @@ class GraphBackend(EagerBackend):
                 new, _ = self._continue(root, prefix, m)
             self.state_cache.put(key, new, tokens=root, replaces=old if m == n else None)
             hits[k] = new
+            if not self.state_cache.has(key):
+                unstored[key] = new  # already owned by hits; no additional checkpoint allocation
 
     @torch.no_grad()
     def _forward_layered(self, ids, kv=None, between=None, step=None):
@@ -2562,18 +2568,24 @@ class GraphBackend(EagerBackend):
         return out[0, self._to_dev(torch.tensor(cols))]
 
     @torch.no_grad()
-    def _tree_hidden(self, packs, idx, keys=None, hits=None):
+    def _tree_hidden(self, packs, idx, keys=None, hits=None, prefills=None):
         """Branched units (one root each) -> hidden states at their readout positions, in two passes: their roots in a
         plain graph that also writes the keys and values (an uncompiled-shape forward beyond the largest graph), then
         all other blocks, one row per unit, over those keys and values with the trie mask. keys / hits: per unit, the
         state-cache key of its root and the cached keys / values; when every root is cached, pass 1 is skipped and the
         cached keys / values go where pass 1 would have written them; the roots computed here are stored. Gemma 4:
         pass 1 reads out at the root's last token (the only readout a root can hold: a prompt that is the shared
-        prefix itself) and pass 2 without a graph at the readout positions only."""
+        prefix itself) and pass 2 without a graph at the readout positions only. prefills: raw checkpoints retained
+        only for repeated state keys in this run_shared call, independent of StateCache's budget and quantisation."""
         P = [packs[k][2].index(1) for k in idx]  # block 0 (the root) comes first and is contiguous
         b = len(idx)
         n2 = max(len(packs[k][0]) - p for k, p in zip(idx, P))  # longest part below the root
         keys, hits = keys or [None] * b, hits or [None] * b
+        if prefills:
+            hits = [e if e is not None else prefills.get(key) for key, e in zip(keys, hits)]
+        # KV checkpoints do not contain the hidden states of readouts inside a root.
+        hits = [e if min(packs[k][3]) >= p else None for k, p, e in zip(idx, P, hits)]
+        cold, source = [r for r, e in enumerate(hits) if e is None], list(range(b))
         # pass-2 shapes: the template-prefix family (--prefix-cache: short roots and rows, more units per forward) or
         # the branched units of SOAM / option orders
         short = self.prefix and max(P) <= self.PREFIX_ROOT and n2 <= self.PREFIX_SFX[-1]
@@ -2624,23 +2636,46 @@ class GraphBackend(EagerBackend):
                     traceback.clear_frames(e.__traceback__)  # (the failed forward's tensors, held by the error)
                     torch.cuda.empty_cache()
                     self.one_forward = min(self.one_forward, L - 1)
-                    return self._tree_hidden(packs, idx, keys, hits)
+                    return self._tree_hidden(packs, idx, keys, hits, prefills)
         else:
-            L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(b, self.BATCHES)
+            first, cold, source = {}, [], []
+            for r, (key, e) in enumerate(zip(keys, hits)):
+                if e is not None:
+                    source.append(None)
+                    continue
+                if prefills is None or key not in prefills or key not in first:
+                    first[key] = len(cold)
+                    cold.append(r)
+                source.append(first[key])
+            L, B = self._bucket(max(P), self.PLAIN_LENS), self._bucket(len(cold), self.BATCHES)
             g, ids, kv, *ro, h1 = self._graph(B, L)
             h_ids = np.full((B, L), self.tok.pad_token_id, dtype=np.int64)
-            for r, k in enumerate(idx):
-                h_ids[r, : P[r]] = packs[k][0][: P[r]]
+            for j, r in enumerate(cold):
+                h_ids[j, : P[r]] = packs[idx[r]][0][: P[r]]
             ids.copy_(self._to_dev(h_ids), non_blocking=True)
             if ro:
-                ro[0].copy_(self._to_dev(np.array([[p - 1] for p in P] + [[0]] * (B - b), dtype=np.int64)),
+                ro[0].copy_(self._to_dev(np.array([[P[r] - 1] for r in cold] + [[0]] * (B - len(cold)), dtype=np.int64)),
                             non_blocking=True)
             g.replay()
-        if h1 is not None and self.state_cache is not None:  # store the roots computed here
-            for r, key in enumerate(keys):
-                if key is not None and hits[r] is None:
-                    self.state_cache.put(key, [(kb[r, :, : P[r]].clone(), vb[r, :, : P[r]].clone()) for kb, vb in kv],
-                                         tokens=packs[idx[r]][0][: P[r]])
+        if h1 is not None:
+            computed = {}
+            for j, r in enumerate(cold):
+                key = keys[r]
+                if key is not None or len(cold) != b:
+                    e = [(kb[j, :, : P[r]].clone(), vb[j, :, : P[r]].clone()) for kb, vb in kv]
+                    computed[j] = e
+                    if key is not None and self.state_cache is not None:
+                        self.state_cache.put(key, e, tokens=packs[idx[r]][0][: P[r]])
+                    self._retain_prefill(prefills, key, e)
+            if len(cold) != b:
+                # Snapshot all sources before scattering: these views share the graphs' flat KV buffers.
+                kv = self._kv_views(b, L)
+                for r, p in enumerate(P):
+                    e = hits[r] if hits[r] is not None else computed[source[r]]
+                    for (kb, vb), (ke, ve) in zip(kv, e):
+                        z = min(p, kb.shape[2])
+                        kb[r, :, z - ke.shape[1]: z].copy_(ke, non_blocking=True)
+                        vb[r, :, z - ke.shape[1]: z].copy_(ve, non_blocking=True)
         S = next((x for x in sfx if n2 <= x), None)
         graph = None
         # a pass-2 graph, rows padded (stale buffer rows are masked); Gemma 4: over the longer plain graphs' roots too
@@ -2664,7 +2699,8 @@ class GraphBackend(EagerBackend):
             pos2[r, :n], pos2[r, n:] = pp[p:], pp[-1] + 1 + np.arange(S - n)
             par2[r] = [-1 if q <= 0 else q - 1 for q in par[1:]]
             # Gemma 4: pass 1 holds the root's last token only (column 0 of its readout rows)
-            sel += [(1, r, i if self.gemma is None and h1.shape[1] > 1 else 0) if i < p else (2, r, i - p) for i in last]
+            sel += [(1, source[r], i if self.gemma is None and h1.shape[1] > 1 else 0) if i < p else (2, r, i - p)
+                    for i in last]
         # FlexAttention only in the pass-2 graphs captured at start-up: an uncaptured shape (long roots, many or long
         # branches) runs the dense pass 2 uncompiled, as without flex. The compiled flex layer specialises on shape
         # classes, and a request of a new class compiled for 1-4 s (SPEED.md sections 6 and 11). Gemma 4: its flex
@@ -2922,6 +2958,24 @@ class GraphBackend(EagerBackend):
         with torch.cuda.stream(self.stream) if self.stream is not None else nullcontext():
             return self._run_shared(groups, done)
 
+    PREFILL_BYTES = 256 << 20  # bounded raw reuse per call, separate from the persistent (possibly quantised) cache
+
+    def _retain_prefill(self, prefills, key, entry):
+        if prefills is None or key not in prefills:
+            return
+        size = sum(t.nbytes for pair in entry for t in pair)
+        if size > self.PREFILL_BYTES:
+            return
+        prefills[key] = None
+        used = sum(t.nbytes for e in prefills.values() if e is not None for pair in e for t in pair)
+        for other, e in prefills.items():
+            if used + size <= self.PREFILL_BYTES:
+                break
+            if e is not None:
+                used -= sum(t.nbytes for pair in e for t in pair)
+                prefills[other] = None  # retain eligibility and B1 scheduling when a follower must recompute
+        prefills[key] = entry
+
     def _run_shared(self, groups, done):
         units = self._units(groups)
         packs = [u[0] for u in units]
@@ -2929,7 +2983,23 @@ class GraphBackend(EagerBackend):
         pending = []
         keys, hits = self._cache_keys(groups, units)
         self._extend_states(units, keys, hits)
+        remaining = {}
+        for k, key in enumerate(keys or ()):
+            if key is not None and k not in hits:
+                remaining[key] = remaining.get(key, 0) + 1
+        group_sizes = [0] * len(groups)
+        for unit in units:
+            group_sizes[unit[2]] += 1
+        # A split request can itself use B>1 on main; keep the call's original batching in that case.
+        prefills = {key: None for key, n in remaining.items() if n > 1} if all(n <= 1 for n in group_sizes) else {}
+        forwards = []
         for idx, kind in self._forwards(units, hits):
+            # Keep prefill and suffix on B1 together: shrinking only prefill mixes two numerical batch regimes.
+            if prefills and kind == "tree" and any(keys[k] in prefills for k in idx):
+                forwards.extend(([k], kind) for k in idx)
+            else:
+                forwards.append((idx, kind))
+        for idx, kind in forwards:
             with self._launch:  # the static buffers of a graph are shared by concurrent calls
                 if kind == "compact":
                     h = self._compact_hidden(packs, idx)
@@ -2938,7 +3008,13 @@ class GraphBackend(EagerBackend):
                 elif keys is None:
                     h = self._tree_hidden(packs, idx)
                 else:
-                    h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx])
+                    h = self._tree_hidden(packs, idx, [keys[k] for k in idx], [hits.get(k) for k in idx], prefills)
+                for k in idx:
+                    key = keys[k] if keys else None
+                    if key in prefills:
+                        remaining[key] -= 1
+                        if remaining[key] == 0:
+                            del prefills[key]
                 W, cols, pad = self._rows([x for k in idx for x in units[k][1]])
                 p = torch.softmax(self._code_logits(h, W).gather(1, cols).masked_fill(pad, float("-inf")), -1)
                 if cuda:
