@@ -206,6 +206,41 @@ clients (decisions/s; questions/s with five per request). fla 0.5.2 for the Gate
   (GEMMs ~3 ms, fla's Gated DeltaNet and convolution kernels ~2.3 ms); a five-question request about 27 ms, of which
   8.5 ms is the tokenizer (with `TOKENIZERS_PARALLELISM=false`, as in these runs).
 
+## Concurrent clients over 3k-token states (basal-omni)
+
+How far one server scales with concurrent clients when every request has the same shape: one choice question over a
+state of about 3,000 tokens ([#136](https://github.com/rkinas/basal/issues/136)). basal 2.6, `basal-serve --mode
+fast`, one GPU, the HTTP load test below. *p50 / p95*: 20 sequential requests from one client. *decisions/s*: 200
+requests from C clients at once. *GPU memory*: the server process at its peak during the sweep (nvidia-smi).
+
+```bash
+basal-serve --model Remek/basal-omni-1.0-ultra-FP8 --mode fast            # once more with --deterministic
+for c in 1 4 8 16 32; do
+  basal-loadtest --synthetic 3000 --n-seq 20 --n-conc 200 --concurrency $c --out conc-$c.json
+done
+```
+
+RTX PRO 6000 Blackwell Max-Q (96 GB):
+
+| model | server | p50 / p95, one client | decisions/s at 1 / 4 / 8 / 16 / 32 clients | GPU memory |
+|---|---|---|---|---|
+| basal-omni-1.0-mini | `fast` | 79 / 100 ms | 12.5 / 12.2 / 11.6 / 11.7 / 11.8 | 18.9 GB |
+| | `fast --deterministic` | 80 / 102 ms | 12.5 / 12.8 / 12.7 / 12.7 / 12.7 | 19.7 GB |
+| basal-omni-1.0-ultra-FP8 | `fast` | 580 / 856 ms | 1.63 / 1.50 / 1.45 / 1.47 / 1.46 | 47.9 GB |
+| | `fast --deterministic` | 586 / 863 ms | 1.63 / 1.63 / 1.63 / 1.63 / 1.63 | 48.3 GB |
+| basal-omni-1.0-ultra (bf16) | `fast` | 834 / 1,136 ms | 1.13 / 1.13 / 1.12 / 1.11 / 1.12 | 67.6 GB |
+| | `fast --deterministic` | 835 / 1,136 ms | 1.14 / 1.14 / 1.14 / 1.14 / 1.14 | 68.4 GB |
+
+- **At this length, more clients do not add throughput.** basal reads the answer from one forward pass over the state
+  and the options, with no token-by-token decoding, and one 3k-token prefill already keeps the GPU busy. 32 clients get
+  the decisions/s of one, and the requests wait for each other. 0 errors in every run.
+- **`--deterministic` costs nothing here.** It matched or beat the batching default: ultra-FP8 1.63 against 1.45–1.50
+  decisions/s, mini 12.7 against 11.6–12.2. Each request runs in its own forward passes with deterministic kernels, so
+  an answer does not depend on the other requests ([SERVING.md](SERVING.md)). Where batching does pay (short states,
+  several questions per request), see [Long states under load](#long-states-under-load-one-h100).
+- **The bf16 ultra fits on the 96 GB card** (68.4 GB at its peak). The `-FP8` checkpoint gives 1.44× its throughput
+  (1.63 against 1.13 decisions/s) in 48 GB.
+
 ## Kernels of the CUDA graph engine (one H100)
 
 The engine options of the kernel study, measured served over HTTP. The model is a 4.5B development checkpoint of
