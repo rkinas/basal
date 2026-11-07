@@ -32,8 +32,10 @@ benchmarking a GPU.
 - **Qwen3.5 models (Gated DeltaNet layers)**, such as basal-omni-pico: `fast` and `fast-nocompile` serve them since 2.4
   (2.3.2 refused them): the graph engine keeps each request state's recurrent state beside its keys and values and
   continues every question from it (one row per question and option order in the branch pass), with fla
-  (flash-linear-attention) for the Gated DeltaNet layers. Without `--mode` they run `fast` on Hopper (H100, the GPU
-  class the port was gated on) when fla is installed, `eager` elsewhere. `--state-cache-gb` (2.5) keeps a request's
+  (flash-linear-attention) for the Gated DeltaNet layers. Without `--mode` they run `fast` on sm90 and sm120
+  when fla is importable, `eager` elsewhere (checked on H100 and
+  [RTX 5060 Ti](HARDWARE.md#basal-omni-pico-on-rtx-5060-ti-sm120-native-windows)).
+  `--state-cache-gb` (2.5) keeps a request's
   state as a full-state checkpoint: the attention layers' keys and values and each Gated DeltaNet layer's recurrent
   state and convolution tail after the state; the same state again runs only its questions. A state that begins with
   a whole cached one (a growing agent trace) continues it from there; one that differs inside the cached tokens runs

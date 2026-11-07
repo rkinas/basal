@@ -206,6 +206,37 @@ clients (decisions/s; questions/s with five per request). fla 0.5.2 for the Gate
   (GEMMs ~3 ms, fla's Gated DeltaNet and convolution kernels ~2.3 ms); a five-question request about 27 ms, of which
   8.5 ms is the tokenizer (with `TOKENIZERS_PARALLELISM=false`, as in these runs).
 
+## basal-omni-pico on RTX 5060 Ti (SM120, native Windows)
+
+Measured 2026-11-05 on one RTX 5060 Ti 16 GB, driver 621.01, Windows, Python 3.12.11,
+PyTorch 2.11.0+cu128, Transformers 5.17.0, triton-windows 3.6.0.post26 and FLA 0.5.2; no causal-conv1d.
+Model `Remek/basal-omni-pico`; engine 2.5.3.
+
+Local HTTP, concurrency 4, seed 0, three runs per mode/workload: 10 warm-up, 20 sequential and 80 concurrent
+requests each. Short/multi use about 512 synthetic tokens; long uses 1,500 (different from the H100 table).
+Fast used FA2 and `--batches default`. Each mode received a control request first; each run waited for
+GPU temperature <=45 C and utilization <=5% for three samples five seconds apart. Windows desktop apps remained.
+Throughput is median [min, max]; p50/p95 are medians of per-run sequential percentiles. All runs had zero errors.
+
+| Mode | Workload | Throughput median [min, max] | p50 / p95 (ms) | Throughput / Eager |
+|---|---|---|---|---|
+| `eager` | short, 1 q | 17.77 [17.52, 18.70] req/s | 70.57 / 119.77 | 1.00x |
+| `fast-nocompile` | short, 1 q | 37.11 [37.09, 37.93] req/s | 29.79 / 33.36 | 2.09x |
+| `fast` | short, 1 q | 43.77 [43.76, 43.78] req/s | 25.44 / 28.93 | 2.46x |
+| `eager` | short, 5 q | 22.17 [22.06, 22.19] q/s | 187.04 / 233.23 | 1.00x |
+| `fast-nocompile` | short, 5 q | 120.55 [118.72, 120.62] q/s | 49.35 / 53.46 | 5.44x |
+| `fast` | short, 5 q | 140.12 [140.07, 140.21] q/s | 43.26 / 46.77 | 6.32x |
+| `eager` | long, 5 q | 8.01 [7.97, 8.11] q/s | 607.19 / 976.15 | 1.00x |
+| `fast-nocompile` | long, 5 q | 57.34 [57.06, 57.57] q/s | 87.22 / 124.06 | 7.16x |
+| `fast` | long, 5 q | 69.15 [69.12, 69.18] q/s | 76.28 / 105.81 | 8.64x |
+
+Startup to healthy HTTP (one start per mode): Eager 15.56 s, Fast without compile 122.59 s, Fast 95.46 s.
+Model/Triton/Inductor caches were retained; startup is separate from request latency, not a cold-cache measurement.
+
+The synthetic agreement check against `eager-fp32` passed: 420 readouts, 99.52% top-1 agreement (both disagreements
+were near ties), 98% decision agreement, 99.5% independence. The gate allows near ties; this is not held-out accuracy.
+The saved report omits seed, per-call and engine commit. Only this RTX 5060 Ti was measured, not other SM120 cards.
+
 ## Kernels of the CUDA graph engine (one H100)
 
 The engine options of the kernel study, measured served over HTTP. The model is a 4.5B development checkpoint of

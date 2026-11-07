@@ -161,7 +161,8 @@ Thank you to the people whose work is in this repository, by pull request:
 - Marcin Brzeżański ([@marcinbrzezanski](https://github.com/marcinbrzezanski)): Prometheus metrics: the engine version,
   the state cache's evictions and prefix hits, and a cache read that never waits for the engine
   ([#48](https://github.com/rkinas/basal/pull/48)); a state cache that keeps the branches of shared histories
-  ([#56](https://github.com/rkinas/basal/pull/56)).
+  ([#56](https://github.com/rkinas/basal/pull/56)); Qwen3.5 defaulting to `fast` on SM120 with FLA, validated on
+  RTX 5060 Ti under native Windows ([#114](https://github.com/rkinas/basal/pull/114)).
 - Grzegorz Stark ([@gstark0](https://github.com/gstark0)): `--state-cache-gb` and `--prefix-cache` on Apple Silicon
   (`--mode mlx`), with the guard against MLX's fused attention losing precision for a few queries over a cache
   ([#50](https://github.com/rkinas/basal/pull/50)).

@@ -94,6 +94,15 @@ basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --por
 - From a clone instead: `git clone https://github.com/rkinas/basal && cd basal && uv pip install -e ".[fp8]"`
   (after the torch line above).
 
+On native Windows, Qwen3.5 on SM120 was checked with PyTorch 2.11.0+cu128 and these kernel packages
+(install after PyTorch and basal above):
+
+```powershell
+python -m pip install triton-windows==3.6.0.post26 flash-linear-attention==0.5.2
+```
+
+See the [RTX 5060 Ti environment and measurements](HARDWARE.md#basal-omni-pico-on-rtx-5060-ti-sm120-native-windows).
+
 Ask questions with curl. Several questions about one state go into one request and share the state:
 
 ```bash
