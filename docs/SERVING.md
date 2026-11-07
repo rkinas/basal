@@ -47,8 +47,9 @@ benchmarking a GPU.
   again (a recurrent state cannot be cut there). Since 2.5 they also run with `--prefix-cache on` and `--batches
   compact` (opt-in; compact rows also with `--template-prefix on` and `--readout-layer on`), with answers as close to
   float32 as `--mode eager`'s; `--lean` and `--tree flex` change nothing for them. Not with them yet: `fp8` / `nvfp4`,
-  `fast-exit`, `mps` and `--long-lane` (each refused before loading). `--long-lane` runs for them with
-  `--long-lane-gdn on` (2.5, opt-in, off by default): its bf16 answers are a little further from float32 than
+  `fast-exit`, `mps` and `--long-lane on` (each refused before loading; the default `--long-lane auto` gives them no
+  long lane). The long lane runs for them with `--long-lane-gdn on` (2.5, opt-in, off by default): its bf16 answers
+  are a little further from float32 than
   `--mode eager`'s. basal-omni-pico on an H100,
   1,700 held-out decisions against eager float32: with five questions per state the same top answer on 99.39% (8,500
   readouts, 52 changed) against eager bf16's 99.51% (42); single questions 99.71%, two option orders 99.65%, both
@@ -185,6 +186,17 @@ benchmarking a GPU.
   - `--scheduler on`: requests longer than `--long-tokens` (2,048) wait in a backlog and join engine calls in
     highest-response-ratio order, at most 8,192 of their tokens per call. It trades long-request latency (about +7% p50)
     for short-request latency; `--scheduler off` serves in arrival order.
+  - `--long-lane auto|on|off` (2.8: `auto` is the default): requests longer than `--long-tokens` run in a lane of their
+    own, one decoder layer at a time, and give the GPU to the batches of short requests between layers. With mixed
+    traffic a short request then no longer waits for a long document. On a GB10 (basal-2.0-4.5B, 32k-token states every
+    3 s and two short requests a second), short p50 was 23.4 s without the long lane and 0.33 s with it (measured by
+    Dariusz Koryto, @dkoryto). `auto` gives a long request the long lane only while another request is in flight: a
+    request alone on the server, as every request of a sequential client, is answered by the main lane exactly as with
+    `off`. (The long lane's layered, uncompiled forward rounds differently in bf16 from the main lane's graphs, and
+    under load answers already depend on the batch.) `auto` has no long lane where `on` is refused (two-way models,
+    `--lanes`, Qwen3.5 without `--long-lane-gdn on`) and with `--deterministic`. If its engine call fails, its requests
+    and later long ones go to the main lane, and the error is logged once. `on`: every long request; `off`: the main
+    lane only, as before 2.8.
   - Answers are not bit-identical to engine v1.5.0's (other GEMM row counts); `--deterministic` stays reproducible on a
     given GPU.
 - **Kernels of the CUDA graph engine** (`fast`, `fast-nocompile`, `fp8`, `nvfp4`, `fast-exit`):
