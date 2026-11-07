@@ -458,7 +458,7 @@ class Router:
         if status == 200 and req is not None and (self.levels or self.blends or self.fallback):
             content = await self._stages(path, req, content, headers, key)
             if b'"ask_if"' in body:
-                content = await self._gates(pool, path, req, content, headers, key)
+                status, content, ctype = await self._gates(pool, path, req, content, headers, key, ctype)
         return status, content, ctype
 
     async def _stages(self, path, req, content, headers, key):
@@ -473,19 +473,21 @@ class Router:
             content = await self._fallback(req, content, level if self.levels else None)
         return content
 
-    async def _gates(self, pool, path, req, content, headers, key):
+    async def _gates(self, pool, path, req, content, headers, key, ctype="application/json"):
         """ask_if over the final answers: the replica skipped questions by its own answers, which a cascade level, a
         blend or the fallback may have replaced. In the gates' order, a question whose gate now fails is null; the ones
         it now passes that were skipped are asked (without their gates, through the same stages), and the questions
-        gated on them are decided after their answers. usage.skipped names the null ones."""
+        gated on them are decided after their answers. usage.skipped names the null ones. -> (status, content, content
+        type): a call asking them that fails fails the request with its status and error, as basal-serve fails a
+        request one of whose engine calls fails (the question was not answered; null would say its condition failed)."""
         try:
             resp = json.loads(content)
             qs, answers = req["questions"], resp["answers"]
             order = gate_order(qs)
         except (ValueError, KeyError, TypeError, AttributeError):
-            return content
+            return 200, content, ctype
         if not order or not isinstance(answers, dict):
-            return content
+            return 200, content, ctype
         tried = set()
         for _ in range(len(order) + 1):
             todo, open_ = [], set()  # (open: asked now, or gated on a question that is)
@@ -501,9 +503,9 @@ class Router:
                 break
             tried.update(todo)
             sub = dict(req, questions=ungated(qs, todo))
-            st, c2, _ = await self._send(pool, path, json.dumps(sub).encode(), headers, key)
+            st, c2, ct2 = await self._send(pool, path, json.dumps(sub).encode(), headers, key)
             if st != 200:
-                continue  # (they stay null; the next round decides the questions gated on them)
+                return st, c2, ct2
             try:
                 r2 = json.loads(await self._stages(path, sub, c2, headers, key))
             except ValueError:
@@ -524,7 +526,7 @@ class Router:
                 usage["skipped"] = skipped
             else:
                 usage.pop("skipped", None)
-        return json.dumps(resp, ensure_ascii=False).encode()
+        return 200, json.dumps(resp, ensure_ascii=False).encode(), ctype
 
     async def _fallback(self, req, content, level=None):
         """The answers of the last level (level: the cascade's level of each question; None: one model) whose top

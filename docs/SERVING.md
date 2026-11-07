@@ -345,7 +345,8 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
 - **`ask_if` with a cascade, a blend or the fallback:** the questions asked again go without their `ask_if` /
   `depends_on`, and the router applies `ask_if` to the final answers: a question whose gate a replaced answer fails
   is `null` (and in `usage.skipped`), one whose gate it now passes is asked of the first replica and goes through the
-  same levels.
+  same levels. When that call fails (a replica down, a timeout), the request fails with its status and error: the
+  question was not answered, and `null` would say that its condition failed.
 - **Several levels:** repeat the pair, one `--escalate-below` per `--escalate`, in order (without any, 0.8 for each).
   The first replica is level 1 and the k-th `--escalate` is level k + 1. A question goes on from level k to level
   k + 1 only while its top probability at level k is under the k-th `--escalate-below`; the last level's answer stands.

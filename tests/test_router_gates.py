@@ -81,6 +81,25 @@ def test_child_of_a_parent_that_changed_to_its_value_is_asked():
     assert asked[SMALL] == [["c", "p"], ["c"]] and asked[MID] == [["p"]]       # c asked without its gate, alone
 
 
+@pytest.mark.parametrize("status", [503, 504, 422])
+def test_a_child_whose_re_ask_fails_fails_the_request(status):
+    """The parent changed to the child's value, so the child is asked again; that call fails. The request fails with
+    the call's status and error (it answered 200 with the child null and listed as skipped, as if its condition had
+    failed), as basal-serve fails a request when one of its engine calls fails."""
+    asked, conf = {}, {SMALL: {"p": 0.6, "c": 0.95}, MID: {"p": 0.1, "c": 0.3}}
+    inner = replica(conf, asked)
+
+    def handler(req):
+        if req.url.path != "/health" and req.url.host == "small" and sorted(json.loads(req.content)["questions"]) == ["c"]:
+            return httpx.Response(status, json={"error": f"replica says {status}"})
+        return inner.handler(req)
+    rt = R.Router([SMALL], transport=httpx.MockTransport(handler), escalate=[MID], below=0.8)
+    with TestClient(R.app(rt, poll_s=60)) as c:
+        asyncio.run(rt.poll())
+        r = c.post("/v1/systemone", json={"state": "Doc", "questions": {"p": q(), "c": q(ask_if={"p": ["b"]})}})
+    assert r.status_code == status and r.json() == {"error": f"replica says {status}"}
+
+
 def test_low_confidence_child_of_a_confident_parent_is_escalated():
     asked = {}
     conf = {SMALL: {"p": 0.95, "c": 0.55}, MID: {"p": 0.95, "c": 0.1}}
