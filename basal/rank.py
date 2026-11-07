@@ -31,7 +31,7 @@ import json
 import math
 import time
 
-from .prompt import RequestError, lang_of
+from .prompt import MAX_OPTIONS, RequestError, lang_of
 
 MAX_CANDIDATES = 10_000  # per request, all its rank questions together (basal-serve --rank-max-candidates)
 MAX_CHUNK = 1_000
@@ -177,14 +177,35 @@ def compose(state, text, order):
     return f"{text}\n\n{state}" if order == "candidates_first" else f"{state}\n\n{text}"
 
 
-def fits(srv, state, spec):
-    """Whether the whole list fits one request of the server's context (chunk 0); True when the limit is unknown."""
+def questions(spec, idx, names):
+    """The screening questions of the candidates idx: one yes / no question each."""
+    return {str(n): {"type": "noul", "instructions": spec["instructions"].replace("{candidate}", names[i])}
+            for n, i in enumerate(idx)}
+
+
+def fits(srv, state, spec, fields=None):
+    """Whether the whole list fits one request (chunk 0): its tokens within the server's context, and its prompts'
+    text within its --max-prompt-mb, counted as Server.check_prompts counts it (every prompt holds the shared state, so
+    a long list in one context can pass the context and not the text limit); True for a limit that is unknown."""
+    idx = range(len(spec["cands"]))
+    text, names = listing(spec["cands"], idx, spec["label"], spec["title"])
+    whole = compose(state, text, spec["order"])
     limit = getattr(srv, "context", None)
-    if not limit:
+    if limit:
+        n = len(srv.tok(whole, add_special_tokens=False).input_ids)
+        if n + len(srv.tok(spec["instructions"], add_special_tokens=False).input_ids) + MARGIN > limit[0]:
+            return False
+    check = getattr(srv, "check_prompts", None)
+    if check is None:
         return True
-    text, _ = listing(spec["cands"], range(len(spec["cands"])), spec["label"], spec["title"])
-    n = len(srv.tok(compose(state, text, spec["order"]), add_special_tokens=False).input_ids)
-    return n + len(srv.tok(spec["instructions"], add_special_tokens=False).input_ids) + MARGIN <= limit[0]
+    from .server import to_items  # (basal.server imports this module)
+    qs = to_items(whole, questions(spec, idx, names), getattr(srv, "max_options", MAX_OPTIONS),
+                  force_lang=(fields or {}).get("lang"))
+    try:
+        check(qs)
+    except RequestError:
+        return False
+    return True
 
 
 async def every(aws):
@@ -217,13 +238,11 @@ async def sub(srv, body):
 
 async def screen(srv, state, spec, fields):
     """Every candidate's P(yes) -> (scores, the requests' bodies and lists, their responses)."""
-    size = spec["chunk"] or (len(spec["cands"]) if fits(srv, state, spec) else CHUNK)
+    size = spec["chunk"] or (len(spec["cands"]) if fits(srv, state, spec, fields) else CHUNK)
     parts, bodies = [], []
     for idx in chunks(spec["cands"], size):
         text, names = listing(spec["cands"], idx, spec["label"], spec["title"])
-        qs = {str(n): {"type": "noul", "instructions": spec["instructions"].replace("{candidate}", names[i])}
-              for n, i in enumerate(idx)}
-        bodies.append(dict(fields, state=compose(state, text, spec["order"]), questions=qs))
+        bodies.append(dict(fields, state=compose(state, text, spec["order"]), questions=questions(spec, idx, names)))
         parts.append((idx, names))
     outs = await every(sub(srv, b) for b in bodies)
     yes = [0.0] * len(spec["cands"])

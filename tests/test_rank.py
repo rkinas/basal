@@ -144,6 +144,29 @@ def test_rank_chunk_zero_falls_back_to_requests_of_50_beyond_the_context():
     assert [len(b["questions"]) for b in srv.calls] == [120]
 
 
+CANDS = [f"candidate text number {i}" for i in range(120)]
+
+
+def test_rank_chunk_zero_falls_back_to_requests_of_50_beyond_max_prompt():
+    """A list that fits the context but not --max-prompt-mb as one shared context (every prompt holds the state):
+    answered in requests of 50, not refused. basal-navigate's final stage (chunk 0, one shared context of its
+    passages) was refused with 422 on basal-serve's defaults."""
+    srv = server(lambda t: 1.0)
+    srv.context, srv.max_prompt = (20000, "the model's context"), 400 * 1024  # (2 orders) 120: ~1 MiB; 50: ~190 KB
+    out = run(srv, {"state": "Q?", "questions": {"r": {"type": "rank", "instructions": INSTR, "top": 0, "chunk": 0,
+                                                       "candidates": CANDS}}})
+    assert [len(b["questions"]) for b in srv.calls] == [50, 50, 20]
+    assert len(out["answers"]["r"]["ranking"]) == 120
+
+
+def test_rank_chunk_zero_keeps_one_shared_context_within_max_prompt():
+    srv = server(lambda t: 1.0)
+    srv.context, srv.max_prompt = (20000, "the model's context"), 4 * 2**20
+    run(srv, {"state": "Q?", "questions": {"r": {"type": "rank", "instructions": INSTR, "top": 0, "chunk": 0,
+                                                 "candidates": CANDS}}})
+    assert [len(b["questions"]) for b in srv.calls] == [120]
+
+
 def test_rank_in_flight_counts_its_requests():
     srv = server(lambda t: 1.0)
     seen = []
