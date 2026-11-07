@@ -2,6 +2,7 @@
 at a time, one decoder layer at a time), which gives the GPU to the main lane's batches between layers (LaneGate).
 The answers are those of the main lane; the engine side (run_long against run_shared) is tested in test_engine16."""
 import asyncio
+import json
 import threading
 import time
 
@@ -141,3 +142,163 @@ def test_several_long_requests_per_lane_call():
     outs = asyncio.run(run_all())
     assert all(o["usage"]["lane"] == "long" for o in outs)
     assert srv.long_groups == [3]                                   # the three waiting requests in one call
+
+
+# -- --long-lane auto, the default (2.8) ------------------------------------------------------------------------------
+def test_the_long_lane_is_on_by_default_where_it_applies():
+    """--long-lane auto is the default; it gives a server a long lane wherever --long-lane on is served and answers may
+    depend on load, and none elsewhere (where on is refused, or with --deterministic)."""
+    from basal.server import long_lane_auto_off, parser
+    a = parser().parse_args([])
+    assert a.long_lane == "auto"
+    assert long_lane_auto_off("graph", a) is None
+    for kind in ("eager", "exit", "mps", "mlx", "vllm", "gguf"):
+        assert long_lane_auto_off(kind, a)
+    assert long_lane_auto_off("graph", a, two_way={"max_prompt": 4096})
+    assert long_lane_auto_off("graph", parser().parse_args(["--lanes", "2"]))
+    assert long_lane_auto_off("graph", parser().parse_args(["--deterministic"]))
+    assert long_lane_auto_off("graph", a, gdn=True)
+    assert long_lane_auto_off("graph", parser().parse_args(["--long-lane-gdn", "on"]), gdn=True) is None
+
+
+LONG = {"state": "Long state, a document. " * 30, "questions": {"q": Q, "r": dict(Q, instructions="And?")}}
+SHORT = {"state": "Short.", "questions": {"q": Q}}
+
+
+class Timed:
+    """An engine whose calls take time as a GPU's would: a long prompt 0.4 s in the main lane's call (which nothing
+    interrupts), and eight layers of 0.05 s in the long lane's (between them it gives the GPU to the main lane). The
+    long lane answers other probabilities (of the prompt with one token more), so an answer shows the lane it came
+    from; fail: its calls raise."""
+    policies, state_cache = {}, None
+
+    def __init__(self, long_tokens, fail=False):
+        self.long_tokens, self.fail, self.calls = long_tokens, fail, {"main": 0, "long": 0}
+
+    def run_shared(self, groups, policy=None):
+        self.calls["main"] += 1
+        time.sleep(0.4 if any(len(p) > self.long_tokens for g in groups for p in g[0]) else 0.01)
+        return [[probs(p, x) for p, x in zip(*g[:2])] for g in groups]
+
+    def run_long(self, groups, policy=None, between=None):
+        self.calls["long"] += 1
+        if self.fail:
+            raise RuntimeError("a kernel the long lane has no build of")
+        for i in range(8):
+            between(i)
+            time.sleep(0.05)
+        return [[probs(list(p) + [7], x) for p, x in zip(*g[:2])] for g in groups]
+
+
+def lane_server(mode, fail=False):
+    """basal-serve's queue, worker and long lane over Timed: --long-lane auto, on or off (the long lane as Server sets
+    it up for that mode)."""
+    from tests.test_http_status import AppServer
+    srv = AppServer(Timed(600, fail))  # (SHORT: 307 prompt tokens, LONG: 1,021)
+    if mode != "off":
+        srv.long_lane(600, 0.0, cuda=False)
+        srv.long_auto = mode == "auto"
+    return srv
+
+
+async def serving(srv, fn):
+    tasks = [asyncio.get_running_loop().create_task(srv.worker())]
+    if srv.long_tokens is not None:
+        tasks.append(asyncio.get_running_loop().create_task(srv.long_worker()))
+    try:
+        return await fn()
+    finally:
+        for t in tasks:
+            t.cancel()
+
+
+def shorts_behind_a_long(mode):
+    """A short request in flight, a long one that comes meanwhile, then five short requests one after another ->
+    (the slowest of the five in seconds, the long one's usage, the engine's calls per lane)."""
+    srv = lane_server(mode)
+
+    async def go():
+        first = asyncio.create_task(srv.serve(SHORT))
+        while srv.clients < 1:
+            await asyncio.sleep(0.001)
+        long = asyncio.create_task(srv.serve(LONG))  # another request is in flight: auto's long lane takes it
+        await first
+        await asyncio.sleep(0.05)  # the long request in its engine call
+        waits = []
+        for _ in range(5):
+            t = time.perf_counter()
+            await srv.serve(SHORT)
+            waits.append(time.perf_counter() - t)
+        return max(waits), (await long)["usage"]
+
+    worst, usage = asyncio.run(serving(srv, go))
+    return worst, usage, srv.backend.calls
+
+
+def test_short_requests_behind_a_long_one_wait_for_it_without_the_long_lane():
+    """The CPU before / after of the default: with --long-lane off (2.7 and before) the long request holds the main lane
+    for its whole engine call and the short requests behind it wait 0.3 s or more; with auto, the default, it runs in
+    the long lane and they are answered at once."""
+    off, usage_off, calls_off = shorts_behind_a_long("off")
+    auto, usage_auto, calls_auto = shorts_behind_a_long("auto")
+    assert off >= 0.3 and "lane" not in usage_off and calls_off["long"] == 0
+    assert auto < 0.15 and usage_auto["lane"] == "long" and calls_auto["long"] == 1
+
+
+def sequential(srv, bodies):
+    async def go():
+        outs = []
+        for body in bodies:
+            out = await srv.serve(body)
+            out["usage"].pop("latency_ms")
+            outs.append(out)
+        return outs
+    return asyncio.run(serving(srv, go))
+
+
+def test_the_default_answers_sequential_requests_as_without_the_long_lane():
+    """A sequential client's requests, long and short: under auto, the default, each one is alone on the server, so
+    each takes the main lane, and every response is the one --long-lane off gives, byte for byte (no usage "lane"
+    either). Timed's long lane answers other probabilities, so a request it served would differ; --long-lane on shows
+    that it does."""
+    bodies = [SHORT, LONG, SHORT, LONG, dict(LONG, state=LONG["state"] * 2)]
+    off = sequential(lane_server("off"), bodies)
+    auto_srv = lane_server("auto")
+    auto = sequential(auto_srv, bodies)
+    assert json.dumps(auto, sort_keys=True) == json.dumps(off, sort_keys=True)
+    assert auto_srv.backend.calls == {"main": 5, "long": 0}
+    on = sequential(lane_server("on"), bodies)
+    assert on[1]["answers"] != off[1]["answers"] and on[1]["usage"]["lane"] == "long"
+
+
+def test_a_failing_long_lane_of_the_default_leaves_its_requests_to_the_main_lane(capsys):
+    """auto: an engine error in the long lane (one it may meet first as the default) fails no request: the long one is
+    answered by the main lane, as with off, the error is logged once with its traceback, and later long requests go
+    to the main lane at once. With --long-lane on, the request gets the error, as before."""
+    srv = lane_server("auto", fail=True)
+
+    async def contended(body):
+        first = asyncio.create_task(srv.serve(SHORT))
+        while srv.clients < 1:
+            await asyncio.sleep(0.001)
+        out = await srv.serve(body)
+        await first
+        return out
+
+    async def go():
+        return [await contended(LONG), await contended(LONG)]
+
+    outs = asyncio.run(serving(srv, go))
+    off = sequential(lane_server("off"), [LONG])[0]
+    assert all(o["answers"] == off["answers"] and "lane" not in o["usage"] for o in outs)
+    assert srv.backend.calls["long"] == 1 and srv.long_failed and srv.load() == {"running": 0, "queued": 0}
+    err = capsys.readouterr().err
+    assert err.count("the long lane failed (RuntimeError") == 1 and "Traceback" in err
+    on = lane_server("on", fail=True)
+
+    async def go_on():
+        try:
+            await on.serve(LONG)
+        except RuntimeError as e:
+            return str(e)
+    assert asyncio.run(serving(on, go_on)) == "a kernel the long lane has no build of"

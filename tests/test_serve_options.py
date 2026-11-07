@@ -18,7 +18,8 @@ REFUSED = [
     (["--mode", "eager", "--prefix-cache", "on"], "--prefix-cache needs the CUDA graph engine"),
     (["--mode", "eager", "--compile-scope", "layer"], "--compile-scope layer"),
     (["--mode", "gguf"], "--mode gguf needs --gguf"),
-    (["--mode", "eager", "--long-lane-gdn", "on"], "--long-lane-gdn on needs --long-lane on"),
+    (["--mode", "eager", "--long-lane-gdn", "on"], "--long-lane-gdn on needs the long lane"),
+    (["--mode", "fast", "--long-lane", "off", "--long-lane-gdn", "on"], "--long-lane-gdn on needs the long lane"),
     (["--mode", "eager", "--vllm-preset", "deterministic"], "--vllm-preset needs --mode vllm"),
     (["--mode", "eager", "--calibration", "/no/such/CALIBRATION.json"], "no such file"),
 ]

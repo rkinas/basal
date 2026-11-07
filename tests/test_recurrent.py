@@ -142,7 +142,8 @@ def test_server_refuses_qwen35_settings_before_download(monkeypatch, qwen35, arg
 
 def test_qwen35_long_lane_is_opt_in(monkeypatch, qwen35):
     """--long-lane on a Qwen3.5 model is refused unless --long-lane-gdn on (off by default) is given, and the refusal
-    names that option; with it the server goes on to download the weights. --long-lane-gdn on alone is refused."""
+    names that option; with it the server goes on to download the weights. --long-lane-gdn on alone is served too (the
+    default --long-lane auto), and refused with --long-lane off."""
     monkeypatch.setattr(gdn_module.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(gdn_module, "fla_rule", lambda: object())
 
@@ -161,8 +162,11 @@ def test_qwen35_long_lane_is_opt_in(monkeypatch, qwen35):
     assert "--long-lane-gdn on" in str(e.value)
     with pytest.raises(Downloaded):
         Server(parser().parse_args(base + ["--long-lane-gdn", "on"]))
-    with pytest.raises(SystemExit, match="--long-lane-gdn on needs --long-lane on"):
-        Server(parser().parse_args(["--model", "Remek/basal-omni-pico", "--mode", "fast", "--long-lane-gdn", "on"]))
+    alone = ["--model", "Remek/basal-omni-pico", "--mode", "fast", "--long-lane-gdn", "on"]
+    with pytest.raises(Downloaded):
+        Server(parser().parse_args(alone))
+    with pytest.raises(SystemExit, match="--long-lane-gdn on needs the long lane"):
+        Server(parser().parse_args(alone + ["--long-lane", "off"]))
 
 
 @pytest.mark.parametrize("mode", ["fast", "fast-nocompile"])

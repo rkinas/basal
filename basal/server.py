@@ -727,6 +727,24 @@ def lanes_refused(a, kind):
     return None
 
 
+def long_lane_auto_off(kind, a, two_way=None, gdn=False):
+    """--long-lane auto (the default, 2.8): why this server has no long lane, or None (it has one). It has one where
+    --long-lane on is served and answers may depend on load: the CUDA graph engine, not a two-way model, --lanes or
+    --deterministic, and a Qwen3.5 model only with --long-lane-gdn on. A long request takes it only while another
+    request is in flight (lane_of), so a request alone on the server is answered by the main lane, as with off."""
+    if kind != "graph":
+        return "not the CUDA graph engine"
+    if two_way:
+        return "a two-way model"
+    if getattr(a, "lanes", 1) > 1:
+        return "--lanes"
+    if getattr(a, "deterministic", False):
+        return "--deterministic: answers independent of load"
+    if gdn and getattr(a, "long_lane_gdn", "off") != "on":
+        return "a Qwen3.5 model without --long-lane-gdn on"
+    return None
+
+
 def _answer(fut, res):
     if not fut.done():
         fut.set_result(res)
@@ -1356,8 +1374,9 @@ def serve_options(a):
     if getattr(a, "quant_load", "gpu") != "gpu" and (kind != "graph" or (a.quant or quant) not in ("fp8", "nvfp4",
                                                                                                     "int8")):
         raise SystemExit("--quant-load cpu needs --mode fp8, int8 or nvfp4 (the CUDA graph engine)")
-    if getattr(a, "long_lane_gdn", "off") == "on" and getattr(a, "long_lane", "off") != "on":
-        raise SystemExit("--long-lane-gdn on needs --long-lane on")
+    if getattr(a, "long_lane_gdn", "off") == "on" and (getattr(a, "long_lane", "off") == "off" or kind != "graph"):
+        raise SystemExit("--long-lane-gdn on needs the long lane: the CUDA graph engine with --long-lane auto (the "
+                         "default) or on")
     if getattr(a, "graph_memory_gb", None) is not None:
         if kind != "graph":
             raise SystemExit("--graph-memory-gb needs the CUDA graph engine (fast, fast-nocompile, fp8, int8, "
@@ -1413,6 +1432,8 @@ class Server:
     # GET /health: client requests in flight (serve) and the calls of ask whose queue entries all wait for an engine
     # call (waiting: future of a queue entry -> [True while its call waits])
     in_flight = queued = 0
+    clients = 0  # client requests in flight (serve; not the sub-requests of rank): --long-lane auto's other traffic
+    long_auto = long_failed = False  # --long-lane auto is on; its engine call failed (long requests in the main lane)
     waiting = None
     queue_seconds = engine_seconds = 0.0  # time requests waited for the engine; time in engine calls (GET /metrics)
     engine_calls_done = 0
@@ -1437,12 +1458,14 @@ class Server:
                                  "preset (answers can vary run to run on near-ties) or --mode eager (exact)")
         attn = getattr(a, "attn", "auto")
         what = gdn = None
+        self.gdn_graph = False  # a Qwen3.5 (Gated DeltaNet) model in the CUDA graph engine
         if kind in ("graph", "exit"):  # before the weights are downloaded (mps: MPSBackend, when it shares prefixes)
             what = _recurrent(a.model, a.revision)
             gdn = bool(what) and _gdn(a.model, a.revision)
             if what and (kind == "exit" or not gdn):
                 raise SystemExit(recurrent_refused(a.model, what, gdn))
             if gdn:  # Qwen3.5 in the graph engine (basal 2.4): bf16, plain and branched rows
+                self.gdn_graph = kind == "graph"
                 why = gdn_refused(a.quant or quant, getattr(a, "state_cache_gb", 0),
                                   getattr(a, "prefix_cache", "off") == "on", getattr(a, "batches", "default"),
                                   lean_arg(getattr(a, "lean", "off")), getattr(a, "tree", "dense"),
@@ -1644,10 +1667,14 @@ class Server:
                 and getattr(a, "long_lane", "off") != "on":
             self.backlog, self.sched_tokens, self.sched_rate = [], a.long_tokens, 1 / 30000
         self.long_tokens = None  # --long-lane: requests whose longest prompt has more tokens go to the long lane
-        if getattr(a, "long_lane", "off") == "on":
+        mode = getattr(a, "long_lane", "off")
+        if mode == "on":
             if kind != "graph":
                 raise SystemExit("--long-lane needs the CUDA graph engine (fast, fast-nocompile, fp8, nvfp4)")
             self.long_lane(a.long_tokens, a.long_slice_ms / 1000, cuda=True, share=getattr(a, "long_share", 0.5))
+        elif mode == "auto" and long_lane_auto_off(kind, a, self.two_way, self.gdn_graph) is None:
+            self.long_lane(a.long_tokens, a.long_slice_ms / 1000, cuda=True, share=getattr(a, "long_share", 0.5))
+            self.long_auto = True
 
     def long_lane(self, tokens, slice_s, cuda=True, share=0.5):
         """Turn on the long lane: requests whose longest prompt has more than `tokens` tokens are answered by
@@ -1736,6 +1763,7 @@ class Server:
         an engine call already running finishes)."""
         self.overloaded()
         self.in_flight += 1
+        self.clients += 1
         try:
             timeout = getattr(self, "request_timeout", None)
             if timeout is None:
@@ -1746,6 +1774,7 @@ class Server:
                 raise TimedOut(f"no answer within this server's --request-timeout of {timeout:g} s") from None
         finally:
             self.in_flight -= 1
+            self.clients -= 1
 
     reading = 0  # requests whose body the HTTP routes are reading (not yet in flight)
 
@@ -2144,6 +2173,9 @@ class Server:
         while True:
             await self.long_ready.wait()
             self.long_entries[:] = [e for e in self.long_entries if not e[2].done()]  # (cancelled: dropped)
+            if self.long_failed:  # (--long-lane auto after its engine call failed: the main lane answers them)
+                self.long_to_main(self.long_entries)
+                self.long_entries.clear()
             if not self.long_entries:
                 self.long_ready.clear()
                 continue
@@ -2171,15 +2203,36 @@ class Server:
                     _answer(e[2], o)
                 self.long_rate = 0.8 * self.long_rate + 0.2 * (time.perf_counter() - t0) / max(total, 1)
             except Exception as ex:  # noqa: BLE001
-                _fail([e[2] for e in batch], ex)
+                if self.long_auto and not out_of_memory(ex):  # the default's long lane must not fail requests that the
+                    self.long_to_main(batch, ex)              # main lane answers: they, and later ones, go there
+                else:
+                    _fail([e[2] for e in batch], ex)
+
+    def long_to_main(self, batch, ex=None):
+        """--long-lane auto: its engine call failed (ex, not out of memory). Its requests go to the main queue, as
+        without the long lane, and so do the long requests after them; the error is logged once, with its traceback."""
+        if ex is not None and not self.long_failed:
+            self.long_failed = True
+            print(f"basal: the long lane failed ({type(ex).__name__}: {str(ex)[:300]}); long requests go to the main "
+                  "lane from now on (--long-lane off does so from the start)", file=sys.stderr, flush=True)
+            traceback.print_exception(type(ex), ex, ex.__traceback__, file=sys.stderr)
+        live = [e[:5] for e in batch if not e[2].done()]
+        self.gate.main_add(len(live))  # (the main lane's engine calls count them done)
+        for e in live:
+            self.queue.put_nowait(e)
 
     def lane_of(self, branches, longest, cut):
         """--long-lane: a request whose longest prompt has more than --long-tokens tokens goes to the long lane, unless
-        its state is in the state cache (then only its questions and options are computed, which is short work)."""
+        its state is in the state cache (then only its questions and options are computed, which is short work).
+        --long-lane auto: only while another client request is in flight. A request alone on the server (every request
+        of a sequential client) goes to the main lane, so its answer is the one --long-lane off gives: the long lane's
+        layered, uncompiled forward rounds differently in bf16 from the main lane's graphs."""
         if getattr(self, "long_tokens", None) is None or max(longest, default=0) <= self.long_tokens:
             return "main"
         cache = getattr(self.backend, "state_cache", None)
         if cache is not None and cut and cache.has(cache.key(branches[0][3][0][:cut])):
+            return "main"
+        if self.long_auto and (self.clients <= 1 or self.long_failed):  # --long-lane auto: alone on the server
             return "main"
         return "long"
 
@@ -2433,6 +2486,8 @@ class Server:
         qs, branches, n_tok, longest, truncation, cut, lane = await self.in_prep(big, self.prepare_text, body, qs,
                                                                                  branches)
         outs = await self.ask(branches, pol, cut, lane)
+        if lane == "long" and self.long_failed:  # (--long-lane auto: its failed call left this request to the main lane)
+            lane = "main"
         return qs, branches, outs, n_tok, longest, truncation, cut, lane
 
     def prepare_text(self, body, qs, branches=None):
@@ -2528,8 +2583,8 @@ class Server:
         out["usage"]["longest_prompt_tokens"] = max(longest, default=0)
         if truncation:
             out["usage"]["truncated"] = truncation
-        if getattr(self, "long_tokens", None) is not None:
-            out["usage"]["lane"] = lane
+        if getattr(self, "long_tokens", None) is not None and (lane == "long" or not self.long_auto):
+            out["usage"]["lane"] = lane  # (auto: only when it took the long lane; the main lane's answer is as off's)
         if self.log:
             self.log_decision(body, out)
         return out
@@ -2804,11 +2859,15 @@ def add_engine_args(ap):
     ap.add_argument("--scheduler", choices=["auto", "on", "off"], default="auto",
                     help="CUDA graph engine: requests whose longest prompt has more than --long-tokens tokens wait in a "
                          "backlog and join engine calls in HRRN order, a bounded amount per call, so short requests do "
-                         "not queue behind them (auto: on; off with --long-lane or --deterministic)")
-    ap.add_argument("--long-lane", dest="long_lane", choices=["on", "off"], default="off",
+                         "not queue behind them (auto: on; off with --long-lane on or --deterministic)")
+    ap.add_argument("--long-lane", dest="long_lane", choices=["auto", "on", "off"], default="auto",
                     help="CUDA graph engine: requests whose longest prompt has more than --long-tokens tokens run in a "
                          "lane of their own, one at a time and one decoder layer at a time, giving the GPU to the "
-                         "batches of short requests (whose answers then do not wait for a long document)")
+                         "batches of short requests (whose answers then do not wait for a long document). auto (the "
+                         "default, 2.8): where it applies (not two-way models, --lanes, --deterministic, or Qwen3.5 "
+                         "without --long-lane-gdn on), and only while another request is in flight: a request alone "
+                         "on the server, as every request of a sequential client, is answered by the main lane as with "
+                         "off. on: every long request (refused where it does not apply). off: never")
     ap.add_argument("--long-lane-gdn", dest="long_lane_gdn", choices=["on", "off"], default="off",
                     help="--long-lane with a Qwen3.5 (Gated DeltaNet) model such as basal-omni-pico: on = serve the "
                          "long lane (opt-in), off = refuse it. Its bf16 answers are a little further from float32 than "
