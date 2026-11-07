@@ -190,7 +190,12 @@ benchmarking a GPU.
     own, one decoder layer at a time, and give the GPU to the batches of short requests between layers. With mixed
     traffic a short request then no longer waits for a long document. On a GB10 (basal-2.0-4.5B, 32k-token states every
     3 s and two short requests a second), short p50 was 23.4 s without the long lane and 0.33 s with it (measured by
-    Dariusz Koryto, @dkoryto). `auto` gives a long request the long lane only while another request is in flight: a
+    Dariusz Koryto, @dkoryto). On an RTX PRO 6000 Blackwell (basal-omni-1.0-mini, `--mode fast`, 60k-token states
+    every 3 s, two short requests a second), short p50 was 3.9 s with `off` and 0.17 s with `auto`. The long requests
+    pay for it: their p50 went from 3.3 s to 21 s. The long lane reads one long state at a time, uncompiled and
+    yielding to the short batches (about 6 s each there against 3 s in the main lane), so a sustained stream of long
+    states above its pace queues up. Where long requests matter as much as short ones, `--long-lane off`.
+    `auto` gives a long request the long lane only while another request is in flight: a
     request alone on the server, as every request of a sequential client, is answered by the main lane exactly as with
     `off`. (The long lane's layered, uncompiled forward rounds differently in bf16 from the main lane's graphs, and
     under load answers already depend on the batch.) `auto` has no long lane where `on` is refused (two-way models,
