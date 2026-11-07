@@ -1910,7 +1910,8 @@ def http_context(a):
     # without --model the server's name stands in for the model (its --name, or the folder's name with "+adapter"): no
     # identity to check the compared file against
     c.baseline, c.base_file, c.base_why = compared(md, c.kind, a.calibration, c.quant, c.orders, a.no_calibration,
-                                                   c.preset, a.layout, identity=(c.model, c.revision, c.adapter) if md is not None else None)
+                                                   c.preset, a.layout,
+                                                   identity=(c.model, c.revision, c.adapter) if md is not None else None)
     return c
 
 
@@ -1929,7 +1930,8 @@ def local_context(a):
     c.files = model_files_id(srv.md, srv.kind)
     c.adapter = srv.adapter.identity if srv.adapter else None
     c.baseline, c.base_file, c.base_why = compared(srv.md, srv.kind, a.calibration, c.quant, c.orders,
-                                                   a.no_calibration, c.preset, a.layout, srv.adapter, identity=(c.model, c.revision, c.adapter))
+                                                   a.no_calibration, c.preset, a.layout, srv.adapter,
+                                                   identity=(c.model, c.revision, c.adapter))
     c.engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
         + (f" --vllm-preset {c.preset}" if c.preset not in (None, "default") else "") \
         + (f" --adapter {srv.adapter.name}" if srv.adapter else "")
