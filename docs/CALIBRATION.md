@@ -184,11 +184,25 @@ the shipped temperature. The warning names such a type, and `--keep-shipped TYPE
 - the type's temperature (for `choice` in a format-2 file also its option-count bucket temperatures) and its
   per-type threshold at every target are the compared file's; a target where that file has none has none here;
 - each kept threshold is marked `"kept": "shipped"`, with its coverage and error on your FIT and CERT split, and the
-  report flags it when CERT does not confirm it; `fitted_on.kept_shipped` lists the kept types;
+  report flags it when CERT does not confirm it; `fitted_on.kept_shipped` lists the kept types, and
+  `fitted_on.kept_shipped_from` names the compared file (its name, the SHA-256 of its bytes and its `certified_on`);
+- a kept threshold that your decisions refute is withdrawn (`"confidence": null` with `"refuted"`, so `basal-serve`
+  defers), as a fitted threshold that CERT refutes is. Neither of your splits certified it, so FIT and CERT test it
+  together: the one-sided 95% lower bound of their error at the threshold is above the target, with decisions that
+  share a group counted as the independent ones they are worth (the design effect);
 - the other types are fitted as usual.
 
+`--keep-shipped` refuses two compared files:
+- a format-1 file without per-type thresholds (the basal-1.5 files). Its one threshold was certified over all the
+  types together; `basal-serve` applies it to each type of that file, but kept per type it would become a
+  certificate of each;
+- a file of another engine, as its `"engine"` field or its name says (`CALIBRATION.json` for the bf16 engines,
+  `CALIBRATION.<engine>.json`). Its thresholds were certified on that engine's probabilities, so a bf16 file's is not
+  kept in a GGUF or MLX file. A file that says neither is kept, with a warning.
+
 The kept threshold is certified on the data the shipped file was fitted on, not on yours: read its CERT line before
-relying on it. Label more decisions of the type to fit it on your own data instead.
+relying on it. Label more decisions of the type to fit it on your own data instead. With task questions only (no
+decision questions), the compared file's decision calibration is kept whole anyway, so the option changes nothing.
 
 The thresholds hold for the mix of question types and prompts you calibrated on. The leave-one-family-out ECE shows
 how well one temperature carries over to a kind of decision it was not fitted on, such as a new question in
