@@ -302,3 +302,88 @@ def test_a_failing_long_lane_of_the_default_leaves_its_requests_to_the_main_lane
         except RuntimeError as e:
             return str(e)
     assert asyncio.run(serving(on, go_on)) == "a kernel the long lane has no build of"
+
+
+# -- GET /health and /metrics by lane (2.8) ----------------------------------------------------------------------------
+async def until(cond, seconds=5):
+    for _ in range(int(seconds * 200)):
+        if cond():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("timed out")
+
+
+def metric(text, name, lane):
+    line = next(x for x in text.splitlines() if x.startswith(f'{name}{{lane="{lane}"}} '))
+    return float(line.split()[-1])
+
+
+def test_health_and_metrics_report_the_long_lane_apart():
+    """A server with a long lane: GET /health keeps running / queued over both lanes and adds "long", the requests
+    whose work is the long lane's (one in its engine call, one waiting behind it); /metrics gives the same split in
+    families of their own (main + long = the totals). A load balancer then sees the main lane free while only long
+    states run. Idle again, every count is 0."""
+    import httpx
+
+    from basal.server import http_app
+    srv = lane_server("on")
+
+    async def go():
+        app = http_app(srv, "fast")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://basal") as c:
+            idle = (await c.get("/health")).json()
+            first = asyncio.create_task(srv.serve(LONG))
+            await until(lambda: srv.backend.calls["long"] == 1)  # in the long lane's engine call
+            second = asyncio.create_task(srv.serve(dict(LONG, state=LONG["state"] + "And more.")))
+            await until(lambda: len(srv.long_entries) == 1)  # waiting behind it
+            busy = (await c.get("/health")).json()
+            text = (await c.get("/metrics")).text
+            await first
+            await second
+            after = (await c.get("/health")).json()
+        return idle, busy, text, after
+
+    idle, busy, text, after = asyncio.run(serving(srv, go))
+    assert idle == after == {"status": "ok", "running": 0, "queued": 0, "long": {"running": 0, "queued": 0}}
+    assert busy == {"status": "ok", "running": 1, "queued": 1, "long": {"running": 1, "queued": 1}}
+    assert metric(text, "basal_lane_requests_waiting", "long") == 1 and metric(
+        text, "basal_lane_requests_waiting", "main") == 0
+    assert metric(text, "basal_lane_requests_running", "long") == 1 and metric(
+        text, "basal_lane_requests_running", "main") == 0
+    assert "basal_requests_waiting 1" in text.splitlines() and "basal_requests_running 1" in text.splitlines()
+
+
+def test_without_a_long_lane_health_and_metrics_are_as_before():
+    import httpx
+
+    from basal.server import http_app
+    srv = lane_server("off")
+
+    async def go():
+        app = http_app(srv, "fast")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://basal") as c:
+            return (await c.get("/health")).json(), (await c.get("/metrics")).text
+
+    health, text = asyncio.run(serving(srv, go))
+    assert health == {"status": "ok", "running": 0, "queued": 0}
+    assert "basal_lane_" not in text
+
+
+def test_the_lane_counts_come_back_to_zero_when_a_long_request_is_cancelled():
+    """A long request whose client leaves while it waits in the long lane's queue, and one whose client leaves during
+    its long-lane call: GET /health's "long" comes back to 0 (no request counted for ever)."""
+    srv = lane_server("on")
+
+    async def go():
+        first = asyncio.create_task(srv.serve(LONG))
+        await until(lambda: srv.backend.calls["long"] == 1)
+        second = asyncio.create_task(srv.serve(dict(LONG, state=LONG["state"] + "And more.")))
+        await until(lambda: len(srv.long_entries) == 1)
+        second.cancel()
+        first.cancel()
+        await asyncio.wait({first, second})
+        await until(lambda: srv.in_flight == 0 and srv.queued == 0)
+        return srv.health()[0]
+
+    assert asyncio.run(serving(srv, go)) == {"status": "ok", "running": 0, "queued": 0,
+                                             "long": {"running": 0, "queued": 0}}

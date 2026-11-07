@@ -1460,6 +1460,7 @@ class Server:
     # GET /health: client requests in flight (serve) and the calls of ask whose queue entries all wait for an engine
     # call (waiting: future of a queue entry -> [True while its call waits])
     in_flight = queued = 0
+    long_queued = long_running = 0  # --long-lane: the requests of `queued` / `running` whose work is the long lane's
     clients = 0  # client requests in flight (serve; not the sub-requests of rank): --long-lane auto's other traffic
     long_auto = long_failed = False  # --long-lane auto is on; its engine call failed (long requests in the main lane)
     waiting = None
@@ -1950,6 +1951,9 @@ class Server:
         "stalled", ...} while an engine call has run longer than S seconds (a hung GPU call: a router stops sending
         this replica requests until it answers 200 again)."""
         body = {"status": "ok", **self.load()}
+        long = self.lane_load()
+        if long is not None:
+            body["long"] = long
         stall = getattr(self, "stall_s", None)
         if stall is not None:
             call, _ = self.liveness()
@@ -1963,6 +1967,14 @@ class Server:
         flight (in an engine call, or in the server's own work before and after it). running + queued = 0: idle."""
         return {"running": self.in_flight - self.queued, "queued": self.queued}
 
+    def lane_load(self):
+        """GET /health's "long" (2.8, a server with a long lane; None without one): the requests of "queued" that wait
+        in the long lane's queue, and of "running" whose work is in a long-lane engine call. The main lane has the
+        rest: a load balancer sees it free while only long states run."""
+        if getattr(self, "long_tokens", None) is None:
+            return None
+        return {"running": self.long_running, "queued": self.long_queued}
+
     def started(self, entries):
         """Queue entries that go into an engine call: their requests are no longer queued (GET /health)."""
         for e in entries:
@@ -1970,6 +1982,9 @@ class Server:
             if wait and wait[0]:
                 wait[0] = False
                 self.queued -= 1
+                if wait[2] == "long":
+                    self.long_queued -= 1
+                    self.long_running += 1
                 self.queue_seconds += time.perf_counter() - wait[1]
 
     async def ask(self, branches, pol, cut=None, lane="main"):
@@ -1982,11 +1997,13 @@ class Server:
         # entry, so the engine sees the request's record (its one-way fallback above max_record tokens)
         entries = [branches] if self.soam or lane == "long" or getattr(self, "two_way", None) \
             else [[b] for b in branches]
-        futs, wait = [], [True, time.perf_counter()]  # this call waits (queued) until one of its entries starts an
-        # engine call (and since when)
+        futs, wait = [], [True, time.perf_counter(), lane]  # this call waits (queued) until one of its entries starts an
+        # engine call (and since when, and in which lane)
         if self.waiting is None:
             self.waiting = {}
         self.queued += 1
+        if lane == "long":
+            self.long_queued += 1
         if lane == "main" and getattr(self, "gate", None) is not None:
             self.gate.main_add(len(entries))
         for e in entries:
@@ -2014,6 +2031,10 @@ class Server:
                     fut.cancel()
             if wait[0]:
                 self.queued -= 1
+                if lane == "long":
+                    self.long_queued -= 1
+            elif lane == "long":
+                self.long_running -= 1
         return outs
 
     def cut_of(self, q, branches):
@@ -3186,6 +3207,16 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         body, status = srv.health() if hasattr(srv, "health") else ({"status": "ok", **srv.load()}, 200)
         return JSONResponse(body, status_code=status)
 
+    def lanes(load, long):
+        """--long-lane: the requests waiting / running by lane (2.8), in families of their own so that a sum over
+        basal_requests_waiting stays the total."""
+        if long is None:
+            return []
+        return [("basal_lane_requests_waiting", "basal_requests_waiting by lane (main + long = the total)", "gauge",
+                 [({"lane": "main"}, load["queued"] - long["queued"]), ({"lane": "long"}, long["queued"])]),
+                ("basal_lane_requests_running", "basal_requests_running by lane (long: in a long-lane engine call)",
+                 "gauge", [({"lane": "main"}, load["running"] - long["running"]), ({"lane": "long"}, long["running"])])]
+
     async def metrics(_):
         """Prometheus metrics (2.5): the engine version and the served model, requests waiting / running (also under
         vLLM's names, which routers such as llm-d read), requests served / failed and their time, the state cache when
@@ -3198,6 +3229,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
              ("basal_requests_running", "requests in flight, not waiting", "gauge", [({}, load["running"])]),
              ("vllm:num_requests_waiting", "as basal_requests_waiting (vLLM's name)", "gauge", [({}, load["queued"])]),
              ("vllm:num_requests_running", "as basal_requests_running (vLLM's name)", "gauge", [({}, load["running"])]),
+             *lanes(load, getattr(srv, "lane_load", lambda: None)()),
              ("basal_requests_total", "requests served (POST /v1/systemone, /v1/basal, /v1/decisions)", "counter",
               [({}, counts["requests"])]),
              ("basal_requests_failed_total", "requests answered with an error", "counter", [({}, counts["failed"])]),

@@ -123,6 +123,11 @@ one shared state (SOAM); asking them in one request is faster than separate requ
   can be queued again). `running` and `queued` both 0 means that the server is idle. With `basal-serve --stall-s S`
   it answers 503 `{"status": "stalled", ..., "engine_call_s": T}` while an engine call (main lane) has run longer
   than S seconds, so a router stops sending it requests until it answers 200 again.
+  A server with a long lane (`--long-lane auto`, the default on the CUDA graph engine, or `on`) also returns
+  `"long": {"running": R, "queued": Q}` (2.8): the requests among `running` whose work is in a long-lane engine call,
+  and among `queued` those waiting in the long lane's queue. The main lane has the rest (`running - long.running`,
+  `queued - long.queued`), so a load balancer can see the main lane free while only long states run. `running` and
+  `queued` keep their meaning (both lanes together), and a server without a long lane returns no `long`.
 
 ## Requests from other `/v1/systemone` servers' clients
 
