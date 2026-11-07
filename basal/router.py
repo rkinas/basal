@@ -810,7 +810,8 @@ def app(router, poll_s=None, procs=(), on_dead=lambda: signal.raise_signal(signa
         ids.insert(0, Middleware(host_check, hosts))
     routes = [Route("/v1/systemone", post, methods=["POST"]), Route("/v1/basal", post, methods=["POST"]),
               Route("/v1/decisions", post, methods=["POST"]),
-              Route("/health", health), Route("/v1/models", models), Route("/metrics", metrics)]
+              Route("/health", health), Route("/health/", health), Route("/v1/models", models),
+              Route("/metrics", metrics)]
     if ui is None:
         return Starlette(routes=routes, lifespan=lifespan, middleware=ids)
     return ui.page(Starlette(routes=ui.routes(routes), lifespan=lifespan, middleware=ids))

@@ -71,6 +71,15 @@ def test_router_routes_by_state_and_reports():
         assert c.get("/v1/models").status_code == 200
 
 
+def test_router_health_answers_with_and_without_a_trailing_slash():
+    """A load balancer's probe of /health/ (or HEAD) gets the answer of GET /health, not a redirect, as basal-serve."""
+    rt = R.Router(["http://r0"], transport=replicas_transport(["http://r0"], {"http://r0"}))
+    with TestClient(R.app(rt, poll_s=0.05), follow_redirects=False) as c:
+        asyncio.run(rt.poll())
+        got = [(m, p, c.request(m, p).status_code) for m in ("GET", "HEAD") for p in ("/health", "/health/")]
+    assert all(s == 200 for _, _, s in got), got
+
+
 def test_router_without_ready_replicas_answers_503():
     rt = R.Router(["http://r0"], transport=replicas_transport(["http://r0"], set()))
     with TestClient(R.app(rt, poll_s=0.05)) as c:
