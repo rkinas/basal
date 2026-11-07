@@ -304,7 +304,11 @@ option) and every answer is marked `"calibration": "unvalidated"`; with `--stric
 When both are Hugging Face snapshots (a revision on each side) the whole repository ID is compared, so `OrgA/basal-x`
 is not `OrgB/basal-x`; a local copy of a model matches its Hugging Face name by the last part of the path
 (`/data/basal-omni-1.0-max` = `Remek/basal-omni-1.0-max`).
-The files that ship in a model's directory are not checked.
+The files that ship in a model's directory are not checked. `basal-calibrate` applies the same rule to the file it
+compares with (`--calibration`, or the one a `--save-rows` run compared with, for `--from-rows`): fitted on another
+model, on a revision with other model files or with another adapter, it keeps its temperatures for the types with too
+few decisions, and its thresholds and task thresholds are neither compared nor kept (a run with task questions only
+no longer copies them into the new file).
 
 A revision that changes only the model card holds the same model files, so the file is applied with its thresholds.
 A file without `fitted_on.model_files` (written before basal-calibrate recorded it) is compared through the cache:

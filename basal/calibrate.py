@@ -104,8 +104,8 @@ from .engine import resolve
 from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
 from .server import (MODES, UNVALIDATED_OUT, Server, _text, add_engine_args, answer_set, calibration_file,
-                     calibration_name, certified, default_mode, load_calibration, model_files_id, model_identity,
-                     refuse_lean_flex, temper, temperature, to_items, unvalidated_reason)
+                     calibration_name, certified, default_mode, identity_mismatch, load_calibration, model_files_id,
+                     model_identity, refuse_lean_flex, temper, temperature, to_items, validate_baseline)
 from .sets import label_set_id
 from .sets import select as select_set
 from .textio import read_text
@@ -537,16 +537,37 @@ def buckets_cover(buckets, prim="choice", lo=2, hi=255):
     return seen >= set(range(lo, hi + 1))
 
 
+class Tempered:
+    """The probabilities of rows as basal-serve returns them with one set of temperatures (same float32 maths, one row
+    at a time): temps per type, buckets {type: {"lo-hi": T}} (calibration file 2) before them. Each row is tempered
+    once: fit() asks for the same rows at every target, per type and in every report."""
+
+    def __init__(self, temps, buckets=None):
+        self.cal, self.memo = dict(temperature_per_prim=temps or {}, temperature_per_bucket=buckets or {}), {}
+
+    def p(self, rows):
+        out = []
+        for r in rows:
+            hit = self.memo.get(id(r))
+            if hit is None:  # the row is kept with its result, so its id is not reused while the cache lives
+                hit = self.memo[id(r)] = (r, temper(torch.tensor(r["p"]),
+                                                    temperature(self.cal, r["prim"], len(r["p"]))).tolist())
+            out.append(hit[1])
+        return out
+
+    def cs(self, rows):
+        """(confidence, correct) of every row as served."""
+        return [(float(max(p)), int(np.argmax(p)) == r["gold"]) for r, p in zip(rows, self.p(rows))]
+
+
 def served_p(rows, temps, buckets=None):
-    """The probabilities of every row as basal-serve returns them with these temperatures (same float32 maths):
-    temps per type, buckets {type: {"lo-hi": T}} (calibration file 2) before them."""
-    cal = dict(temperature_per_prim=temps, temperature_per_bucket=buckets or {})
-    return [temper(torch.tensor(r["p"]), temperature(cal, r["prim"], len(r["p"]))).tolist() for r in rows]
+    """The probabilities of every row as basal-serve returns them with these temperatures (Tempered)."""
+    return Tempered(temps, buckets).p(rows)
 
 
 def served(rows, temps, buckets=None):
     """(confidence, correct) of every row as basal-serve returns it with these temperatures."""
-    return [(float(max(p)), int(np.argmax(p)) == r["gold"]) for r, p in zip(rows, served_p(rows, temps, buckets))]
+    return Tempered(temps, buckets).cs(rows)
 
 
 def ece(cs, bins=10):
@@ -826,6 +847,39 @@ def gate(cs, thr, deff=1.0):
                 error=e / len(acc) if acc else None, upper95=cp_upper(e_i, n_i) if acc else None)
 
 
+def certify(cf, cc, risk, deff=1.0, deff_c=1.0, veto=True, method=False):
+    """The one entry builder of a certified threshold (pooled, per type, per task): the fixed-sequence threshold of
+    the FIT decisions cf at target `risk`, with its FIT and CERT (cc) coverage, error and bound; withdrawn when CERT
+    refutes it (`veto`; the informational pooled entry is never withdrawn); deff / deff_c: the design effects of FIT
+    and CERT -> (entry, CERT gate at the threshold)."""
+    head = dict(method=METHOD) if method else {}
+    thr = threshold(cf, risk, deff=deff) if cf else None
+    g_cert = gate(cc, thr, deff_c)
+    if thr is None:
+        return dict(confidence=None, **head, reason=no_threshold_reason(cf, risk, deff=deff) if cf else
+                    "no FIT decisions"), g_cert
+    g_fit = gate(cf, thr, deff)
+    entry = dict(confidence=thr, **head, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
+                 fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"], cert_error=g_cert["error"],
+                 cert_upper95=g_cert["upper95"], cert_accepted=g_cert["accepted"])
+    return (withdrawn(entry, risk, deff_c) if veto else entry), g_cert
+
+
+def floor(entries):
+    """The one floor of certified entries {target: entry} (in place): a confidence certified at a target error is
+    certified at every looser target too (its bound is below both), so a looser target never keeps a stricter
+    threshold than a tighter one: the fixed sequence stops at its first failing level, and at a loose target it starts
+    on a small top level and can stop on a few errors below it (5% at 0.9999 against 1% at 0.9587). The looser entry
+    becomes the tighter one, marked "floored_from" -> the targets whose entries changed."""
+    changed, ks = set(), sorted(entries, key=float)
+    for lo, hi in zip(ks, ks[1:]):
+        a, b = entries[lo], entries[hi]
+        if a.get("confidence") is not None and (b.get("confidence") is None or b["confidence"] > a["confidence"]):
+            entries[hi] = dict(a, floored_from=lo)
+            changed.add(hi)
+    return changed
+
+
 def blend(T_fit, T_old, n, min_per_type):
     """A temperature fitted on n < min_per_type decisions, blended in log space with the one it replaces in proportion
     n / min_per_type (so the full fit takes over continuously at min_per_type) -> (temperature, weight of the fit)."""
@@ -953,81 +1007,63 @@ def fit_fallback(sets, T, min_per_set=30):
     return out
 
 
-def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk):
+def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk, tempered=None):
     """The certified threshold of every type on its own decisions, while one threshold pooled over the types moves
     with the temperatures of the others. A temperature keeps the order of a type's yes/no confidences (the top
     probability is monotone in T for two options), not of choice and score ones: with three or more options it can
     swap two decisions (logits [0, -3, -3] and [0, -2, -20]: 0.909 > 0.881 at T = 1, 0.403 < 0.512 at T = 10), and
     format-2 choice buckets have temperatures of their own. The levels are therefore ordered as served, with the
-    temperatures fitted on the same FIT decisions."""
+    temperatures fitted on the same FIT decisions. Decisions that share a group are counted as fewer independent ones
+    when their errors correlate (icc on FIT). `tempered`: a Tempered of temps / buckets to reuse."""
+    tempered = tempered or Tempered(temps, buckets)
     out = {}
     for t in PRIMS:
         rf = [r for r in fit_rows if r["prim"] == t]
-        cf = served(rf, temps, buckets)
-        if not cf:
+        if not rf:
             continue
         rc = [r for r in cert_rows if r["prim"] == t]
-        cc = served(rc, temps, buckets)
+        cf, cc = tempered.cs(rf), tempered.cs(rc)
         rho, deff = design_effect(cf, [r["group"] for r in rf])  # FIT's rho, each side's own group sizes
-        deff_c = design_effect_of([r["group"] for r in rc], rho)
-        thr = threshold(cf, risk, deff=deff)
-        if thr is None:
-            out[t] = dict(confidence=None, reason=no_threshold_reason(cf, risk, deff=deff))
-        else:
-            g_fit, g_cert = gate(cf, thr, deff), gate(cc, thr, deff_c)
-            out[t] = withdrawn(dict(confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
-                                    fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"],
-                                    cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
-                                    cert_accepted=g_cert["accepted"]), risk, deff_c)
+        out[t], _ = certify(cf, cc, risk, deff, design_effect_of([r["group"] for r in rc], rho))
         if rho:
             out[t].update(icc=rho, design_effect=deff)
     return out
 
 
-def effective_gate(rows, temps, buckets, entry):
-    """Coverage and error of the decisions basal-serve automates with this threshold entry: each type at its own
-    certified threshold; a type without one is not automated (deferred)."""
+def automated_gate(rows, tempered, cal, risk):
+    """Share and error of the decisions basal-serve automates at max_error `risk` with calibration `cal` (rows tempered
+    with its temperatures): each type at the threshold the server applies to it (server.certified: its own; a type
+    without one is not automated)."""
     if not rows:
         return dict(coverage=None, error=None)
-    acc = []
-    for r, (c, ok) in zip(rows, served(rows, temps, buckets)):
-        thr = type_threshold(entry, r["prim"])
-        if thr is not None and c >= thr:
-            acc.append(ok)
+    acc = [ok for r, (c, ok) in zip(rows, tempered.cs(rows))
+           if (thr := certified(cal, risk, r["prim"])) is not None and c >= thr]
     return dict(coverage=len(acc) / len(rows), error=(len(acc) - sum(acc)) / len(acc) if acc else None)
+
+
+def effective_gate(rows, temps, buckets, entry):
+    """automated_gate of a fitted threshold entry (every type at its own certified threshold)."""
+    return automated_gate(rows, Tempered(temps, buckets), {"thresholds": {"1.0": entry}}, 1.0)
 
 
 def served_gate(rows, temps, buckets, cal, risk):
-    """Share and error of the decisions basal-serve automates at max_error `risk` with the calibration `cal` (its
-    temperatures given as temps / buckets): each type at the threshold the server applies to it (server.certified)."""
-    if not rows:
-        return dict(coverage=None, error=None)
-    acc = []
-    for r, (c, ok) in zip(rows, served(rows, temps, buckets)):
-        thr = certified(cal, risk, r["prim"])
-        if thr is not None and c >= thr:
-            acc.append(ok)
-    return dict(coverage=len(acc) / len(rows), error=(len(acc) - sum(acc)) / len(acc) if acc else None)
+    """automated_gate of a calibration as basal-serve applies it (its temperatures given as temps / buckets)."""
+    return automated_gate(rows, Tempered(temps, buckets), cal, risk)
 
 
 def floor_thresholds(thresholds, targets):
-    """A confidence certified at a target error is certified at every looser target too (its bound is below both), so a
-    looser target never keeps a stricter threshold than a tighter one: the fixed sequence stops at its first failing
-    level, and at a loose target it starts on a small top level and can stop on a few errors below it (5% at 0.9999
-    against 1% at 0.9587). Floors the pooled and per-type entries in place, marking
-    them "floored_from"; returns the targets whose entries changed."""
-    changed = set()
-    rs = sorted(float(r) for r in targets)
-    for lo, hi in zip(rs, rs[1:]):
-        a, b = thresholds[str(lo)], thresholds[str(hi)]
-        for t, e in (a.get("per_type") or {}).items():
-            eh = (b.get("per_type") or {}).get(t) or {}
-            if e.get("confidence") is not None and (eh.get("confidence") is None or eh["confidence"] > e["confidence"]):
-                b.setdefault("per_type", {})[t] = dict(e, floored_from=str(lo))
-                changed.add(str(hi))
-        if a.get("confidence") is not None and (b.get("confidence") is None or b["confidence"] > a["confidence"]):
-            b.update({k: v for k, v in a.items() if k not in ("per_type", "pooled")}, floored_from=str(lo))
-            changed.add(str(hi))
+    """floor() of the per-type entries and of the pooled ones of thresholds {target: entry} (in place) -> the targets
+    whose entries changed."""
+    keys, changed = [str(float(r)) for r in targets], set()
+    for t in sorted({t for k in keys for t in (thresholds[k].get("per_type") or {})}):
+        per = {k: ((thresholds[k].get("per_type") or {}).get(t) or {"confidence": None}) for k in keys}
+        for k in floor(per):
+            thresholds[k].setdefault("per_type", {})[t] = per[k]
+            changed.add(k)
+    pooled = {k: {x: v for x, v in thresholds[k].items() if x not in ("per_type", "pooled")} for k in keys}
+    for k in floor(pooled):
+        thresholds[k] = dict(pooled[k], **{x: thresholds[k][x] for x in ("per_type", "pooled") if x in thresholds[k]})
+        changed.add(k)
     return changed
 
 
@@ -1105,14 +1141,25 @@ def row_problem(r):
     return None
 
 
+def clean_rows(rows):
+    """The one boundary of the rows (engine readouts through raw_rows, or the lines of a --save-rows file) -> (the rows
+    that can enter the fit, "line N: why" of the others): row_problem."""
+    kept, dropped = [], []
+    for r in rows:
+        why = row_problem(r)
+        if why:
+            dropped.append(f"line {r.get('line', '?') if isinstance(r, dict) else '?'}: {why}")
+        else:
+            kept.append(r)
+    return kept, dropped
+
+
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
         min_blend=MIN_BLEND, conformal=()):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
     with the choice temperatures per option-count bucket. Multi rows fit the fallback_threshold of their label set.
-    Rows that cannot enter the fit (row_problem: NaN probabilities, a gold out of range) are left out and reported."""
-    dropped = [f"line {r.get('line', '?') if isinstance(r, dict) else '?'}: {why}"
-               for r in rows if (why := row_problem(r))]
-    rows = [r for r in rows if not row_problem(r)]
+    Rows that cannot enter the fit (clean_rows: NaN probabilities, a gold out of range) are left out and reported."""
+    rows, dropped = clean_rows(rows)
     if not rows:
         raise SystemExit("no decisions to fit: " + "; ".join(dropped[:3]))
     sets = [r for r in rows if r["prim"] == "multi"]
@@ -1122,55 +1169,43 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     shipped_T = baseline.get("temperature_per_prim", {})
     shipped_B = baseline.get("temperature_per_bucket", {}) if fmt == 2 else {}
     temps, source, buckets, bsource = fit_temps(fit_rows, shipped_T, shipped_B, min_per_type, fmt, min_blend)
-    cs_fit, cs_cert = served(fit_rows, temps, buckets), served(cert_rows, temps, buckets)
-    shipped_cert = served(cert_rows, shipped_T, shipped_B)
+    fitted, shipped = Tempered(temps, buckets), Tempered(shipped_T, shipped_B)  # each row tempered once
+    cs_fit, cs_cert = fitted.cs(fit_rows), fitted.cs(cert_rows)
+    shipped_cert = shipped.cs(cert_rows)
     thresholds, report = {}, dict(types={}, targets={}, n_fit=len(fit_rows), n_cert=len(cert_rows), compared={},
                                   dropped=dropped)
-    automated, automated_pooled, automated_error = {}, {}, {}
     _, deff_pool = design_effect(cs_fit, [r["group"] for r in fit_rows])
     for risk in targets:
-        thr = threshold(cs_fit, risk, deff=deff_pool)
-        g_fit, g_cert = gate(cs_fit, thr, deff_pool), gate(cs_cert, thr)
-        if thr is None:
-            entry = dict(confidence=None, method=METHOD, reason=no_threshold_reason(cs_fit, risk, deff=deff_pool))
-        else:
-            entry = dict(confidence=thr, method=METHOD, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"],
-                         fit_upper95=g_fit["upper95"], cert_coverage=g_cert["coverage"], cert_error=g_cert["error"],
-                         cert_upper95=g_cert["upper95"], cert_accepted=g_cert["accepted"])
-        entry["per_type"] = per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk)
+        entry, g_cert = certify(cs_fit, cs_cert, risk, deff_pool, veto=False, method=True)  # informational
+        entry["per_type"] = per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk, fitted)
         entry["pooled"] = POOLED_NOTE
         thresholds[str(float(risk))] = entry
-        eff = effective_gate(cert_rows, temps, buckets, entry)
-        automated[str(float(risk))] = eff["coverage"]
-        automated_error[str(float(risk))] = eff["error"]
-        automated_pooled[str(float(risk))] = (g_cert["coverage"] if thr is not None else 0.0) if cs_cert else None
         if (baseline.get("thresholds") or {}).get(str(float(risk))):  # the compared file as basal-serve applies it
-            report["compared"][str(float(risk))] = served_gate(cert_rows, shipped_T, shipped_B, baseline, risk)
+            report["compared"][str(float(risk))] = automated_gate(cert_rows, shipped, baseline, risk)
         old = (baseline.get("thresholds") or {}).get(str(float(risk)), {}).get("confidence")
         report["targets"][risk] = dict(shipped=old, shipped_cert=gate(shipped_cert, old) if old is not None else None,
                                        fitted=entry, fitted_cert=g_cert)
-    for k in floor_thresholds(thresholds, targets):  # the automated share of a floored target, as served
-        eff = effective_gate(cert_rows, temps, buckets, thresholds[k])
+    for k in floor_thresholds(thresholds, targets):  # a floored target's figures, as served
+        report["targets"][float(k)].update(fitted=thresholds[k], fitted_cert=gate(cs_cert, thresholds[k]["confidence"]))
+    automated, automated_pooled, automated_error = {}, {}, {}
+    for k, entry in thresholds.items():
+        eff = automated_gate(cert_rows, fitted, {"thresholds": thresholds}, float(k))
         automated[k], automated_error[k] = eff["coverage"], eff["error"]
-        thr = thresholds[k]["confidence"]
-        if thr is not None and cs_cert:
-            automated_pooled[k] = gate(cs_cert, thr)["coverage"]
-        report["targets"][float(k)]["fitted_cert"] = gate(cs_cert, thr)
+        automated_pooled[k] = gate(cs_cert, entry["confidence"])["coverage"] if cs_cert else None
     for t in PRIMS:
         rs = [r for r in rows if r["prim"] == t]
         if not rs:
             continue
         cert = [r for r in cert_rows if r["prim"] == t]
         # as served: a choice question of a format-2 file gets its option-count bucket temperature first
+        fit_t = [r for r in rs if not is_cert(r["group"])]
         report["types"][t] = dict(n=len(rs), n_fit=len(rs) - len(cert), n_cert=len(cert),
-                                  fit_groups=len({r["group"] for r in rs if not is_cert(r["group"])}),
-                                  **dict(zip(("icc", "design_effect"), design_effect(
-                                      served([r for r in rs if not is_cert(r["group"])], temps, buckets),
-                                      [r["group"] for r in rs if not is_cert(r["group"])]))),
+                                  fit_groups=len({r["group"] for r in fit_t}),
+                                  **dict(zip(("icc", "design_effect"),
+                                             design_effect(fitted.cs(fit_t), [r["group"] for r in fit_t]))),
                                   accuracy=float(np.mean([ok for _, ok in served(rs, {})])),
                                   T_shipped=shipped_T.get(t), T=temps.get(t), source=source.get(t, "default 1.0"),
-                                  ece_shipped=ece(served(cert, shipped_T, shipped_B)),
-                                  ece=ece(served(cert, temps, buckets)))
+                                  ece_shipped=ece(shipped.cs(cert)), ece=ece(fitted.cs(cert)))
         if fmt == 2 and t == "choice":  # format 2: a choice question takes its bucket's temperature first
             report["types"][t]["not_served"] = dict(shipped=buckets_cover(shipped_B), fitted=buckets_cover(buckets))
     gates = dict(ece_lofo=lofo(fit_rows, cert_rows, shipped_T, shipped_B, min_per_type, fmt, min_family, reference,
@@ -1199,8 +1234,7 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
                                                T_shipped_type=old is None,
                                                T=new if new is not None else temps.get("choice"), T_type=new is None,
                                                source=bsource[name],
-                                               ece_shipped=ece(served(cert, shipped_T, shipped_B)),
-                                               ece=ece(served(cert, temps, buckets)))
+                                               ece_shipped=ece(shipped.cs(cert)), ece=ece(fitted.cs(cert)))
         cal = {"prompt": 2, "temperature_per_prim": temps, "temperature_per_bucket": buckets,
                "temperature_source": dict(source, **{f"choice {k}": v for k, v in bsource.items()}),
                "thresholds": thresholds, **extra}
@@ -1208,17 +1242,24 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     return dict(temperature_per_prim=temps, temperature_source=source, thresholds=thresholds, **extra), report
 
 
-def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical", adapter=None):
+def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical", adapter=None, identity=None):
     """The calibration to compare with and keep, as basal-serve would apply it with these option orders
     (server.load_calibration: the model's file for those orders when it ships one; a file fitted on other orders
-    without its thresholds; with --adapter the adapter's file, else the model's without its thresholds) -> (calibration,
-    its file or None)."""
+    without its thresholds; with --adapter the adapter's file, else the model's without its thresholds) and, with
+    `identity` = (model, revision, adapter identity) of the decisions, without the thresholds of a file fitted on
+    another model, revision or adapter (as basal-serve keeps an own file: validate_baseline) -> (calibration, its file
+    or None)."""
     if off or (md is None and not path):
         return {}, None
     if orders is None:  # a server that does not report its orders: the file as it is
         f = calibration_file(md, kind, path, quant, preset, layout)
-        return (json.loads(read_text(f)) if f.exists() else {}), f
-    data, f, why = load_calibration(md, kind, path, quant, orders, preset=preset, layout=layout, adapter=adapter)
+        data, why = (json.loads(read_text(f)) if f.exists() else {}), None
+    else:
+        data, f, why = load_calibration(md, kind, path, quant, orders, preset=preset, layout=layout, adapter=adapter)
+    if why is None and identity is not None and data:
+        mismatch = identity_mismatch(data, *identity, md=md, kind=kind)
+        if mismatch:
+            why, data = f"{f.name}: {mismatch}", {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}
     if why:
         print(f"warning: {why}: its thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
     return data, f if f.exists() else None
@@ -1275,24 +1316,10 @@ def fit_tasks(rows, targets, shipped=None):
             old = ((shipped or {}).get(t) or {}).get(str(float(risk)))
             if old is not None:
                 e.setdefault("shipped", {})[str(float(risk))] = dict(confidence=old, cert=gate(cc, old))
-            thr = threshold(cf, risk, deff=deff) if cf else None
-            if thr is None:
-                e["targets"][str(float(risk))] = dict(
-                    confidence=None, reason=no_threshold_reason(cf, risk, deff=deff) if cf else "no FIT decisions")
-                continue
-            g_fit, g_cert = gate(cf, thr, deff), gate(cc, thr, deff_c)
-            e["targets"][str(float(risk))] = x = withdrawn(dict(
-                confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"], fit_upper95=g_fit["upper95"],
-                cert_coverage=g_cert["coverage"], cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
-                cert_accepted=g_cert["accepted"]), risk, deff_c)
-            if x["confidence"] is not None:
-                thresholds.setdefault(t, {})[str(float(risk))] = thr
-        rs_ = sorted(float(r) for r in targets)  # a looser target never keeps a stricter threshold (floor_thresholds)
-        for lo, hi in zip(rs_, rs_[1:]):
-            a, b = e["targets"][str(lo)], e["targets"][str(hi)]
-            if a["confidence"] is not None and (b["confidence"] is None or b["confidence"] > a["confidence"]):
-                e["targets"][str(hi)] = dict(a, floored_from=str(lo))
-                thresholds.setdefault(t, {})[str(hi)] = a["confidence"]
+            e["targets"][str(float(risk))], _ = certify(cf, cc, risk, deff, deff_c)
+        floor(e["targets"])  # a looser target never keeps a stricter threshold
+        thresholds.update({t: {k: x["confidence"] for k, x in e["targets"].items() if x["confidence"] is not None}}
+                          if any(x["confidence"] is not None for x in e["targets"].values()) else {})
         report[t] = e
     return thresholds, report
 
@@ -1553,15 +1580,17 @@ def refit(a, targets, reference, reference_name):
         if not isinstance(row, dict):
             raise SystemExit(f"{a.input}: line {i} is not a row written by basal-calibrate --save-rows")
         rows.append(row)
-    usable = [r for r in rows if not row_problem(r)]  # what fit() keeps (it reports the others): the counts below
-    small = sample_size(usable, [], targets)
+    good, _ = clean_rows(rows)  # what fit() keeps (it reports the others): the counts below
+    small = sample_size(good, [], targets)
     for w in small:
         print(f"warning: {w}", file=sys.stderr)
     base_file = None if a.no_calibration else (
         Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None))
     baseline = json.loads(read_text(base_file)) if base_file is not None and base_file.exists() else {}
-    why = unvalidated_reason(baseline, base_file.name, head.get("orders"), head.get("layout")) if baseline else None
-    if why:  # the rule of basal-serve (server.load_calibration), for the orders and layout the rows were read in
+    why = validate_baseline(baseline, base_file.name, head.get("orders"), head.get("layout"),
+                            (head.get("model"), head.get("revision"), head.get("adapter"), None, head.get("kind"),
+                             head.get("model_files"))) if baseline else None
+    if why:  # basal-serve's rule, for the model, orders and layout the rows were read with
         print(f"warning: {why} (the rows): its thresholds are not compared or kept (as in basal-serve)",
               file=sys.stderr)
         baseline = {k: v for k, v in baseline.items() if k not in UNVALIDATED_OUT}
@@ -1569,10 +1598,10 @@ def refit(a, targets, reference, reference_name):
                       a.min_blend, a.conformal)
     cal["gates"]["ece_reference"] = reference_name
     cal["engine"] = engine_name(head["kind"], head["quant"], head.get("vllm_preset"))
-    cal["fitted_on"] = dict(data=head["data"], decisions=sum(r["prim"] != "multi" for r in usable),
+    cal["fitted_on"] = dict(data=head["data"], decisions=sum(r["prim"] != "multi" for r in good),
                             requests=head["requests"], fit=report["n_fit"], cert=report["n_cert"],
                             per_type={t: r["n"] for t, r in report["types"].items()},
-                            multi=sum(r["prim"] == "multi" for r in usable), date=datetime.date.today().isoformat(),
+                            multi=sum(r["prim"] == "multi" for r in good), date=datetime.date.today().isoformat(),
                             model=head["model"], engine=head["engine"], orders=head["orders"],
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__} (--from-rows)")
     cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision", "model_files")
@@ -1639,8 +1668,9 @@ def parser():
     return ap
 
 
-def main(argv=None):
-    a = parser().parse_args(argv)
+def options(a):
+    """The checked targets, conformal levels (into a.conformal) and LOFO reference of the command line -> (targets,
+    reference values, reference name)."""
     try:
         targets = sorted({float(x) for x in a.targets.split(",") if x.strip()})
     except ValueError:
@@ -1657,9 +1687,12 @@ def main(argv=None):
         raise SystemExit(f"--calibration {a.calibration}: no such file")
     if a.strict and a.reference is None:
         raise SystemExit("--strict needs --reference (basal-1.5 or a calibration file with gates.ece_lofo)")
-    reference, reference_name = reference_values(a.reference)
-    if a.from_rows:
-        return refit(a, targets, reference, reference_name)
+    return (targets, *reference_values(a.reference))
+
+
+def labelled(a, targets):
+    """The labelled input -> (decision requests, decisions, task requests, task decisions, sample-size warnings), the
+    warnings printed before any readout (a target these labels cannot certify)."""
     try:
         bodies, decisions, task_bodies, units = read(a.input)
     except InputError as e:
@@ -1668,13 +1701,78 @@ def main(argv=None):
           + (f", {len(units)} labelled task decisions in {len(task_bodies)} requests" if units else ""),
           file=sys.stderr)
     small = sample_size(decisions, units, targets)
-    for w in small:  # before the readouts: a target these labels cannot certify (feedback from BRAUN SI)
+    for w in small:
         print(f"warning: {w}", file=sys.stderr)
     if units and a.url:
         raise SystemExit("task questions (classify / verify / extract) need the engine in process: their thresholds "
                          "are certified on the answers as served with the fitted temperatures; give --model and --mode "
                          "instead of --url, or leave the task questions out")
-    fitted = {}  # settle(): the decision rows, the file to serve and the report
+    return bodies, decisions, task_bodies, units, small
+
+
+def http_context(a):
+    """--url: the running server (it must serve raw probabilities) and the calibration to compare with -> the engine
+    context (base URL, mode, engine text, adapter identity, orders, kind, quant, preset, model, revision, model files,
+    prompt format, baseline and its file)."""
+    import httpx
+    base = a.url.rstrip("/").removesuffix("/v1/systemone").removesuffix("/v1/basal")
+    if not (a.model or a.calibration or a.no_calibration):
+        raise SystemExit("with --url, give --model (its shipped calibration is compared with and kept for small "
+                         "types), --calibration FILE or --no-calibration")
+    try:
+        r = httpx.get(base + "/v1/models", timeout=30, headers=headers(a.api_key))
+        if refused(base, r.status_code, a.api_key):
+            raise SystemExit(f"--url {a.url}: {refused(base, r.status_code, a.api_key)}")
+        entry = uncalibrated(r.json()["models"][0], base)
+    except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
+        raise SystemExit(f"--url {a.url}: no basal server answers ({e})") from None
+    c = argparse.Namespace(base=base, mode=a.mode or entry.get("mode"))
+    c.adapter = entry.get("adapter")  # the server's --adapter identity (name@sha256)
+    c.engine = f"{c.mode} at {base}" + (f" --adapter {c.adapter.split('@')[0]}" if c.adapter else "")
+    c.orders = entry.get("orders")  # the server's option orders (servers before this field: unknown)
+    c.kind, c.quant = MODES.get(c.mode, ("", None, False))[:2]
+    c.preset = entry.get("vllm_preset")  # --mode vllm: the server's preset (servers before 2.2.1: none)
+    md = resolve(a.model, a.revision, metadata_only=True) if a.model else None
+    c.model, c.revision = model_identity(a.model, md) if md is not None else (a.model or entry.get("name"), None)
+    c.files = model_files_id(md, c.kind) if md is not None else None  # (when the cache holds the weights too)
+    c.fmt = entry.get("prompt_format") or (model_format(md) if md is not None else 1)
+    # the layout the server reads prompts in (servers before 2.4.1 and canonical ones do not say)
+    a.layout = getattr(a, "layout", None) or entry.get("layout") or (model_layout(md) if md is not None
+                                                                      else "canonical")
+    c.baseline, c.base_file = compared(md, c.kind, a.calibration, c.quant, c.orders, a.no_calibration, c.preset,
+                                       a.layout, identity=(c.model, c.revision, c.adapter))
+    return c
+
+
+def local_context(a):
+    """The engine in process, as basal-serve starts it without calibration -> (server, engine context as
+    http_context's)."""
+    a.model = a.model or add_engine_args(argparse.ArgumentParser()).get_default("model")  # basal-serve's
+    refuse_lean_flex(a.lean, a.tree)  # before default_mode, which resolves the model on CUDA GPUs without FA3
+    mode = a.mode or default_mode(a.model, a.revision)
+    srv = Server(argparse.Namespace(**{**vars(a), "mode": mode, "name": None, "calibration": None,
+                                       "no_calibration": True, "log_decisions": None}))
+    c = argparse.Namespace(mode=mode, kind=srv.kind, quant=a.quant or MODES[mode][1], fmt=srv.fmt, orders=srv.orders,
+                           preset=getattr(srv.backend, "preset", None))
+    a.layout = srv.layout  # --layout, else the model's basal.json "layout"
+    c.model, c.revision = model_identity(a.model, srv.md)
+    c.files = model_files_id(srv.md, srv.kind)
+    c.adapter = srv.adapter.identity if srv.adapter else None
+    c.baseline, c.base_file = compared(srv.md, srv.kind, a.calibration, c.quant, c.orders, a.no_calibration, c.preset,
+                                       a.layout, srv.adapter, identity=(c.model, c.revision, c.adapter))
+    c.engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
+        + (f" --vllm-preset {c.preset}" if c.preset not in (None, "default") else "") \
+        + (f" --adapter {srv.adapter.name}" if srv.adapter else "")
+    return srv, c
+
+
+def main(argv=None):
+    a = parser().parse_args(argv)
+    targets, reference, reference_name = options(a)
+    if a.from_rows:
+        return refit(a, targets, reference, reference_name)
+    bodies, decisions, task_bodies, units, small = labelled(a, targets)
+    fitted, c = {}, None  # settle(): the decision rows, the file to serve and the report; c: the engine context
 
     def settle(responses):
         """The decision part: the fit on the decision questions, else the compared calibration kept as it is."""
@@ -1685,61 +1783,27 @@ def main(argv=None):
         if decisions and not rows:
             raise SystemExit("no decisions to fit")
         if rows:
-            cal, report = fit(rows, baseline, targets, a.min_per_type, fmt, a.min_family, reference, a.min_per_set,
+            cal, report = fit(rows, c.baseline, targets, a.min_per_type, c.fmt, a.min_family, reference, a.min_per_set,
                               a.min_blend, a.conformal)
             cal["gates"]["ece_reference"] = reference_name
         else:  # task questions only: the temperatures and thresholds of the compared file stay as they are
-            cal, report = {k: v for k, v in baseline.items() if k not in KEPT_OUT}, None
+            cal, report = {k: v for k, v in c.baseline.items() if k not in KEPT_OUT}, None
         fitted.update(rows=rows, failed=failed, cal=cal, report=report)
         return cal
 
     if a.url:
-        import httpx
-        base = a.url.rstrip("/").removesuffix("/v1/systemone").removesuffix("/v1/basal")
-        if not (a.model or a.calibration or a.no_calibration):
-            raise SystemExit("with --url, give --model (its shipped calibration is compared with and kept for small "
-                             "types), --calibration FILE or --no-calibration")
-        try:
-            r = httpx.get(base + "/v1/models", timeout=30, headers=headers(a.api_key))
-            if refused(base, r.status_code, a.api_key):
-                raise SystemExit(f"--url {a.url}: {refused(base, r.status_code, a.api_key)}")
-            entry = uncalibrated(r.json()["models"][0], base)
-        except (httpx.HTTPError, ValueError, KeyError, IndexError) as e:
-            raise SystemExit(f"--url {a.url}: no basal server answers ({e})") from None
-        mode = a.mode or entry.get("mode")
-        adapter = entry.get("adapter")  # the server's --adapter identity (name@sha256)
-        engine = f"{mode} at {base}" + (f" --adapter {adapter.split('@')[0]}" if adapter else "")
-        orders = entry.get("orders")  # the server's option orders (servers before this field: unknown)
-        kind, quant = MODES.get(mode, ("", None, False))[:2]
-        preset = entry.get("vllm_preset")  # --mode vllm: the server's preset (servers before 2.2.1: none)
-        md = resolve(a.model, a.revision, metadata_only=True) if a.model else None
-        model, revision = model_identity(a.model, md) if md is not None else (a.model or entry.get("name"), None)
-        files = model_files_id(md, kind) if md is not None else None  # (when the cache holds the weights too)
-        fmt = entry.get("prompt_format") or (model_format(md) if md is not None else 1)
-        # the layout the server reads prompts in (servers before 2.4.1 and canonical ones do not say)
-        a.layout = getattr(a, "layout", None) or entry.get("layout") or (model_layout(md) if md is not None
-                                                                          else "canonical")
-        baseline, base_file = compared(md, kind, a.calibration, quant, orders, a.no_calibration, preset, a.layout)
-        settle(asyncio.run(over_http(base + "/v1/systemone", bodies, a.concurrency, a.api_key)) if bodies else [])
+        c = http_context(a)
+        settle(asyncio.run(over_http(c.base + "/v1/systemone", bodies, a.concurrency, a.api_key)) if bodies else [])
         task_responses = []
     else:
-        a.model = a.model or add_engine_args(argparse.ArgumentParser()).get_default("model")  # basal-serve's
-        refuse_lean_flex(a.lean, a.tree)  # before default_mode, which resolves the model on CUDA GPUs without FA3
-        mode = a.mode or default_mode(a.model, a.revision)
-        srv = Server(argparse.Namespace(**{**vars(a), "mode": mode, "name": None, "calibration": None,
-                                           "no_calibration": True, "log_decisions": None}))
-        kind, quant, fmt, orders = srv.kind, a.quant or MODES[mode][1], srv.fmt, srv.orders
-        preset = getattr(srv.backend, "preset", None)
-        a.layout = srv.layout  # --layout, else the model's basal.json "layout"
-        baseline, base_file = compared(srv.md, srv.kind, a.calibration, quant, orders, a.no_calibration, preset,
-                                       a.layout, srv.adapter)
-        model, revision = model_identity(a.model, srv.md)
-        files = model_files_id(srv.md, srv.kind)
-        engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
-            + (f" --vllm-preset {preset}" if preset not in (None, "default") else "") \
-            + (f" --adapter {srv.adapter.name}" if srv.adapter else "")
-        adapter = srv.adapter.identity if srv.adapter else None
+        srv, c = local_context(a)
         _, task_responses = asyncio.run(two_passes(srv, bodies, task_bodies, a.concurrency, settle))
+    finish(a, c, fitted, targets, small, len(bodies), units, len(task_bodies), task_responses)
+
+
+def finish(a, c, fitted, targets, small, n_bodies, units, n_task_bodies, task_responses):
+    """After the readouts: the task thresholds, the saved rows, the file's provenance (fitted_on), the report and the
+    file."""
     rows, failed, cal, report = fitted["rows"], fitted["failed"], fitted["cal"], fitted["report"]
     trows, tfailed = task_rows(units, task_responses) if units else ([], [])
     if tfailed:
@@ -1747,7 +1811,7 @@ def main(argv=None):
               file=sys.stderr)
     if units and not trows:
         raise SystemExit("no task decisions to fit")
-    shipped_tasks = baseline.get("task_thresholds") or {}
+    shipped_tasks = c.baseline.get("task_thresholds") or {}
     # the compared file's task thresholds are measured on your data when the answers were served with its temperatures
     task_thr, task_report = fit_tasks(trows, targets, None if rows else shipped_tasks) if trows else ({}, {})
     # a shipped task threshold holds for the shipped temperatures: kept only when this file keeps them too
@@ -1758,40 +1822,40 @@ def main(argv=None):
     if task_report:
         cal["task_gates"] = task_report
     if a.save_rows and rows:
-        head = dict(basal_calibrate_rows=1, fmt=fmt, kind=kind, quant=quant, vllm_preset=preset, model=str(model),
-                    engine=engine, data=Path(a.input).name, requests=len(bodies) - len(failed),
-                    baseline=str(base_file) if baseline else None, orders=orders)
-        head.update(layout=a.layout, adapter=adapter, revision=revision, model_files=files)
+        head = dict(basal_calibrate_rows=1, fmt=c.fmt, kind=c.kind, quant=c.quant, vllm_preset=c.preset,
+                    model=str(c.model), engine=c.engine, data=Path(a.input).name, requests=n_bodies - len(failed),
+                    baseline=str(c.base_file) if c.baseline else None, orders=c.orders)
+        head.update(layout=a.layout, adapter=c.adapter, revision=c.revision, model_files=c.files)
         with open(a.save_rows, "w", encoding="utf-8") as f:
             for x in [head] + rows:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")
-    cal["engine"] = engine_name(kind, quant, preset)
-    usable = [r for r in rows if not row_problem(r)]  # what fit() kept (a NaN readout is left out and reported)
-    cal["fitted_on"] = dict(data=Path(a.input).name, decisions=sum(r["prim"] != "multi" for r in usable),
-                            requests=len(bodies) - len(failed),
+    cal["engine"] = engine_name(c.kind, c.quant, c.preset)
+    good = clean_rows(rows)[0]
+    cal["fitted_on"] = dict(data=Path(a.input).name, decisions=sum(r["prim"] != "multi" for r in good),
+                            requests=n_bodies - len(failed),
                             fit=report["n_fit"] if report else 0, cert=report["n_cert"] if report else 0,
                             per_type={t: r["n"] for t, r in report["types"].items()} if report else {},
-                            multi=sum(r["prim"] == "multi" for r in usable),
-                            date=datetime.date.today().isoformat(), model=model, engine=engine,
+                            multi=sum(r["prim"] == "multi" for r in good),
+                            date=datetime.date.today().isoformat(), model=c.model, engine=c.engine,
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__}")
-    if revision:
-        cal["fitted_on"]["revision"] = revision
-    if revision and files:  # basal-serve applies it to another revision with the same model files (model_files)
-        cal["fitted_on"]["model_files"] = files
-    if adapter:  # basal-serve applies the file only with this adapter (calibration_mismatch)
-        cal["fitted_on"]["adapter"] = adapter
+    if c.revision:
+        cal["fitted_on"]["revision"] = c.revision
+    if c.revision and c.files:  # basal-serve applies it to another revision with the same model files (model_files)
+        cal["fitted_on"]["model_files"] = c.files
+    if c.adapter:  # basal-serve applies the file only with this adapter (calibration_mismatch)
+        cal["fitted_on"]["adapter"] = c.adapter
     if task_report:
         cal["fitted_on"]["tasks"] = {t: e["n"] for t, e in task_report.items()}
-        cal["fitted_on"]["task_requests"] = len(task_bodies) - len(tfailed)
-    if orders is not None:  # basal-serve applies the file only to these orders (or loads CALIBRATION.o<N>.json)
-        cal["fitted_on"]["orders"] = orders
+        cal["fitted_on"]["task_requests"] = n_task_bodies - len(tfailed)
+    if c.orders is not None:  # basal-serve applies the file only to these orders (or loads CALIBRATION.o<N>.json)
+        cal["fitted_on"]["orders"] = c.orders
     if getattr(a, "layout", None) not in (None, "canonical"):  # basal-serve applies it only in this layout (2.4.1)
         cal["fitted_on"]["layout"] = a.layout
     cal["certified_on"] = "CERT split of fitted_on.data (30% by group)"
-    cal["baseline"] = (str(a.calibration or f"{a.model}/{base_file.name}") if baseline else "none") + \
-        (f" ({baseline['source_tag']})" if baseline.get("source_tag") else "")
+    cal["baseline"] = (str(a.calibration or f"{a.model}/{c.base_file.name}") if c.baseline else "none") + \
+        (f" ({c.baseline['source_tag']})" if c.baseline.get("source_tag") else "")
     if not rows:
-        cal["decision_calibration"] = (f"kept from {cal['baseline']} (no decision questions in the input)" if baseline
+        cal["decision_calibration"] = (f"kept from {cal['baseline']} (no decision questions in the input)" if c.baseline
                                        else "none (no decision questions in the input, no calibration to keep)")
     if report:
         print(table(report))
@@ -1805,12 +1869,13 @@ def main(argv=None):
         print("\n--report-only: no file written")
     else:
         Path(a.out).write_text(json.dumps(cal, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"\nwrote {a.out} (calibration file {fmt}, engine {cal['engine']})\n"
-              f"  basal-serve --model {a.model or '<model>'} --mode {mode}"
+        print(f"\nwrote {a.out} (calibration file {c.fmt}, engine {cal['engine']})\n"
+              f"  basal-serve --model {a.model or '<model>'} --mode {c.mode}"
               + (f" --adapter {a.adapter}" if getattr(a, "adapter", None) else "") + f" --calibration {a.out}")
     summary(small + cert_notes(report, task_report, targets))
     if a.strict and report:
         strict_check(report, a.min_family)
+
 
 if __name__ == "__main__":
     main()

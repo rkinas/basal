@@ -1127,21 +1127,23 @@ def model_files_id(md, kind=None):
     return None if files is None else files_digest(files)
 
 
-def revision_mismatch(fitted, md, model, rev, kind=None):
+def revision_mismatch(fitted, md, model, rev, kind=None, files=None):
     """Why a file fitted on another revision of the served model does not hold for the served revision rev; None when
     the two hold the same model files (model_files), as after a commit that changes only the card. basal-calibrate
     records them as fitted_on.model_files. For a file without them (basal-calibrate 2.6.0 and older) the cache's
     snapshot of the fitted revision is compared when it holds the same files as the served one; otherwise, as before,
     the file does not hold, and the reason says how to keep it. The Hub is not asked: the decision rests on the file and
-    the cache alone, not on the network."""
+    the cache alone, not on the network. files: the served model_files digest, when md is no snapshot to read (the
+    head of a --save-rows file)."""
     fr = str(fitted["revision"])
     said = f"it was fitted on revision {fr[:12]} of {model}"
     hint = f"serve --revision {fr}, or refit with basal-calibrate"
     if kind in WEIGHTS_ELSEWHERE:
         return f"{said}, the served revision is {rev[:12]} ({hint})"
     served, same = model_files(md), None
-    if served is not None and fitted.get("model_files"):
-        same = fitted["model_files"] == files_digest(served)
+    digest = files_digest(served) if served is not None else files
+    if digest is not None and fitted.get("model_files"):
+        same = fitted["model_files"] == digest
     elif served is not None and re.fullmatch(r"[0-9a-f]{40,64}", fr):
         old = model_files(Path(md).parent / fr)
         same = None if old is None or old.keys() != served.keys() else old == served
@@ -1160,6 +1162,16 @@ def calibration_mismatch(cal, name, md, adapter=None, kind=None):
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return None
     model, rev = model_identity(name, md)
+    return identity_mismatch(cal, model, rev, adapter.identity if adapter else None, md, kind)
+
+
+def identity_mismatch(cal, model, rev, adapter=None, md=None, kind=None, files=None):
+    """calibration_mismatch on an identity already resolved: model (repo id or path), its revision (None: unknown),
+    the adapter's identity (None: no adapter) and, for another revision (revision_mismatch), the served snapshot md and
+    engine kind, or the served model_files digest `files` when there is no snapshot to read (a --save-rows file)."""
+    fitted = cal.get("fitted_on")
+    if not isinstance(fitted, dict) or not fitted.get("model"):
+        return None
     # both Hugging Face snapshots (a revision on each side): the whole repo id, so OrgA/x is not OrgB/x; otherwise the
     # last part of the path, so a local copy matches its repo id
     full = bool(fitted.get("revision") and rev)
@@ -1167,12 +1179,12 @@ def calibration_mismatch(cal, name, md, adapter=None, kind=None):
     if key(fitted["model"]) != key(model):
         return f"it was fitted on {fitted['model']}, the served model is {model}"
     if fitted.get("revision") and rev and fitted["revision"] != rev:
-        why = revision_mismatch(fitted, md, model, rev, kind)
+        why = revision_mismatch(fitted, md, model, rev, kind, files)
         if why:
             return why
-    fa, sa = fitted.get("adapter"), adapter.identity if adapter else None
-    if fa != sa:
-        return f"it was fitted with adapter {fa or 'none'}, the served adapter is {sa or 'none'}"
+    fa = fitted.get("adapter")
+    if fa != adapter:
+        return f"it was fitted with adapter {fa or 'none'}, the served adapter is {adapter or 'none'}"
     return None
 
 
@@ -1215,6 +1227,19 @@ def unvalidated_reason(data, name, orders, layout="canonical"):
     return None
 
 
+def validate_baseline(data, name, orders, layout="canonical", identity=None):
+    """Why the thresholds of calibration `data` (file `name`) do not hold for the decisions at hand, None when they do:
+    other option orders or another layout (unvalidated_reason), and, with `identity` = (model, revision, adapter
+    identity[, md, kind, model files]), a file fitted on another model, on a revision with other model files or with
+    another adapter (identity_mismatch). basal-serve's rule (load_calibration and Server for an own file), shared with
+    basal-calibrate for the file it compares with."""
+    why = unvalidated_reason(data, name, orders, layout)
+    if why is None and identity is not None and identity[0] and data:
+        mismatch = identity_mismatch(data, *identity)
+        why = f"{name}: {mismatch}" if mismatch else None
+    return why
+
+
 def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layout="canonical", adapter=None):
     """The calibration basal-serve applies -> (calibration dict, its file, None or why it is unvalidated). A file
     fitted on other option orders than the served ones gives wrong temperatures and thresholds: the file for the
@@ -1235,7 +1260,7 @@ def load_calibration(md, kind, path, quant, orders, off=False, preset=None, layo
     alt = cal.with_name(f"{cal.stem}.o{orders}{cal.suffix}")
     if calibration_layout(data) == layout and fitted is not None and fitted != orders and not path and alt.exists():
         return load_calibration(md, kind, alt, quant, orders, off, preset, layout, adapter)
-    why = unvalidated_reason(data, cal.name, orders, layout)
+    why = validate_baseline(data, cal.name, orders, layout)
     if why is None:
         return data, cal, None
     return {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}, cal, why
