@@ -308,7 +308,8 @@ The files that ship in a model's directory are not checked. `basal-calibrate` ap
 compares with (`--calibration`, or the one a `--save-rows` run compared with, for `--from-rows`): fitted on another
 model, on a revision with other model files or with another adapter, it keeps its temperatures for the types with too
 few decisions, and its thresholds and task thresholds are neither compared nor kept (a run with task questions only
-no longer copies them into the new file).
+no longer copies them into the new file). With `--url` and no `--model`, the served model is known only by
+the server's name, so the file is not checked.
 
 A revision that changes only the model card holds the same model files, so the file is applied with its thresholds.
 A file without `fitted_on.model_files` (written before basal-calibrate recorded it) is compared through the cache:

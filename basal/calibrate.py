@@ -1740,8 +1740,10 @@ def http_context(a):
     # the layout the server reads prompts in (servers before 2.4.1 and canonical ones do not say)
     a.layout = getattr(a, "layout", None) or entry.get("layout") or (model_layout(md) if md is not None
                                                                       else "canonical")
+    # without --model the server's name stands in for the model (its --name, or the folder's name with "+adapter"): no
+    # identity to check the compared file against
     c.baseline, c.base_file = compared(md, c.kind, a.calibration, c.quant, c.orders, a.no_calibration, c.preset,
-                                       a.layout, identity=(c.model, c.revision, c.adapter))
+                                       a.layout, identity=(c.model, c.revision, c.adapter) if md is not None else None)
     return c
 
 

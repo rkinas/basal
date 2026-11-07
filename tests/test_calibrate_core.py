@@ -2,7 +2,9 @@
 one automated share as basal-serve applies a file, the probabilities tempered once per row, one row boundary for the
 engine readouts and --from-rows files, and the rule of basal-serve for the file compared with (validate_baseline)."""
 import json
+from types import SimpleNamespace
 
+import httpx
 import numpy as np
 
 import basal.server as server_module
@@ -116,3 +118,18 @@ def test_a_baseline_of_another_model_is_not_compared_or_kept(tmp_path, capsys, m
     assert not {"thresholds", "task_thresholds"} & set(data)
     data, _ = compared(tmp_path, "eager", str(base), None, 1, False, identity=("Remek/basal-y", None, None))
     assert data["thresholds"] == SHIPPED["thresholds"]
+
+
+def test_a_server_name_is_not_checked_against_the_compared_file(tmp_path, capsys, monkeypatch):
+    # --url without --model: the server's name (its --name, or the folder's name with "+adapter") stands in for the
+    # model, and is no identity to check the --calibration file against
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps(dict(SHIPPED, fitted_on={"model": "Remek/basal-x", "adapter": "ad@sha256:abc",
+                                                        "orders": 1})), encoding="utf-8")
+    entry = dict(name="basal-x+ad", mode="eager", prompt_format=1, orders=1, adapter="ad@sha256:abc",
+                 temperature_per_prim={})
+    monkeypatch.setattr(httpx, "get", lambda *_, **__: SimpleNamespace(status_code=200, json=lambda: {"models": [entry]}))
+    a = calibrate.parser().parse_args(["in.jsonl", "--url", "http://127.0.0.1:1", "--calibration", str(base)])
+    c = calibrate.http_context(a)
+    assert c.model == "basal-x+ad" and c.baseline["thresholds"] == SHIPPED["thresholds"]
+    assert "not compared or kept" not in capsys.readouterr().err
