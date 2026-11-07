@@ -46,6 +46,25 @@ def test_a_value_basal_serve_refuses_stops_the_command_with_its_key(tmp_path, ba
         compared(tmp_path, "eager", str(path), None, None, False)
 
 
+def test_a_compared_file_of_another_prompt_format_is_refused_as_basal_serve_refuses_it(tmp_path):
+    """A file 1 compared on a format-2 model (in a run, or with the rows of one) stops the command, as basal-serve stops
+    at start-up: its temperatures and thresholds were fitted on other prompts (they were blended in, or kept with
+    --keep-shipped)."""
+    file1 = {"prompt": 1, "temperature_per_prim": {"choice": 1.04, "noul": 1.56}}
+    path = tmp_path / "CALIBRATION.json"
+    path.write_text(json.dumps(file1), encoding="utf-8")
+    with pytest.raises(SystemExit, match="fitted for prompt format 1, the model uses format 2"):
+        compared(tmp_path, "eager", str(path), None, None, False, fmt=2)
+    assert compared(tmp_path, "eager", str(path), None, None, False, fmt=1)[0]["temperature_per_prim"]["noul"] == 1.56
+    base, data = tmp_path / "shipped.json", tmp_path / "rows.jsonl"
+    base.write_text(json.dumps(file1), encoding="utf-8")
+    head = dict(basal_calibrate_rows=1, fmt=2, kind="eager", quant=None, model="stub", engine="eager",
+                data="labels.jsonl", requests=460, baseline=str(base), orders=None)
+    data.write_text("\n".join(json.dumps(x) for x in [head] + rows(n_noul=5)) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="fitted for prompt format 1, the model uses format 2"):
+        main([str(data), "--from-rows", "--targets", "0.05", "--out", str(tmp_path / "cal.json")])
+
+
 def test_the_run_compares_with_the_numbers_basal_serve_reads(tmp_path):
     path = tmp_path / "CALIBRATION.json"
     path.write_text(json.dumps({"temperature_per_prim": {"noul": "1.2", "custom": "x"}}), encoding="utf-8")

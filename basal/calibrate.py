@@ -1387,14 +1387,14 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     return dict(temperature_per_prim=temps, temperature_source=source, thresholds=thresholds, **extra), report
 
 
-def as_served(data, path):
+def as_served(data, path, fmt=None):
     """The compared file as basal-serve reads it, checked before any readout: SystemExit where basal-serve refuses it
-    at start-up (a temperature that is no finite number above 0, a bad bucket name: check_calibration, against the
-    file's own prompt format), and its temperatures as numbers (basal-serve reads "1.2" as 1.2; the fit blended and
-    printed the text and failed after the whole readout)."""
+    at start-up (a temperature that is no finite number above 0, a bad bucket name, a file of another prompt format
+    than fmt, the model's: check_calibration), and its temperatures as numbers (basal-serve reads "1.2" as 1.2; the
+    fit blended and printed the text and failed after the whole readout). fmt None: the file's own format."""
     if not data:
         return data
-    check_calibration(data, data.get("prompt", 1), path)
+    check_calibration(data, fmt if fmt is not None else data.get("prompt", 1), path)
     out = dict(data)
     prim, buckets = data.get("temperature_per_prim"), data.get("temperature_per_bucket")
     if isinstance(prim, dict):
@@ -1405,7 +1405,8 @@ def as_served(data, path):
     return out
 
 
-def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical", adapter=None, identity=None):
+def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical", adapter=None, identity=None,
+             fmt=None):
     """The calibration to compare with and keep, as basal-serve would apply it with these option orders
     (server.load_calibration: the model's file for those orders when it ships one; a file fitted on other orders
     without its thresholds; with --adapter the adapter's file, else the model's without its thresholds) and, with
@@ -1430,7 +1431,7 @@ def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"
         data = {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}
     if why:
         print(f"warning: {why}: its thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
-    return as_served(data, f), (f if f.exists() else None), why
+    return as_served(data, f, fmt), (f if f.exists() else None), why
 
 
 def task_rows(units, responses):
@@ -1761,8 +1762,8 @@ def refit(a, targets, reference, reference_name):
         print(f"warning: {w}", file=sys.stderr)
     base_file = None if a.no_calibration else (
         Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None))
-    baseline = as_served(json.loads(read_text(base_file)), base_file) if base_file is not None and base_file.exists() \
-        else {}
+    baseline = as_served(json.loads(read_text(base_file)), base_file, head.get("fmt")) \
+        if base_file is not None and base_file.exists() else {}
     why = validate_baseline(baseline, base_file.name, head.get("orders"), head.get("layout"),
                             (head.get("model") if head.get("model") not in (None, "None") else None,
                              head.get("revision"), head.get("adapter"), None, head.get("kind"),
@@ -1930,7 +1931,7 @@ def http_context(a):
     # without --model the server's name stands in for the model (its --name, or the folder's name with "+adapter"): no
     # identity to check the compared file against
     c.baseline, c.base_file, c.base_why = compared(md, c.kind, a.calibration, c.quant, c.orders, a.no_calibration,
-                                                   c.preset, a.layout,
+                                                   c.preset, a.layout, fmt=c.fmt,
                                                    identity=(c.model, c.revision, c.adapter) if md is not None else None)
     return c
 
@@ -1951,7 +1952,7 @@ def local_context(a):
     c.adapter = srv.adapter.identity if srv.adapter else None
     c.baseline, c.base_file, c.base_why = compared(srv.md, srv.kind, a.calibration, c.quant, c.orders,
                                                    a.no_calibration, c.preset, a.layout, srv.adapter,
-                                                   identity=(c.model, c.revision, c.adapter))
+                                                   identity=(c.model, c.revision, c.adapter), fmt=c.fmt)
     c.engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
         + (f" --vllm-preset {c.preset}" if c.preset not in (None, "default") else "") \
         + (f" --adapter {srv.adapter.name}" if srv.adapter else "")
