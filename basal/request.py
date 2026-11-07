@@ -27,10 +27,64 @@ def _text_ok(s, where):
             raise RequestError(f"{where}: {bad} is a lone surrogate (half of a UTF-16 pair), not text") from None
 
 
+def _not_text(s):
+    """A string that holds a lone surrogate (not UTF-8 text)."""
+    if s.isascii():
+        return False
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
+def _refused(body, max_depth, finite):
+    """Whether check_json refuses the body, found without naming where: no location text or stack entry per element
+    (the walk that names one took 5.5 s and 45 times the body's size in memory on 32 MiB of [{}, ...], on the event
+    loop). A stack of iterators, one per open container: its memory follows the nesting, not the breadth."""
+    if not isinstance(body, (dict, list)):
+        return isinstance(body, str) and _not_text(body)
+    is_dict = isinstance(body, dict)
+    stack = [(iter(body.items()) if is_dict else iter(body), 1, False, is_dict)]
+    while stack:
+        it, depth, fin, is_dict = stack[-1]
+        for e in it:
+            if is_dict:
+                k, v = e
+                if isinstance(k, str) and _not_text(k):
+                    return True
+                f = fin or depth == 1 and k in finite
+            else:
+                v, f = e, fin
+            if isinstance(v, str):
+                if _not_text(v):
+                    return True
+            elif isinstance(v, float):
+                if f and not math.isfinite(v):
+                    return True
+            elif isinstance(v, (dict, list)):
+                if depth + 1 > max_depth:
+                    return True
+                if v:  # (descend; this container's iterator goes on after it)
+                    d = isinstance(v, dict)
+                    stack.append((iter(v.items()) if d else iter(v), depth + 1, f, d))
+                    break
+        else:
+            stack.pop()
+    return False
+
+
 def check_json(body, max_depth=MAX_DEPTH, finite=("questions",)):
     """A parsed request body -> RequestError when its objects / arrays nest deeper than max_depth, a string (a key or a
     value) holds a lone surrogate, or a number under one of the top-level fields `finite` is NaN or infinite. Iterative:
-    a deep body cannot exhaust the stack here."""
+    a deep body cannot exhaust the stack here. A body it takes is walked once, fast (_refused); only a refused one is
+    walked again, to name where the problem is (_locate)."""
+    if max_depth < 1 or _refused(body, max_depth, finite):
+        _locate(body, max_depth, finite)
+
+
+def _locate(body, max_depth, finite):
+    """check_json's refusal of a body, with where it is (the walk check_json was before _refused)."""
     stack = [(body, 1, "the request body", False)]
     while stack:
         x, depth, where, fin = stack.pop()
