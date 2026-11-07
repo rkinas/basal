@@ -1225,8 +1225,11 @@ def kv_quant_layers(kv, bits):
         step = max(1, KV_STACK_BYTES // max(per, 1))
         for c in range(0, len(idx), step):
             part = idx[c: c + step]
-            K = torch.stack([kv[i][0] for i in part]).view(len(part) * ks[0], *ks[1:])
-            V = torch.stack([kv[i][1] for i in part]).view(len(part) * vs[0], *vs[1:])
+            if len(part) == 1:  # a layer larger than the stack bytes goes alone, without torch.stack's copy
+                K, V = kv[part[0]]
+            else:
+                K = torch.stack([kv[i][0] for i in part]).view(len(part) * ks[0], *ks[1:])
+                V = torch.stack([kv[i][1] for i in part]).view(len(part) * vs[0], *vs[1:])
             out.append((part, kv_quant(K, bits, True), kv_quant(V, bits, False)))
     return len(kv), out
 
