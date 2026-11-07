@@ -274,16 +274,31 @@ classify    ...
 The probabilities, and so the temperatures and thresholds, belong to one model. `fitted_on` records the model as given
 to `basal-calibrate`, except that a Hugging Face cache snapshot path is recorded as its repository ID in
 `fitted_on.model` and its commit in `fitted_on.revision`. A repository ID likewise records its resolved commit;
-plain local directories keep their path without a revision. `basal-serve --calibration FILE` compares
-them with the served model: on another model, or another revision, it warns at start-up, reports
-`"calibration_warning"` in `GET /v1/models` and keeps the file for its temperatures only, as a file of other option
-orders: its thresholds, task thresholds, conformal levels and fitted fallback thresholds are not applied (`max_error`
-defers, tasks report `automated: null`, answer sets hold every option) and every answer is marked
-`"calibration": "unvalidated"`; with `--strict-calibration` it refuses to start. When both are Hugging Face snapshots
-(a revision on each side) the whole repository ID is compared, so `OrgA/basal-x` is not `OrgB/basal-x`; a local copy
-of a model matches its Hugging Face name by the last part of the path (`/data/basal-omni-1.0-max` =
-`Remek/basal-omni-1.0-max`).
+plain local directories keep their path without a revision. With a revision, `fitted_on.model_files` identifies the
+model's files: 16 hex digits of the sha256 of the sorted list of their paths, sizes and blob names in the Hugging Face
+cache (a blob is named by the file's LFS sha256, else its git blob id, so no file is read). It covers every file that
+makes the answers (the weights, the tokenizer, the chat template, `config.json`, `basal.json`, ...) and leaves out
+the model card (`*.md`, its images, `SHA256SUMS`, `.gitattributes`, `LICENSE*`), the shipped `CALIBRATION*.json` and
+`prepared/`. It is not recorded for `--mode gguf`, `ollama` and `llamacpp`, which serve weights the model directory
+does not hold, nor from a cache without symlinks (Windows without developer mode), whose files would have to be read.
+
+`basal-serve --calibration FILE` compares them with the served model: on another model, or on another revision with
+other model files, it warns at start-up, reports `"calibration_warning"` in `GET /v1/models` and keeps the file for
+its temperatures only, as a file of other option orders: its thresholds, task thresholds, conformal levels and fitted
+fallback thresholds are not applied (`max_error` defers, tasks report `automated: null`, answer sets hold every
+option) and every answer is marked `"calibration": "unvalidated"`; with `--strict-calibration` it refuses to start.
+When both are Hugging Face snapshots (a revision on each side) the whole repository ID is compared, so `OrgA/basal-x`
+is not `OrgB/basal-x`; a local copy of a model matches its Hugging Face name by the last part of the path
+(`/data/basal-omni-1.0-max` = `Remek/basal-omni-1.0-max`).
 The files that ship in a model's directory are not checked.
+
+A revision that changes only the model card holds the same model files, so the file is applied with its thresholds.
+A file without `fitted_on.model_files` (written before basal-calibrate recorded it) is compared through the cache:
+when the cache holds the snapshot of the fitted revision with the same files as the served one (as after an update on
+the same machine, since the Hugging Face cache keeps the old snapshot), their blobs decide. Otherwise the file counts
+as fitted on another revision, as before, and the warning says how to keep its thresholds: serve the fitted revision
+(`--revision <commit>`), or refit, which records the model files. basal-serve does not ask the Hub for a revision's
+files, so whether a file's thresholds apply depends on the file and the local cache only, online or offline.
 
 With `--adapter`, `basal-calibrate` records the adapter as `fitted_on.adapter` (`<name>@<sha256 of its
 adapter_config.json and weights>[:12]`, so a rescaled adapter is another one)
@@ -327,11 +342,11 @@ change (`--strict` checks only the leave-one-family-out ECE).
 informational pooled `thresholds[<target>].confidence`) plus
 `temperature_source`, the FIT and CERT figures of each threshold, `engine` (the engine it was fitted on: `fast`,
 `fp8`, `vllm`, ...; serve it with that engine, or ship it as `CALIBRATION.<engine>.json`) and `fitted_on` (file,
-number of decisions and requests, FIT / CERT sizes, date, model and its revision, engine; with task questions the
-task decisions per task). It also has `gates` (`ece_lofo`, `automated_at`, `ece_reference`), from labelled `multi`
-questions `multi`, and from task questions `task_thresholds` (what basal-serve applies) and `task_gates` (their FIT
-and CERT figures). A file fitted on task questions only says where its decision calibration comes from in
-`decision_calibration`. For a prompt-format-2 model it is
+number of decisions and requests, FIT / CERT sizes, date, model, its revision and model files, engine; with task
+questions the task decisions per task). It also has `gates` (`ece_lofo`, `automated_at`, `ece_reference`), from
+labelled `multi` questions `multi`, and from task questions `task_thresholds` (what basal-serve applies) and
+`task_gates` (their FIT and CERT figures). A file fitted on task questions only says where its decision calibration
+comes from in `decision_calibration`. For a prompt-format-2 model it is
 calibration file 2: `"prompt": 2` and `temperature_per_bucket` (the table then has one row per bucket under `choice`);
 basal-serve refuses a file fitted for another prompt format than the model's. The table printed at the end:
 

@@ -367,14 +367,15 @@ def fused_copy(md, ad):
 
 def fused_calibration(cal, ad, out):
     """An adapter's calibration file for the merged checkpoint `out`: fitted_on names the merged model (no revision, no
-    adapter) and keeps the origin as fused_from; None for a file fitted with another adapter (or none)."""
+    model files, no adapter) and keeps the origin as fused_from; None for a file fitted with another adapter (or
+    none)."""
     fitted = cal.get("fitted_on")
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return cal  # not written by basal-calibrate: copied as it is
     if fitted.get("adapter") != ad.identity:
         return None
     origin = fitted["model"] + (f"@{fitted['revision'][:12]}" if fitted.get("revision") else "")
-    fitted = {k: v for k, v in fitted.items() if k not in ("revision", "adapter")}
+    fitted = {k: v for k, v in fitted.items() if k not in ("revision", "model_files", "adapter")}
     return dict(cal, fitted_on=dict(fitted, model=Path(out).resolve().name, fused_from=f"{origin}+{ad.identity}"))
 
 

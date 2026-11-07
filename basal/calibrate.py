@@ -79,9 +79,10 @@ Method (the one the shipped files were fitted with):
     "task_gates"). The task thresholds a shipped file holds are kept only when the temperatures are (no decision
     questions in the input); otherwise a task without labelled questions has none and its answers report
     automated: null.
-  * fitted_on names the model (and its Hugging Face revision): basal-serve keeps a --calibration file fitted on
-    another model or revision for its temperatures only (its thresholds are not applied, the answers are marked
-    unvalidated) with a warning, and refuses it with --strict-calibration.
+  * fitted_on names the model (and its Hugging Face revision, and model_files: the identity of the snapshot's files
+    but its card): basal-serve keeps a --calibration file fitted on another model, or on a revision with other model
+    files, for its temperatures only (its thresholds are not applied, the answers are marked unvalidated) with a
+    warning, and refuses it with --strict-calibration. A revision that changes only the card keeps the file.
 """
 import argparse
 import asyncio
@@ -103,8 +104,8 @@ from .engine import resolve
 from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
 from .server import (MODES, UNVALIDATED_OUT, Server, _text, add_engine_args, answer_set, calibration_file,
-                     calibration_name, certified, default_mode, load_calibration, model_identity, refuse_lean_flex,
-                     temper, temperature, to_items, unvalidated_reason)
+                     calibration_name, certified, default_mode, load_calibration, model_files_id, model_identity,
+                     refuse_lean_flex, temper, temperature, to_items, unvalidated_reason)
 from .sets import label_set_id
 from .sets import select as select_set
 from .textio import read_text
@@ -1464,7 +1465,8 @@ def refit(a, targets, reference, reference_name):
                             multi=sum(r["prim"] == "multi" for r in usable), date=datetime.date.today().isoformat(),
                             model=head["model"], engine=head["engine"], orders=head["orders"],
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__} (--from-rows)")
-    cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision") if head.get(k) is not None})
+    cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision", "model_files")
+                             if head.get(k) is not None})
     cal["certified_on"] = "CERT split of fitted_on.data (30% by group)"
     cal["baseline"] = str(base_file) if baseline else "none"
     print(table(report))
@@ -1598,6 +1600,7 @@ def main(argv=None):
         preset = entry.get("vllm_preset")  # --mode vllm: the server's preset (servers before 2.2.1: none)
         md = resolve(a.model, a.revision, metadata_only=True) if a.model else None
         model, revision = model_identity(a.model, md) if md is not None else (a.model or entry.get("name"), None)
+        files = model_files_id(md, kind) if md is not None else None  # (when the cache holds the weights too)
         fmt = entry.get("prompt_format") or (model_format(md) if md is not None else 1)
         # the layout the server reads prompts in (servers before 2.4.1 and canonical ones do not say)
         a.layout = getattr(a, "layout", None) or entry.get("layout") or (model_layout(md) if md is not None
@@ -1617,6 +1620,7 @@ def main(argv=None):
         baseline, base_file = compared(srv.md, srv.kind, a.calibration, quant, orders, a.no_calibration, preset,
                                        a.layout, srv.adapter)
         model, revision = model_identity(a.model, srv.md)
+        files = model_files_id(srv.md, srv.kind)
         engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
             + (f" --vllm-preset {preset}" if preset not in (None, "default") else "") \
             + (f" --adapter {srv.adapter.name}" if srv.adapter else "")
@@ -1643,7 +1647,7 @@ def main(argv=None):
         head = dict(basal_calibrate_rows=1, fmt=fmt, kind=kind, quant=quant, vllm_preset=preset, model=str(model),
                     engine=engine, data=Path(a.input).name, requests=len(bodies) - len(failed),
                     baseline=str(base_file) if baseline else None, orders=orders)
-        head.update(layout=a.layout, adapter=adapter, revision=revision)
+        head.update(layout=a.layout, adapter=adapter, revision=revision, model_files=files)
         with open(a.save_rows, "w", encoding="utf-8") as f:
             for x in [head] + rows:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")
@@ -1658,6 +1662,8 @@ def main(argv=None):
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__}")
     if revision:
         cal["fitted_on"]["revision"] = revision
+    if revision and files:  # basal-serve applies it to another revision with the same model files (model_files)
+        cal["fitted_on"]["model_files"] = files
     if adapter:  # basal-serve applies the file only with this adapter (calibration_mismatch)
         cal["fitted_on"]["adapter"] = adapter
     if task_report:

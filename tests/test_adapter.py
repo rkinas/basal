@@ -466,7 +466,8 @@ def test_fuse_adapter_writes_a_merged_checkpoint(tmp_path, monkeypatch, capsys):
     (md / "CALIBRATION.json").write_text("{}", encoding="utf-8")  # the base model's: not the merged model's
     ad = write_adapter(tmp_path / "edu", "peft", deltas())
     ident = adapter_module.identity(ad)
-    fitted = {"model": "Remek/basal", "revision": "0123456789abcdef", "adapter": ident, "data": "cal.jsonl"}
+    fitted = {"model": "Remek/basal", "revision": "0123456789abcdef", "model_files": "fedcba9876543210",
+              "adapter": ident, "data": "cal.jsonl"}
     (ad / "CALIBRATION.json").write_text(json.dumps(dict(SHIPPED, fitted_on=fitted)), encoding="utf-8")
     stale = dict(fitted, adapter="edu@000000000000")  # fitted with an older version of the adapter
     (ad / "CALIBRATION.mlx.json").write_text(json.dumps(dict(SHIPPED, fitted_on=stale)), encoding="utf-8")

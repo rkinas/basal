@@ -41,6 +41,7 @@ import threading
 import traceback
 import time
 from concurrent.futures import ThreadPoolExecutor
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 import torch
@@ -1046,10 +1047,80 @@ def model_identity(name, md):
     return str(name), None
 
 
-def calibration_mismatch(cal, name, md, adapter=None):
-    """Why a file written by basal-calibrate for another model, or for another revision of this one, or with another
-    --adapter (or none), does not belong to the served model; None when it does or the file does not say (files that
-    ship with a model)."""
+# the engines that serve weights the model directory does not hold (a --gguf file, an Ollama or llama.cpp server): only
+# the model's tokenizer, template and calibration are downloaded for them
+WEIGHTS_ELSEWHERE = ("gguf", "ollama", "llamacpp")
+# the files of a model repository that do not make its answers: the card (with its images, checksums and git
+# attributes), the shipped calibration (a --calibration file is applied instead) and the prepared start-up kernels
+# (prepared/, fetched per GPU)
+NOT_MODEL_FILES = ("*.md", "SHA256SUMS*", ".gitattributes", "LICENSE*", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.svg",
+                   "*.webp", "CALIBRATION*.json", "prepared/*")
+WEIGHTS = (".safetensors", ".bin", ".gguf", ".pt", ".pth", ".npz")  # a snapshot without one holds the metadata only
+
+
+def model_files(md):
+    """{path: (size, blob)} of the files of a Hugging Face cache snapshot that make its answers (all but
+    NOT_MODEL_FILES), from the snapshot's links into the cache's blobs/ without reading a file: a blob is named by its
+    content (the LFS sha256, else the git blob id), so two snapshots that link the same blobs hold the same files. None
+    when md is not a snapshot, holds no weights (a download of the metadata only) or holds a file that is not such a
+    link (a cache without symlinks, an edited snapshot), which would have to be read."""
+    p = Path(md) if md is not None else None
+    if p is None or p.parent.name != "snapshots" or not p.parent.parent.name.startswith("models--") or not p.is_dir():
+        return None
+    blobs, out = (p.parent.parent / "blobs").resolve(), {}
+    for f in p.rglob("*"):
+        rel = f.relative_to(p).as_posix()
+        if f.is_dir() or any(fnmatchcase(rel, x) for x in NOT_MODEL_FILES):
+            continue
+        # the link itself names the blob (a blob may link on, to a store elsewhere)
+        blob = Path(os.path.normpath(f.parent / os.readlink(f))) if f.is_symlink() else None
+        if blob is None or blob.parent.resolve() != blobs or not f.is_file():
+            return None
+        out[rel] = (f.stat().st_size, blob.name)
+    return out if any(r.endswith(WEIGHTS) for r in out) else None
+
+
+def files_digest(files):
+    """16 hex digits of the sha256 of a model_files list, sorted: basal-calibrate's fitted_on.model_files."""
+    return hashlib.sha256("".join(f"{k}\t{s}\t{b}\n" for k, (s, b) in sorted(files.items())).encode()).hexdigest()[:16]
+
+
+def model_files_id(md, kind=None):
+    """fitted_on.model_files of a served model (files_digest), None when model_files has none or the engine serves
+    weights the model directory does not hold (WEIGHTS_ELSEWHERE)."""
+    files = model_files(md) if kind not in WEIGHTS_ELSEWHERE else None
+    return None if files is None else files_digest(files)
+
+
+def revision_mismatch(fitted, md, model, rev, kind=None):
+    """Why a file fitted on another revision of the served model does not hold for the served revision rev; None when
+    the two hold the same model files (model_files), as after a commit that changes only the card. basal-calibrate
+    records them as fitted_on.model_files. For a file without them (basal-calibrate 2.6.0 and older) the cache's
+    snapshot of the fitted revision is compared when it holds the same files as the served one; otherwise, as before,
+    the file does not hold, and the reason says how to keep it. The Hub is not asked: the decision rests on the file and
+    the cache alone, not on the network."""
+    fr = str(fitted["revision"])
+    said = f"it was fitted on revision {fr[:12]} of {model}"
+    hint = f"serve --revision {fr}, or refit with basal-calibrate"
+    if kind in WEIGHTS_ELSEWHERE:
+        return f"{said}, the served revision is {rev[:12]} ({hint})"
+    served, same = model_files(md), None
+    if served is not None and fitted.get("model_files"):
+        same = fitted["model_files"] == files_digest(served)
+    elif served is not None and re.fullmatch(r"[0-9a-f]{40,64}", fr):
+        old = model_files(Path(md).parent / fr)
+        same = None if old is None or old.keys() != served.keys() else old == served
+    if same is None:
+        return (f"{said}, the served revision is {rev[:12]}, and the cache cannot tell whether they hold the same "
+                f"model files ({hint}" + ("" if fitted.get("model_files") else ", which records them") + ")")
+    return None if same else \
+        f"{said}, the served revision {rev[:12]} has other model files (weights, tokenizer or configuration)"
+
+
+def calibration_mismatch(cal, name, md, adapter=None, kind=None):
+    """Why a file written by basal-calibrate for another model, or for a revision of this one with other model files
+    (revision_mismatch; kind: the served engine), or with another --adapter (or none), does not belong to the served
+    model; None when it does or the file does not say (files that ship with a model)."""
     fitted = cal.get("fitted_on")
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return None
@@ -1061,7 +1132,9 @@ def calibration_mismatch(cal, name, md, adapter=None):
     if key(fitted["model"]) != key(model):
         return f"it was fitted on {fitted['model']}, the served model is {model}"
     if fitted.get("revision") and rev and fitted["revision"] != rev:
-        return f"it was fitted on revision {fitted['revision'][:12]} of {model}, the served revision is {rev[:12]}"
+        why = revision_mismatch(fitted, md, model, rev, kind)
+        if why:
+            return why
     fa, sa = fitted.get("adapter"), adapter.identity if adapter else None
     if fa != sa:
         return f"it was fitted with adapter {fa or 'none'}, the served adapter is {sa or 'none'}"
@@ -1268,7 +1341,7 @@ class Server:
         if kind in ("graph", "exit") and (a.quant or quant) == "fp8" and fp8_refused():
             raise SystemExit(fp8_refused())
         # GGUF modes: the engine serves the GGUF weights, so only tokenizer, template and calibration are downloaded
-        md = resolve(a.model, a.revision, metadata_only=kind in ("gguf", "ollama", "llamacpp"))
+        md = resolve(a.model, a.revision, metadata_only=kind in WEIGHTS_ELSEWHERE)
         self.fmt = model_format(md)  # prompt format of the model (basal.json "prompt"; 1 when absent)
         self.max_options = max_options(self.fmt)
         self.rank_max = getattr(a, "rank_max_candidates", rank.MAX_CANDIDATES)  # rank candidates per request
@@ -1404,8 +1477,8 @@ class Server:
         # a file of your own (--calibration) or the adapter's (fitted with an adapter); the files in the model directory
         # belong to it
         own = a.calibration or (bool(self.adapter) and cal.parent == self.adapter.path)
-        self.cal_mismatch = calibration_mismatch(self.cal, a.model, md, self.adapter) if own and not a.no_calibration \
-            else None
+        self.cal_mismatch = calibration_mismatch(self.cal, a.model, md, self.adapter, kind) \
+            if own and not a.no_calibration else None
         unvalidated = self.cal_unvalidated
         if self.cal_mismatch:
             if getattr(a, "strict_calibration", False):
@@ -2421,7 +2494,8 @@ def parser():
                     help="calibration file (default: <model>/CALIBRATION.<engine>.json if shipped, else "
                          "CALIBRATION.json; fit your own with basal-calibrate)")
     ap.add_argument("--strict-calibration", dest="strict_calibration", action="store_true",
-                    help="refuse to start when the --calibration file was fitted on another model or revision "
+                    help="refuse to start when the --calibration file was fitted on another model, on a revision "
+                         "with other model files (a commit to the card alone keeps it) or with another adapter "
                          "(default: a warning, and its thresholds are not applied)")
     ap.add_argument("--log-decisions", dest="log_decisions", default=None, help="append a propensity log (JSONL)")
     ap.add_argument("--rank-max-candidates", dest="rank_max_candidates", type=int, default=rank.MAX_CANDIDATES,
