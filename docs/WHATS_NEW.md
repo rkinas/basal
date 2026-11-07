@@ -1,3 +1,419 @@
+# What is new in basal 2.8.0
+
+Released 8 November 2026. Bug fixes and the groundwork for 3.0, with contributions from Dariusz Koryto, Rafal
+Wiktorowicz (NovaraX), Miłosz Kucharski and Marcin Brzeżański. Answers to valid requests are byte-identical to 2.6.0
+(checked on an H100 and on an RTX PRO 6000 Blackwell with basal-omni-1.0-mini in `--mode fast`, `--mode eager` and
+with `--media on`, basal-omni-1.0-mini-FP8, basal-omni-pico and basal-2.0-mini-FP8 in `--mode fast`, and
+basal-2.0-4.5B and basal-omni-1.0-mini with `--state-cache-bits 8`). Two defaults change: the long lane is on
+(`--long-lane auto`) while other requests are in flight, and basal-omni-pico started without `--mode` on an RTX PRO
+6000 Blackwell (SM120) runs `--mode fast`. A request alone on the server is still answered by the main lane, byte for
+byte.
+
+- **Less host work per request** (`basal-serve`; answers unchanged): with `--state-cache-gb`, the state's end in tokens
+  is found from the ids the request's first prompt already has, tokenizing only the state's last line again (2.5.4
+  tokenized the prompt and its prefix whole on every request); the prefix trie of a request's prompts and the CUDA
+  cascade's index arrays are built without Python loops over tokens. CPU: one question over 1.5k tokens with the
+  state cache 3.1 -> 1.75 ms of host time, five over 6k 10.8 -> 4.8 ms; the trie of a 300-sentence compress 17.7 ->
+  8.5 ms. Contributed by Miłosz Kucharski (@Butterski), [#100](https://github.com/rkinas/basal/pull/100).
+- **`--state-cache-bits 8` quantises the layers of one shape together** (`basal-serve`; answers unchanged): a cached
+  state was quantised and every hit dequantised layer by layer, 16-18 kernels per tensor (basal-2.0-4.5B: 3,180
+  operations per store and lookup); the layers of one shape now go through one call per 16 MB, with every layer's
+  codes and scales as before (179 operations for a 1.5k-token state). RTX 4090, basal-2.0-mini, 104 requests: 5.11 ->
+  4.52 s storing their states, 2.64 -> 2.13 s reading them back; answers bit-identical. On an RTX PRO 6000 one store /
+  read of a 1.5k-token basal-2.0-4.5B state takes 1.3 / 0.5 ms instead of 11.3 / 6.4 ms, and a long state's store
+  (30k tokens, or basal-omni's 39k) takes the time and GPU memory it took before. Contributed by Miłosz Kucharski
+  (@Butterski), [#110](https://github.com/rkinas/basal/pull/110).
+- **`basal-calibrate --keep-shipped TYPE`** (`basal-calibrate`): a question type keeps the compared file's temperature
+  and thresholds together instead of being fitted, for a type your labels do not certify at a `max_error` the shipped
+  file did (a fitted file would defer all its answers). The kept thresholds are marked `"kept": "shipped"`, measured
+  on your FIT and CERT split, and listed in `fitted_on.kept_shipped`, with the compared file named in
+  `fitted_on.kept_shipped_from`. The warning for an uncertified type names the option. A kept threshold that your
+  decisions refute is withdrawn, as a fitted one is. A pooled-only threshold (a file without per-type ones) and a file
+  of another engine are refused, and so are the base model's thresholds under `--adapter`, also with `--url` to a
+  server started with `--adapter` and in the `--from-rows` refit of such a run. Contributed by Dariusz Koryto
+  (@dkoryto),
+  [#113](https://github.com/rkinas/basal/pull/113).
+- **Qwen3.5 defaults to `fast` on SM120** with importable FLA. Validated on RTX 5060 Ti 16 GB under native Windows:
+  the synthetic agreement gate passed, and median throughput across three workloads was 2.46x–8.64x Eager. A
+  Qwen3.5 model such as basal-omni-pico started without `--mode` on an SM120 GPU (RTX 50 series, RTX PRO 6000
+  Blackwell) now answers as `--mode fast` does there, no longer as `--mode eager`; a start that gives `--mode`, and
+  every other GPU (sm121 GB10 among them), answers as before. Contributed by Marcin Brzeżański (@marcinbrzezanski),
+  [#114](https://github.com/rkinas/basal/pull/114).
+- **One code readout for every torch engine** (`--mode eager`, `fast`, `fast-exit`, `strix`, `basal-finetune`): the
+  fp32 rows of the option codes, the head's bias and the final logit soft cap once, one masked softmax and one copy
+  to the host. `--mode fast-exit` now applies the soft cap it skipped (its answers on soft-capped models change);
+  eager and graph engine answers are unchanged (eager reads each prompt alone, as before, with one copy to the host). The
+  long-shape warm-up of `--mode fast` runs after the one-forward limit is measured, so it warms the path long
+  requests take. [#138](https://github.com/rkinas/basal/pull/138).
+- **One rule for what a derived model keeps of its source** (`basal-finetune`, `basal-fuse-adapter`,
+  `basal-interpolate`, `basal-export-gguf --systemone`): the tools that write a model with other weights now leave
+  out the same files, those fitted to the source weights (NVFP4 activation scales, evidence head, early-exit heads,
+  thinking folder) and those describing it (model card, manifest, checksums). `basal-fuse-adapter` no longer copies
+  the base model's card and manifest; `basal-interpolate` no longer copies the manifest or half of `exit_heads/`
+  (its thresholds without the heads, which were trained on the source's hidden states). Calibrations as before:
+  dropped by fine-tuning and fusing, kept by interpolation as a starting point.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **TypeScript client: 429, 502 and 504 are retryable** (`basal-client`): `retryable` is also true for HTTP 429, 502
+  and 504, which a proxy or a router in front of `basal-serve` answers.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **TypeScript client: types of rank questions, router fallback answers and the usage block** (`basal-client`):
+  `RankQuestion` / `RankAnswer` (a rank question did not compile); a choice answered by basal-router's `--fallback`
+  is a `FallbackChoiceAnswer` (`answered_by: "fallback"`, `probabilities` and `confidence` may be `null`), so
+  `AnswerOf["choice"]` and `choice()` return `ChoiceAnswer | FallbackChoiceAnswer`; `calibration` may be `"text"`
+  (media); answers may carry the router's `level` and `model`; `usage` is always there (`full.usage.skipped`
+  compiles), `usage.truncated` is the object the server sends (it was declared a boolean), with `usage.media`; the
+  response may carry `fallback`. Code that reads `confidence` of a choice answer as a `number` must now narrow it
+  first (`answered_by !== "fallback"`). [#138](https://github.com/rkinas/basal/pull/138).
+- **TypeScript client: `langOf` as the Python presets' language guess** (`basal-client`): the Python fix for short
+  Polish lines typed without diacritics (#97) was not in the TypeScript client, so `preset("nie dziala logowanie")`
+  was worded in English from TypeScript and in Polish from Python. `langOf` now counts the same signs as
+  `basal.presets.lang_of`; `scripts/ts_presets.py` writes `src/presets.ts` and the shared test fixture (371 language
+  cases, every counted word among them) from `basal/presets.py`, and a Python test fails when they drift.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **`basal-run`, `basal-loadtest` and `basal-calibrate --url` work with a server started with `--api-keys`**
+  (`basal-run`, `basal-loadtest`, `basal-calibrate`): they had no way to send a key; `--api-key KEY` (or
+  `BASAL_API_KEY`) is sent as `Authorization: Bearer`, and a missing or refused key stops the tool with a message
+  that says so (it wrote an error per line, ended in a traceback, or reported that no server answers).
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **CI tests uv.lock's versions; a nightly run tests the newest** (CI): the Linux and TypeScript jobs installed the
+  newest dependency versions on every run (macOS used `uv.lock`), so a dependency release could fail a pull request
+  that changed nothing; every gate job now installs `uv.lock`'s versions, and `nightly.yml` tests the newest versions
+  `pyproject.toml` allows every night. [#138](https://github.com/rkinas/basal/pull/138).
+- **`basal-bench --identity --quant nvfp4` on basal-omni** (`basal-bench --identity`): the identity gate built the
+  engine without the calibrated input amax, so basal-omni in NVFP4 was refused before the check started. It reads
+  the model folder's `NVFP4_AMAX.json` as basal-serve does, or `--nvfp4-amax FILE`.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **`basal-selfcheck --api-key`** (`basal-selfcheck`): the check sent no API key, so against a basal-serve started
+  with `--api-keys` it stopped at its first request with HTTP 401. `--api-key` (default `$BASAL_API_KEY`) is sent as
+  `Authorization: Bearer` with every request, also with `--make-reference`.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **A thought answer keeps the request's contracts** (`basal-serve --think auto`, experimental): readout 2's answer
+  dropped the `abstain` / `answer_set` a question asked for with `max_error` / `coverage` (a confident answer without
+  its safety fields when readout 2 has no calibration); it now carries them under readout 2's calibration (without
+  one: `abstain: true`, the set of every option). `ask_if` now reads the answers after thinking, so a question is
+  skipped by the answer the request gets, not the one before; and a request with images or audio no longer thinks
+  (readout 2 read its text only). [#138](https://github.com/rkinas/basal/pull/138).
+- **`basal-router` keeps `ask_if` consistent through the cascade, the blend and the fallback** (`basal-router
+  --escalate`, `--blend`, `--fallback`): a question asked again kept its `ask_if` / `depends_on`, so a replica refused
+  the sub-request when the question it names was not asked again (a 422, and nothing was escalated or blended), and a
+  replaced answer left its gated questions as the first replica had decided them (a child of a parent that changed
+  from `a` to `b` stayed answered under `ask_if: {"parent": ["a"]}`). The questions asked again now go without their
+  gates, and the router applies `ask_if` to the final answers: a question whose gate now fails is `null` and in
+  `usage.skipped`, one whose gate now passes is asked of the first replica and goes through the same levels. When that
+  call fails, the request fails with its status and error, as basal-serve fails a request when one of its engine calls
+  fails. [#138](https://github.com/rkinas/basal/pull/138).
+- **`basal-serve --max-body-mb` and `--max-branches`: a request's size is bounded before any work** (`basal-serve`):
+  a request body of any size was read whole and every question and label rendered before a limit applied; a body
+  over `--max-body-mb` (default 256 MiB: the largest media request, 8 items of 20 MB, is about 214 MB in base64) now
+  answers 413 (`PAYLOAD_TOO_LARGE`) before it is read whole, also when it is sent without a length, and a request with
+  more than `--max-branches` branches (default 4,096; a question counts 1, a `multi` question or a tool set one per
+  label, as `usage.branches` counts them) answers 422 before it is rendered. Requests within the defaults are answered
+  as before. [#138](https://github.com/rkinas/basal/pull/138).
+- **`basal-router --replica-timeout S`** (`basal-router`): a replica that accepted a request and never answered held
+  the client and the router's in-flight count forever; with `--replica-timeout` such a call ends after S seconds with a
+  504 (an escalation level or a blend model that times out leaves the previous answers, as one that is down). The
+  replica stays in rotation: one slow call says nothing about the next. Off by default, as before; connecting to a
+  replica now fails after 10 s (a 504), and the replica then leaves the rotation until it answers its health check
+  again, instead of waiting for the system's TCP timeout. [#138](https://github.com/rkinas/basal/pull/138).
+- **`act` with `max_error` and no defer action is refused before the run** (`basal-serve`): API.md asks for a `defer`
+  / `human` action (or `defer_action`) with `max_error`, but the request was refused (422, the whole response lost)
+  only when a decision was below its threshold and answered 200 otherwise; it is now refused before the engine runs,
+  whatever the confidence, and so is a `defer_action` that names no row of `costs` (it was returned as the action).
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **`basal-router` serves `POST /v1/decisions`** (`basal-router`): OpenAI SDK clients of the Decisions API got a 404
+  from the router; the route now goes to a replica, routed by the request's `input` as a state is (with the client's
+  key), and its response comes back as the replica gave it. The cascade, the blend and the fallback, which read basal
+  answers, apply to `/v1/systemone` and `/v1/basal` only. [#138](https://github.com/rkinas/basal/pull/138).
+- **The Python client tells a key error and a starting server from the rest** (`basal.client`): a 401 / 403 was a
+  `ServerError`, the 503 of a server still loading its model an `OutOfMemory`, and an OpenAI-style error body
+  (`--error-format openai`, `/v1/decisions`) came back as the text of a dict. They are now `AuthError` (a `ServerError`) and
+  `NotReady` (an `OutOfMemory`, retried the same way), so existing `except` clauses still catch them, and the message
+  is the error's own text (`"<type>: <message>"`). [#138](https://github.com/rkinas/basal/pull/138).
+- **A lone surrogate in a request answers 422** (`basal-serve`): a string with an unpaired `\ud800`-`\udfff` escape
+  (valid JSON, but no Unicode text) in the state, a question name, its instructions or an option failed with HTTP 500
+  from the tokenizer or the answer's UTF-8; it is now refused before the engine runs (400 on `/v1/decisions`), an
+  escaped pair such as an emoji is read as before, and `--ui full` shows such a kept request instead of failing. A
+  lone surrogate in a field the server does not read (an unknown key, an `id`) is refused too: such a request was
+  answered before.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **Every request is admitted before any work** (`basal-serve`): the checks of a request that need no engine work now
+  run in one place before the facts, media decoding, rendering and the queue, for `/v1/systemone`, `/v1/basal`,
+  `/v1/decisions` and the MCP tools alike. A string with a lone surrogate (`"\udead"`) failed in the tokenizer with a
+  500, a NaN or an infinity among a question's options failed the response with a 500 after the engine's run, a
+  `/v1/decisions` body nested several hundred levels deep failed with a 500, and evidence on a `multi` question or
+  on a model without an evidence head was refused only after the run; each now answers 422 (400 on
+  `/v1/decisions`) before it. Task questions (`verify` claims, `extract` fields) count toward `--max-branches` as the
+  questions they expand to, a rank request with an invalid other question runs none of its rank requests, and a
+  wrong `lang` or `layout` is refused before the facts are computed or the media decoded. Objects and arrays may nest
+  256 levels. Valid requests are answered as before. [#138](https://github.com/rkinas/basal/pull/138).
+- **basal-router reads a request once, and never fails on a body it cannot read** (`basal-router`): the router parsed
+  the body again for routing, `--route` and every cascade, blend, fallback and `ask_if` step, and a body nested
+  beyond the JSON parser (`RecursionError`) or a state with a lone surrogate (`"\udead"`) failed in the router with a
+  500. The body is now read once; one it cannot read as a request goes to a replica as it came, whose own 422 the
+  client gets. `--route` names each distinct character of the state once (the same script as before, in a fraction
+  of the time on long states). basal-serve and basal-router share one module of request helpers (`basal/request.py`:
+  the body read, the option texts, the JSON text of a state), and `/v1/systemone` and `/v1/decisions` one handler.
+  Answers and routing are unchanged. [#138](https://github.com/rkinas/basal/pull/138).
+- **The think pass reads the questions as the first readout read them** (`basal-serve --think auto`, experimental):
+  readout 2 rebuilt every question from the request and, with `"facts": "auto"`, computed the facts block a second
+  time (seconds on a long state); it now takes the questions the first readout read, facts included, from the
+  request's own pass. Answers are unchanged. [#138](https://github.com/rkinas/basal/pull/138).
+- **A bounded server under load** (`basal-serve`): requests in flight were unbounded, a request could wait for ever
+  behind a stalled engine, a request whose prompts held gigabytes of text (a long state times thousands of labels and
+  two option orders) was rendered and tokenized whole, and that work held the event loop, so `/health` and every other
+  client waited. Now `--max-requests N` (1,024 by default) answers a request beyond N in flight with 503
+  (`OVERLOADED`, `Retry-After: 1`; the Python client's `NotReady`, retried) before its body is read, and a request
+  admitted keeps its place from the read of its body to its answer;
+  `--request-timeout S` (off by default) answers 504 (`TIMEOUT`) and drops the request's queued work;
+  `--max-prompt-mb` (512 by default) refuses with 422, before anything is rendered, a request whose prompts would
+  hold more text; and the prompts of a request holding over 64 KiB of text are rendered and tokenized in a thread of
+  their own, while the event loop answers. A server decided in process under several event loops (a test, a tool
+  calling `asyncio.run` more than once) no longer waits for ever when a request's preparation yields before its queue
+  entry. Answers are unchanged. [#138](https://github.com/rkinas/basal/pull/138).
+- **basal-router bounds a request body, and `--ui full` the requests it keeps** (`basal-router`, `basal-serve --ui
+  full`): the router read every request body whole, of any size; it now answers 413 (`PAYLOAD_TOO_LARGE`) above
+  `--max-body-mb` (256 MiB by default, basal-serve's limit) before reading it. `--ui full` kept the last 200 requests'
+  bodies and answers whatever their size (200 bodies at the 256 MiB limit are 50 GB); it now keeps at most 256 MiB of
+  them as sent, the oldest dropped first and the newest always kept. It keeps a body's bytes and parses them when the
+  page shows the request: the parsed body could take about 19 times its bytes in memory.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **Engine liveness in `/health` and `/metrics`** (`basal-serve`, `basal-router`): a hung engine call left `/health`
+  at 200, so a router kept sending the replica requests that waited for ever, and `/metrics` gave one total of request
+  time. With `--stall-s S` (off by default) `GET /health` answers 503 `{"status": "stalled"}` while an engine call of
+  the main lane has run longer than S seconds, and basal-router sends that replica nothing until it answers 200
+  again; `/metrics` adds the time requests waited for the engine (`basal_queue_wait_seconds_total`), the time and
+  number of engine calls (`basal_engine_seconds_total`, `basal_engine_calls_total`), and how long the oldest running
+  call and the oldest waiting request have taken so far. [#138](https://github.com/rkinas/basal/pull/138).
+- **Every option basal-serve refuses is refused before the model is downloaded** (`basal-serve`): `--media on`,
+  `--ple-offload on` and `--eager-attn` with a mode that does not take them were refused only after the model was
+  resolved, which downloads its weights; basal-serve's option checks that need no model now run in one function
+  (`serve_options`) before anything is read, and are tested without weights or a GPU.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **`/metrics` tells the client's errors from the server's** (`basal-serve`): `basal_request_errors_total{code=...}`
+  counts the failed requests by error code (`INVALID_REQUEST`, `OVERLOADED`, `TIMEOUT`, `OUT_OF_MEMORY`,
+  `INTERNAL_ERROR`), so an alert on server errors no longer fires on invalid requests.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **The CUDA graph engine's option checks run before the weights are downloaded** (`basal-serve --mode fast`, `fp8`,
+  `int8`, `nvfp4`): a combination the engine refuses for the model (`--compile-scope layer` on basal-omni, a
+  quantisation the model does not take, `--batches compact` without its kernel, ...) was found only after the model's
+  weights were downloaded, with a traceback; basal-serve now runs the engine's checks on the model's configuration
+  first and exits with the reason. [#138](https://github.com/rkinas/basal/pull/138).
+- **Long requests are prepared off the event loop** (`basal-serve`): a request whose prompts hold over 64 KiB of
+  text is rendered and tokenized in a worker thread while the event loop answers other clients and `/health` (the
+  option codes of a long prompt are read at its end since 2.5.4). Answers are unchanged.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **basal-serve warns when a model's own calibration was fitted on another model** (`basal-serve`,
+  `basal-interpolate`): a merged model served the `CALIBRATION*.json` that basal-interpolate copied from a source
+  checkpoint as its own, without a word; a file in the model's folder that basal-interpolate copied (and no
+  basal-calibrate run replaced), or that basal-calibrate fitted on another model or on a revision with other model
+  files (a commit to the card alone keeps it, as for `--calibration`), now gives a start-up warning, and
+  `--strict-calibration` refuses it. The file is still served as it is.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **A loopback server answers only its own host** (`basal-serve`, `basal-router`): a server bound to 127.0.0.1 without
+  `--api-keys` answered any request that reached the port, so a web page could reach it through DNS rebinding (its
+  own name pointed at 127.0.0.1) and read `/ui/request/<id>` or call the decision routes. Such a server now answers
+  only requests whose `Host` names a loopback host and that no other site's page sent, others with 403 before they
+  are read; `--allowed-hosts` widens the list (`*` turns the check off). A reverse proxy on the same machine that
+  keeps the public `Host` (nginx `proxy_set_header Host $host`) needs `--allowed-hosts <that name>`; basal-router,
+  bound to 127.0.0.1 by default, checks the same way. GET and HEAD of `/health` and `/health/` stay open, as with
+  `--api-keys`, for probes that send a host of their own. Servers bound to the network or with `--api-keys` are
+  unchanged. [#138](https://github.com/rkinas/basal/pull/138).
+- **Two kept behaviours are now documented and pinned** (`basal-serve`): a `multi` question whose `min` is above its
+  `max` returns the `min` most probable labels (as since 1.5), and the think pass's second readout reads the
+  canonical prompt layout, as its weights and `CALIBRATION.think.json` were made, also when the first readout serves
+  another layout (said at start-up). [#138](https://github.com/rkinas/basal/pull/138).
+- **`extract` keeps large integers exact** (task type `extract`, all modes): every number went through a float, so
+  9007199254740993 came back as 9007199254740992. Integers are now parsed exactly; a number beyond a float's range is
+  still "not a number" (the field reports the error and is never automated). `basal-calibrate` compares integer fields
+  exactly.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **`extract` keeps property names and enum values apart from its own identifiers** (task type `extract`): a property
+  named `customer.name` came back nested as `customer` → `name` (and `a` next to `a.b` raised an error, HTTP 500);
+  enum values `1` and `"1"` were one option, and a value `"__missing__"` read as "not stated". `data` now follows the
+  property names as given, a schema where a dotted name and a nested object give the same path is refused (422), and
+  enum values that would read the same are keyed by their JSON form and come back with their type. Schemas without
+  such names or values keep their option keys and answers. `basal-calibrate` reads the gold of such fields the same way.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **`extract` reads a Polish thousands dot** (task type `extract`, all modes): "2.500 zł" came back as 2.5 while the
+  helper facts read it as 2500, and the field could still be automated. In a Polish question a single dot before
+  exactly three digits is now a thousands dot (an English question keeps 2.5), and a comma or dot followed by a space
+  ends the number ("1, 2" is 1, not 1.2; "Rok 2024, 10 osób" is 2024, not 2024.1). `basal-calibrate` reads a number
+  given as text in the gold of a field the same way. [#138](https://github.com/rkinas/basal/pull/138).
+- **"N dni temu" helper facts are deduplicated and capped** (`facts: "auto"`): every occurrence added a fact line, so
+  a state repeating "2 dni temu" two hundred times got two hundred identical lines in its prompt. Each N now gives one
+  line, and at most three (`MAX_DURATIONS`, as for durations). A state with more than three such values, or repeated
+  ones, gets a shorter prompt, which can move its probabilities. [#138](https://github.com/rkinas/basal/pull/138).
+- **A threshold the held-out CERT decisions refute is withdrawn** (`basal-calibrate`, decision types and tasks): a
+  threshold certified on FIT was written whatever CERT showed, even 100 errors in 100 accepted CERT decisions. When
+  CERT's errors at the threshold put the one-sided 95% lower bound of the error above the target, the type or task now
+  gets no threshold at that target (`"refuted"` keeps the FIT one, the reason names CERT's errors). A threshold that
+  holds is withdrawn at most 5% of the time; CERT too small to confirm a threshold still only adds a note.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **Decisions whose errors go together count as fewer independent ones in the bound** (`basal-calibrate`, decision
+  types and tasks): the Clopper-Pearson bound counted every claim of a document, or every field of a form, as an
+  independent decision, so a task with 70 FIT documents × 30 claims at a mean error just above the target was
+  certified in 15-20% of runs instead of at most 5%. The correlation of the errors within groups (ICC) is now
+  estimated on FIT and the accepted decisions and errors are divided by the design effect 1 + (m − 1) ICC (5-7% in
+  the same simulations: an approximation, since the ICC is estimated from the same decisions).
+  One decision per group, or errors that do not go together, change nothing; the report gives `icc` and
+  `design_effect` per type and task, and the CERT figures and the CERT refutation use the same discount.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **The long lane is on by default** (basal-serve, the CUDA graph engine: `fast`, `fast-nocompile`, `fp8`, `nvfp4`):
+  `--long-lane` takes `auto` (the new default), `on` and `off`. Without the long lane, one long state made every
+  short request wait for its whole engine call. On a GB10 (basal-2.0-4.5B, 32k-token states every 3 s and two short
+  requests a second), short p50 was 23.4 s instead of 0.33 s with `--long-lane on`. On an RTX PRO 6000 Blackwell
+  (basal-omni-1.0-mini, 60k-token states every 3 s), short p50 went from 3.9 s to 0.17 s. Long requests pay for it:
+  under that stream their p50 went from 3.3 s to 21 s, since the long lane reads one long state at a time,
+  uncompiled and yielding to the short batches. `auto` gives a long request
+  (over `--long-tokens`, 2,048) the long lane only while another request is in flight. A request alone on the
+  server, as every request of a sequential client, is answered by the main lane, so **its answer is the one 2.7
+  gives, byte for byte**. `usage.lane` appears only when a request took the long lane. `auto` has no long lane for
+  two-way models, `--lanes`, `--deterministic`, or Qwen3.5 without `--long-lane-gdn on`. If its engine call fails,
+  its requests and later long ones go to the main lane, and the error is logged once. `--long-lane off` keeps 2.7's
+  behaviour. `--long-lane-gdn on` without `--long-lane on` is accepted now, and refused only with `off`. Reported by
+  Dariusz Koryto (@dkoryto), [#130](https://github.com/rkinas/basal/issues/130) ([#138](https://github.com/rkinas/basal/pull/138)).
+- **basal-run resumes an interrupted run** (`basal-run`): the same command, run again, goes on from `<output>.part`
+  instead of starting again. Its answers are kept and only the lines after them are sent, so a run of tens of hours
+  loses no more than the lines in flight when it stopped. A line cut short by the interruption, and errors written
+  after the last answer, are sent again. `<output>.part.json` records the input file (size and sha256), the options
+  that make the requests (`--preset`, `--lang`, `--early-exit`) and the server's `GET /v1/models`. A `.part` of
+  another input, other options or another server is refused, and `--restart` replaces it. `--concurrency` may differ.
+  Before, the command started again and replaced the `.part` ([#138](https://github.com/rkinas/basal/pull/138)).
+- **basal-run stops when the server stops answering** (`basal-run`): after `--stop-after` (16) lines in a row that
+  the server did not answer (a connection error, or HTTP 502, 503 or 504), the run exits with the reason. Before, it
+  failed every remaining line in seconds and renamed `<output>.part` to `<output>` as if done, so there was nothing
+  to resume. Those lines are not written, so the same command, run once the server is back, goes on from the last
+  answer. Fewer such lines between answers are error lines, as before; `--stop-after 0` keeps the old behaviour ([#138](https://github.com/rkinas/basal/pull/138)).
+- **`GET /health` and `/metrics` show the long lane apart** (basal-serve with a long lane, the default on the CUDA
+  graph engine): `/health` adds `"long": {"running", "queued"}`, the requests whose work is in a long-lane engine
+  call or waiting in its queue, and `/metrics` adds `basal_lane_requests_waiting{lane="main"|"long"}` and
+  `basal_lane_requests_running{lane=...}`. A load balancer can then see the main lane free while only long states
+  run. `running`, `queued`, `basal_requests_waiting` and `basal_requests_running` are unchanged (both lanes
+  together), and a server without a long lane reports nothing new. Suggested by Dariusz Koryto (@dkoryto),
+  [#130](https://github.com/rkinas/basal/issues/130) ([#138](https://github.com/rkinas/basal/pull/138)).
+- **A prepared start reads and writes only its own compile cache** (`--prepared`, the default `auto`). Kernels that
+  torch launches statically kept the paths of the machine that prepared them. A start therefore looked for their
+  autotune results in the builder's Inductor cache (`/tmp/basal-prepare/.cache/...` for the directories shipped with
+  the models), took another cache's picks when they were there, and wrote its own there. Where that directory was
+  absent, the start created it. Where it was read-only, or another user's, the start failed with a `PermissionError`.
+  Those kernels now take the prepared results in the start's own cache, as every other loaded kernel does. The answers
+  are the same; on an RTX PRO 6000 with basal-omni-pico, every start gave the same answers byte for byte, before and
+  after ([#138](https://github.com/rkinas/basal/pull/138)).
+- **Correction to the 2.5.0 release notes:** the items they listed as "Coming in 2.5.1" were not delivered, in 2.5.1
+  or since. These are: certified default thresholds for the ready question sets (the presets' and guards' `act_at` and
+  `review_at` are still hand-picked; with `max_error` they use the served model's own calibration); int8 on Apple
+  M5; the state cache in block FP8 (`--mode fp8` still serves without it); and a fix for the rare HTTP 500 with
+  `--mode fast` and the state cache without the throughput that `--state-cache-lock on` costs (that flag is still the
+  way to avoid it). The docs now describe what holds today.
+  [SERVING.md](SERVING.md#agent-frameworks-and-ready-question-sets-25),
+  [QUANTIZATION.md](QUANTIZATION.md#basal-omni-10-ultra-quantised-at-load-time-25), [#138](https://github.com/rkinas/basal/pull/138).
+- **The decision log tells requests with other media or another language apart, and stays strict JSON**
+  (`--log-decisions`): two requests that differed only in their images or audio (`media`, or the `images` alias), or
+  in `lang`, were logged under the same `request_sha256`. The key now also covers the sha256 of each media item and
+  the language, when the request has them. A NaN or infinite probability was written as the non-standard token
+  `NaN` / `Infinity`, which strict JSON parsers (jq, most libraries) refuse; it is written as null now.
+  **Log format:** a request without media and `lang` keeps the key it had in earlier releases. A request with them
+  gets a new key, so lines of earlier logs for such requests no longer join with new ones by key (the log does not
+  hold the media, so they cannot be re-keyed). [SERVING.md](SERVING.md#serving-modes). Contributed by Rafal
+  Wiktorowicz (NovaraX), [#119](https://github.com/rkinas/basal/pull/119).
+- **A file fitted through a server records the revision the server serves** (`basal-calibrate --url --model`):
+  `GET /v1/models` now reports `revision` (the Hugging Face commit served) and `model_files` (the digest of its model
+  files), null when the model is no cache snapshot. basal-calibrate records them in `fitted_on`. Before, it recorded
+  the revision the local cache resolved `--model` to: a server pinned to an older revision got main's commit, so
+  basal-serve judged the file by the wrong snapshot's files. When the two differ, basal-calibrate warns, and checks the
+  `--calibration` file it compares with against the server's model files. Against a server before 2.8, which does
+  not report them, it records the cache's as before and warns: pass the server's revision with `--revision`.
+  basal-router passes the fields through. [API.md](API.md),
+  [CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to), [#138](https://github.com/rkinas/basal/pull/138).
+- **A rank request that fails stops its other requests** (`rank`, basal-serve): a rank question is screened in one
+  request per `chunk` of candidates, all started at once. When one of them failed (a chunk longer than the context,
+  say), the client got its error, but the others went on being prepared and run for nobody, and every later
+  request waited behind them. Sending such a request again piled up more of that work: with 10,000 candidates in
+  chunks of 1,000 on a small model, the error came after 10 s, then 13 s, then 67 s, and the next client's request
+  timed out. The other requests are now cancelled at the first failure, as for a client that disconnects: their
+  queued work is dropped, and only a preparation already running finishes. Requests that do not fail are answered
+  as before. [#138](https://github.com/rkinas/basal/pull/138).
+- **basal-router answers `GET /health/`** (`basal-router`): `/health/` (and `HEAD /health/`) answered a 307 redirect
+  to `/health`, so a load balancer's probe that does not follow redirects marked the router down. It now gets the
+  answer of `/health`, as basal-serve gives since 2.6.0. [#138](https://github.com/rkinas/basal/pull/138).
+- **basal-calibrate checks its minimums before the readout** (`basal-calibrate`): `--min-family 0` and
+  `--min-blend -1` failed with a traceback after the whole readout, and its results were lost. `--min-family` below 1,
+  and `--min-blend`, `--min-per-type` or `--min-per-set` below 0, now stop the command at once with a message, as
+  `--targets` out of range does. [#138](https://github.com/rkinas/basal/pull/138).
+- **basal-calibrate names an input file it cannot read** (`basal-calibrate`): a missing file, a directory or a binary
+  file given as the labelled input stopped the command with a traceback (`FileNotFoundError`, `IsADirectoryError`,
+  `UnicodeDecodeError`). It now stops with the file's name and what is wrong, as it does for a bad line.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **basal-calibrate reads the compared calibration as basal-serve does** (`basal-calibrate`): a temperature written
+  as text (`"1.2"`, which basal-serve reads since 2.6.0), a `null` thresholds entry or a bad bucket name in the file
+  it compares with made it fail with a traceback after the whole readout, and its results were lost. A temperature
+  given as text is now a number to the fit, a `null` entry is no threshold, and a value basal-serve refuses at
+  start-up stops the command before any readout, with the key named. A compared file of another prompt format than
+  the model's is refused, as basal-serve refuses it: its temperatures were blended in (and, with `--keep-shipped`,
+  kept with its thresholds) although they were fitted on other prompts. [#138](https://github.com/rkinas/basal/pull/138).
+- **A question with far more options than the cap is refused at once** (`basal-serve`): the options of a `choice`,
+  `score`, `act` or `tool` question were read in full before the cap of 255 refused them, in time that grew with
+  the square of their number, on the event loop that answers every client: 32,000 criteria held the server for
+  4.5 s, as many tools for 4.5 s, and as many `act` outcomes for 30 s (their cost matrix was built first). They
+  are now read in linear time, and an `act` question's options are counted before its costs, so such a request
+  gets its 422 at once. [#138](https://github.com/rkinas/basal/pull/138).
+- **`act`'s short-form costs no longer build a cost matrix** (`basal-serve`, `act` with `costs: {"wrong": W, "defer":
+  D}`): each such question became a matrix of its outcomes by its outcomes when the request was read, 1.6 MiB for 255
+  outcomes, so a 1 MiB request of such questions took 417 MiB, and one at the limits about 6.7 GB. The two costs are
+  now kept as they are and the expected costs computed from them, term for term as from the matrix: the answers,
+  `expected_costs` and the action chosen on a tie are byte-identical. The full form (`costs` per action and outcome)
+  is read as before. [#138](https://github.com/rkinas/basal/pull/138).
+- **A calibration file fitted on a local folder is matched by the folder's files** (`basal-calibrate`,
+  `basal-serve --calibration`): a file fitted on a local model folder was matched to the served model by the folder's
+  last name only, so one fitted on `/data/run1/final` was applied to `/data/run2/final`, another checkpoint, with
+  thresholds certified on the first, and refused for a copy of the same weights under another name. basal-calibrate
+  now records `fitted_on.model_content`, a digest of the model files' sizes and sampled content (a few MiB read per
+  file), and basal-serve compares it whenever a side has no Hugging Face revision: the same files match whatever the
+  folder is called, other files do not. A file written before keeps the name match, and when it was fitted on a local
+  folder basal-serve warns that it is matched by that name alone. Files shipped with a model are not affected.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **A calibration file for a format-1 model says its format** (`basal-calibrate`): a file fitted for a prompt-format-1
+  model (basal-1.5 and the other 10-option models) carried no `"prompt"`, so basal-serve took it for a format-2 model,
+  with temperatures and thresholds fitted on other prompts, while it refuses a file 2 for a format-1 model. Files
+  basal-calibrate writes for format 1 now say `"prompt": 1` (as `basal-attach` writes them), and basal-serve refuses
+  them for a format-2 model at start-up. Files without the key, such as those shipped with the basal-1.5 models, are
+  read as before. [#138](https://github.com/rkinas/basal/pull/138).
+- **basal-serve checks a calibration file's thresholds at start-up** (`basal-serve`, `basal-calibrate`): since 2.6.0 a
+  temperature that would break the answers stops the server at start-up with the key named; the other values it
+  reads were not checked. A hand-edited or corrupt thresholds entry, conformal level, fitted fallback threshold or
+  task threshold (a number where an object belongs, a string for a confidence, a value outside 0 to 1) answered 500 at
+  a request with `max_error` or `coverage`, or at `GET /v1/models`. Such a file is now refused at start-up with the
+  key named; a value written as numeric text is read as a number, as a temperature is. Every calibration file
+  published with a basal model passes unchanged, and so do the files basal-calibrate writes. basal-calibrate applies
+  the same check to the file it compares with. [#138](https://github.com/rkinas/basal/pull/138).
+- **A rank list too long for one shared context is answered in chunks** (`basal-serve`, `rank` questions with
+  `"chunk": 0`): a list whose one shared context fits the model's context but would exceed `--max-prompt-mb` (every
+  prompt holds that context) is read in requests of 50 candidates, as a list longer than the context is, instead of
+  being refused with 422. So `basal-navigate`'s defaults work on `basal-serve`'s defaults: its final stage reads the
+  passages it reached in one shared context when it can, and in chunks when that would be too much text ([#138](https://github.com/rkinas/basal/pull/138)).
+- **`basal-calibrate` keeps only the temperatures of a compared file fitted on another model** (`basal-calibrate`):
+  the file it compares with (`--calibration`, the model's or the adapter's file, or for `--from-rows` the one the
+  `--save-rows` run compared with) is checked by `basal-serve`'s rule. Fitted on another model, on a revision with
+  other model files or with another adapter, its temperatures still stand in for the types with too few decisions,
+  but its thresholds and task thresholds are neither compared nor kept: a run with task questions only copied them
+  into the new file, under this model's `fitted_on`. [#138](https://github.com/rkinas/basal/pull/138).
+- **One calibration core in `basal-calibrate`** (`basal-calibrate`): the pooled, per-type and task thresholds are built
+  by one function and floored by one rule (a pooled entry it floors no longer keeps the reason it had no threshold of
+  its own), the automated share is measured as `basal-serve` applies a file, every row is tempered once (a refit no
+  longer recomputes the same probabilities for each target and report), and the rows of the engine and of a
+  `--from-rows` file pass one check. Calibration files are otherwise byte-identical.
+  [#138](https://github.com/rkinas/basal/pull/138).
+- **A calibration file outlives a commit to the model card** (basal-serve `--calibration`): basal-calibrate records
+  `fitted_on.model_files`, the identity of the model's files in the Hugging Face cache (their paths, sizes and blob
+  names, read without opening a file; the card, its images, `SHA256SUMS` and the shipped calibration left out), and
+  basal-serve compares it instead of the revision. Before, a new revision with the same weights, such as a commit that
+  only updates the model card, dropped the file's thresholds and marked every answer `"calibration": "unvalidated"`
+  (`--strict-calibration` refused it). A file fitted before this release records the revision only: it is compared
+  with the fitted revision's snapshot when the cache still holds it, and otherwise the warning says how to keep its
+  thresholds (`--revision <commit>`, or refit). The Hub is not asked. Another model, another adapter and a change to
+  the weights, tokenizer or configuration are caught as before.
+  [CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to), [#138](https://github.com/rkinas/basal/pull/138).
+
 # What is new in basal 2.6.0
 
 Released 7 November 2026. Bug fixes, most of them contributed by Rafal Wiktorowicz (NovaraX), Dariusz Koryto and Grzegorz

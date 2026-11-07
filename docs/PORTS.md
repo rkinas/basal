@@ -21,7 +21,7 @@ log behave as in `--mode fast`. Not available in the ports: the evidence output 
 # lists any, make it once with --clear in place of --allow-existing
 uv python install cpython-3.12-macos-aarch64-none
 uv venv --python cpython-3.12-macos-aarch64-none --allow-existing ~/basal-mlx && source ~/basal-mlx/bin/activate
-uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.6.0.tar.gz"
+uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.0.tar.gz"
 basal-serve --model Remek/basal-1.5-4.5B-MLX-8bit --mode mlx --port 8000
 
 # Ollama: the -GGUF folder gives the tokenizer, chat template and calibration; Ollama serves the weights

@@ -143,7 +143,8 @@ Thank you to the people whose work is in this repository, by pull request:
   ([#44](https://github.com/rkinas/basal/pull/44)) and `--compile-scope layer`
   ([#49](https://github.com/rkinas/basal/pull/49)); in 2.5.4 `basal-prepare` building the engine `basal-serve`
   runs ([#106](https://github.com/rkinas/basal/pull/106)) and the RTX 4090 measured with basal-2.0
-  ([#111](https://github.com/rkinas/basal/pull/111)).
+  ([#111](https://github.com/rkinas/basal/pull/111)); in 2.8.0 less host work per request ([#100](https://github.com/rkinas/basal/pull/100)) and `--state-cache-bits 8` in
+  stacked layers ([#110](https://github.com/rkinas/basal/pull/110)).
 - Grzegorz Brzezinka ([@agentGreg](https://github.com/agentGreg)): the calibration report's per-type ECE as
   `basal-serve` applies the temperatures ([#24](https://github.com/rkinas/basal/pull/24)), the per-type label count for
   the 1% target in CALIBRATION.md ([#25](https://github.com/rkinas/basal/pull/25)), the Apple M5 Max benchmark tables in
@@ -178,7 +179,9 @@ Thank you to the people whose work is in this repository, by pull request:
   speed ([#86](https://github.com/rkinas/basal/pull/86), [#87](https://github.com/rkinas/basal/pull/87),
   [#88](https://github.com/rkinas/basal/pull/88)) and the CI on two workers
   ([#89](https://github.com/rkinas/basal/pull/89)); and in 2.6.0 a request cancelled when its client disconnects
-  ([#132](https://github.com/rkinas/basal/pull/132)) and the helpdesk triage example ([#96](https://github.com/rkinas/basal/pull/96)).
+  ([#132](https://github.com/rkinas/basal/pull/132)) and the helpdesk triage example ([#96](https://github.com/rkinas/basal/pull/96)); in 2.8.0 `basal-calibrate
+  --keep-shipped` ([#113](https://github.com/rkinas/basal/pull/113)) and the measurements behind the long lane by default
+  ([#130](https://github.com/rkinas/basal/issues/130)).
 - Rafal Wiktorowicz ([@onlypositivetravelvibes-dotcom](https://github.com/onlypositivetravelvibes-dotcom)): the 2.5.2
   fixes: the start-up 503 for every HTTP method ([#80](https://github.com/rkinas/basal/pull/80)), config probes that
   say why they fell back ([#81](https://github.com/rkinas/basal/pull/81)), `basal-serve` on native Windows and
@@ -199,7 +202,8 @@ Thank you to the people whose work is in this repository, by pull request:
   ([#117](https://github.com/rkinas/basal/pull/117)), the calibration temperature check ([#119](https://github.com/rkinas/basal/pull/119)), images, amounts and rank listings
   ([#120](https://github.com/rkinas/basal/pull/120)), the GPU mask and the typeset minus ([#121](https://github.com/rkinas/basal/pull/121)), NaN comparators
   ([#122](https://github.com/rkinas/basal/pull/122)), question-file errors and the agree cache ([#123](https://github.com/rkinas/basal/pull/123)), act's short form
-  ([#125](https://github.com/rkinas/basal/pull/125)) and a truncated state's language ([#126](https://github.com/rkinas/basal/pull/126)).
+  ([#125](https://github.com/rkinas/basal/pull/125)) and a truncated state's language ([#126](https://github.com/rkinas/basal/pull/126)); in 2.8.0 the decision log's
+  request key ([#119](https://github.com/rkinas/basal/pull/119)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),
