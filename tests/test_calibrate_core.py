@@ -2,6 +2,7 @@
 one automated share as basal-serve applies a file, the probabilities tempered once per row, one row boundary for the
 engine readouts and --from-rows files, and the rule of basal-serve for the file compared with (validate_baseline)."""
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -85,9 +86,9 @@ def test_each_row_is_tempered_once(monkeypatch):
     assert len(calls) - n == len(rows)
 
 
-def rows_file(path, rows, model="Remek/basal-x", baseline=None):
+def rows_file(path, rows, model="Remek/basal-x", baseline=None, **extra):
     head = dict(basal_calibrate_rows=1, fmt=1, kind="eager", quant=None, model=model, engine="eager",
-                data="labels.jsonl", requests=len(rows), baseline=baseline, orders=1, layout="canonical")
+                data="labels.jsonl", requests=len(rows), baseline=baseline, orders=1, layout="canonical", **extra)
     path.write_text("\n".join(json.dumps(x) for x in [head] + rows) + "\n", encoding="utf-8")
     return path
 
@@ -118,6 +119,29 @@ def test_a_baseline_of_another_model_is_not_compared_or_kept(tmp_path, capsys, m
     assert not {"thresholds", "task_thresholds"} & set(data)
     data, _ = compared(tmp_path, "eager", str(base), None, 1, False, identity=("Remek/basal-y", None, None))
     assert data["thresholds"] == SHIPPED["thresholds"]
+
+
+def test_a_baseline_of_another_revision_with_the_same_model_files_is_kept(tmp_path, capsys, monkeypatch):
+    from tests.test_calibration_mismatch import CHANGES, FILES, R1, R2, R3, snapshot
+    hub = {rev: snapshot(tmp_path / "hub", "Org/m", rev, dict(FILES, **CHANGES[rev])) for rev in (R1, R2, R3)}
+    files = server_module.model_files_id(hub[R1])
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps(dict(SHIPPED, fitted_on={"model": "Org/m", "revision": R1, "model_files": files})),
+                    encoding="utf-8")
+    # in a run, the served snapshot's model files decide: a card-only commit (R2) keeps the thresholds, new weights
+    # (R3) drop them
+    monkeypatch.setattr(server_module, "resolve", lambda name, *_, **__: Path(name))
+    for rev, kept in ((R2, True), (R3, False)):
+        data, _ = compared(hub[rev], "eager", str(base), None, 1, False, identity=("Org/m", rev, None))
+        assert ("thresholds" in data) is kept and data["temperature_per_prim"] == {"noul": 1.1}
+        assert ("has other model files" in capsys.readouterr().err) is not kept
+    # --from-rows: the model files the rows were read with (fitted_on.model_files of the head) decide
+    rows = [dict(r, line=i, name="q") for i, r in enumerate(noul_rows(n_fit=120, n_cert=60))]
+    for digest, kept in ((files, True), ("0123456789abcdef", False)):
+        path = rows_file(tmp_path / "rows.jsonl", rows, model="Org/m", baseline=str(base), revision=R2,
+                         model_files=digest)
+        main([str(path), "--from-rows", "--report-only", "--targets", "0.05", "--min-per-type", "10"])
+        assert ("has other model files" in capsys.readouterr().err) is not kept
 
 
 def test_a_server_name_is_not_checked_against_the_compared_file(tmp_path, capsys, monkeypatch):
