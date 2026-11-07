@@ -1,5 +1,6 @@
 """basal-calibrate --keep-shipped (#93): a type the labels do not certify keeps the compared file's temperature and
 thresholds together, the other types are fitted, and the file says which types were kept."""
+import hashlib
 import json
 
 import pytest
@@ -142,3 +143,18 @@ def test_keep_refuses_the_thresholds_of_another_engine(tmp_path, capsys, name, e
     main(argv)
     assert json.loads(out.read_text(encoding="utf-8"))["fitted_on"]["kept_shipped"] == ["noul"]
     assert ("does not say which engine" in capsys.readouterr().err) is (refused == "warning")
+
+
+def test_the_written_file_names_the_file_its_kept_thresholds_come_from(tmp_path):
+    baseline, data, out = tmp_path / "CALIBRATION.json", tmp_path / "rows.jsonl", tmp_path / "cal.json"
+    baseline.write_text(json.dumps(dict(SHIPPED, certified_on="CERT split of the shipped data")), encoding="utf-8")
+    head = dict(basal_calibrate_rows=1, fmt=1, kind="eager", quant=None, model="stub", engine="eager",
+                data="labels.jsonl", requests=460, baseline=str(baseline), orders=None)
+    data.write_text("\n".join(json.dumps(x) for x in [head] + rows()) + "\n", encoding="utf-8")
+    main([str(data), "--from-rows", "--keep-shipped", "noul", "--targets", "0.05", "--out", str(out)])
+    fitted = json.loads(out.read_text(encoding="utf-8"))["fitted_on"]
+    assert fitted["kept_shipped_from"] == dict(file="CALIBRATION.json",
+                                               sha256=hashlib.sha256(baseline.read_bytes()).hexdigest(),
+                                               certified_on="CERT split of the shipped data")
+    main([str(data), "--from-rows", "--targets", "0.05", "--out", str(out)])
+    assert "kept_shipped_from" not in json.loads(out.read_text(encoding="utf-8"))["fitted_on"]

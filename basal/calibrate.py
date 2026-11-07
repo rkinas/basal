@@ -84,7 +84,9 @@ Method (the one the shipped files were fitted with):
     every target, since a shipped threshold is certified only with the shipped temperature. For a type the labels do
     not certify at a max_error the compared file did (the warning names it), this keeps automating it as the shipped
     file did instead of deferring it. The report shows how the kept thresholds do on this file's FIT and CERT split
-    ("kept": "shipped" in the file, fitted_on.kept_shipped lists the types); the other types are fitted as usual;
+    ("kept": "shipped" in the file, fitted_on.kept_shipped lists the types and kept_shipped_from names the file).
+    A kept threshold your FIT and CERT decisions refute is withdrawn; a pooled-only threshold (a file without per-type
+    ones) and a file of another engine are refused; the other types are fitted as usual;
   * fitted_on names the model (and its Hugging Face revision, and model_files: the identity of the snapshot's files
     but its card): basal-serve keeps a --calibration file fitted on another model, or on a revision with other model
     files, for its temperatures only (its thresholds are not applied, the answers are marked unvalidated) with a
@@ -1282,6 +1284,15 @@ def check_keep_engine(keep, baseline, path, kind, quant, preset=None):
                          "engine, or leave out --keep-shipped)")
 
 
+def kept_from(path, data):
+    """fitted_on.kept_shipped_from: the compared file the kept types come from (its name, the sha256 of its bytes and
+    its certified_on when it says), so that the written file names where their thresholds were certified."""
+    out = dict(file=Path(path).name, sha256=hashlib.sha256(Path(path).read_bytes()).hexdigest())
+    if isinstance(data.get("certified_on"), str):
+        out["certified_on"] = data["certified_on"]
+    return out
+
+
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
         min_blend=MIN_BLEND, conformal=(), keep=()):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
@@ -1750,7 +1761,7 @@ def refit(a, targets, reference, reference_name):
     cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision", "model_files")
                              if head.get(k) is not None})
     if report["kept"]:
-        cal["fitted_on"]["kept_shipped"] = report["kept"]
+        cal["fitted_on"].update(kept_shipped=report["kept"], kept_shipped_from=kept_from(base_file, baseline))
     cal["certified_on"] = "CERT split of fitted_on.data (30% by group)"
     cal["baseline"] = str(base_file) if baseline else "none"
     print(table(report))
@@ -1793,7 +1804,8 @@ def parser():
                          "keeps the shipped one")
     ap.add_argument("--keep-shipped", dest="keep_shipped", default=None,
                     help="question types (choice,noul,score) that keep the compared file's temperature and thresholds "
-                         "together instead of being fitted, e.g. a type these labels do not certify")
+                         "together instead of being fitted, e.g. a type these labels do not certify (with task "
+                         "questions only, the compared file's decision calibration is kept whole anyway)")
     ap.add_argument("--min-family", dest="min_family", type=int, default=30,
                     help="CERT decisions of a type a family needs for its leave-one-family-out ECE")
     ap.add_argument("--min-per-set", dest="min_per_set", type=int, default=30,
@@ -1996,7 +2008,7 @@ def finish(a, c, fitted, targets, small, n_bodies, units, n_task_bodies, task_re
     if c.revision and c.files:  # basal-serve applies it to another revision with the same model files (model_files)
         cal["fitted_on"]["model_files"] = c.files
     if report and report["kept"]:  # their temperatures and thresholds are the compared file's, not fitted here
-        cal["fitted_on"]["kept_shipped"] = report["kept"]
+        cal["fitted_on"].update(kept_shipped=report["kept"], kept_shipped_from=kept_from(c.base_file, c.baseline))
     if c.adapter:  # basal-serve applies the file only with this adapter (calibration_mismatch)
         cal["fitted_on"]["adapter"] = c.adapter
     if task_report:
