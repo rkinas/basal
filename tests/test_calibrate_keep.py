@@ -119,3 +119,26 @@ def test_a_pooled_only_threshold_is_not_kept_as_a_type_certificate():
         check_keep(("noul",), POOLED)
     _, report = fit(rows(), POOLED, [0.05])
     assert not any("--keep-shipped" in w for w in warnings(report, [0.05]))   # no hint at an option that refuses
+
+
+@pytest.mark.parametrize("name, extra, refused", [
+    ("CALIBRATION.json", {}, None),                               # the bf16 engines' file, read with eager: kept
+    ("custom.json", {"engine": "fast"}, None),                    # fast and eager share CALIBRATION.json
+    ("custom.json", {"engine": "gguf"}, "holds for the gguf engine"),
+    ("CALIBRATION.fp8.json", {}, "holds for the fp8 engine"),     # its name says the engine
+    ("custom.json", {}, "warning"),                               # says nothing: kept, with a warning
+])
+def test_keep_refuses_the_thresholds_of_another_engine(tmp_path, capsys, name, extra, refused):
+    baseline, data, out = tmp_path / name, tmp_path / "rows.jsonl", tmp_path / "cal.json"
+    baseline.write_text(json.dumps(dict(SHIPPED, **extra)), encoding="utf-8")
+    head = dict(basal_calibrate_rows=1, fmt=1, kind="eager", quant=None, model="stub", engine="eager",
+                data="labels.jsonl", requests=460, baseline=str(baseline), orders=None)
+    data.write_text("\n".join(json.dumps(x) for x in [head] + rows()) + "\n", encoding="utf-8")
+    argv = [str(data), "--from-rows", "--keep-shipped", "noul", "--targets", "0.05", "--out", str(out)]
+    if refused and refused != "warning":
+        with pytest.raises(SystemExit, match=f"{refused}, this run reads the bf16 one"):
+            main(argv)
+        return
+    main(argv)
+    assert json.loads(out.read_text(encoding="utf-8"))["fitted_on"]["kept_shipped"] == ["noul"]
+    assert ("does not say which engine" in capsys.readouterr().err) is (refused == "warning")

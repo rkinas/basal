@@ -96,6 +96,7 @@ import datetime
 import hashlib
 import json
 import math
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -1236,6 +1237,51 @@ def check_keep(keep, baseline):
     return tuple(t for t in PRIMS if t in keep)
 
 
+# the engines with a calibration file of their own, CALIBRATION.<engine>.json (server.calibration_name); the others
+# (fast, eager, mps, strix: the bf16 path) share CALIBRATION.json
+ENGINE_FILES = ("fp8", "nvfp4", "int8", "vllm", "sglang", "mlx", "gguf", "ollama", "llamacpp", "tpu")
+
+
+def engine_family(engine):
+    """The calibration file an engine name (calibration_name, or a file's "engine" field) stands for: its
+    CALIBRATION.<engine>.json engine (a vLLM preset: vllm), "bf16" for the engines of CALIBRATION.json, None when
+    unknown."""
+    if not engine or engine == "unknown":
+        return None
+    head = str(engine).split(".")[0]
+    return head if head in ENGINE_FILES else "bf16"
+
+
+def file_engine(data, path):
+    """The engine a compared calibration holds for (engine_family): its "engine" field (basal-calibrate writes it),
+    else its file name (CALIBRATION.json and its .o<N> / .<layout> variants: bf16; CALIBRATION.<engine>...json: that
+    engine); None when neither says (a file of another name)."""
+    if data.get("engine"):
+        return engine_family(data["engine"])
+    m = re.fullmatch(r"CALIBRATION((?:\.[^.]+)*)\.json", Path(path).name if path else "")
+    if not m:
+        return None
+    parts = m.group(1).split(".")[1:]
+    return parts[0] if parts and parts[0] in ENGINE_FILES else "bf16"
+
+
+def check_keep_engine(keep, baseline, path, kind, quant, preset=None):
+    """--keep-shipped: SystemExit when the compared file holds for another engine than this run's (its thresholds were
+    certified on that engine's probabilities, which a bf16 file's are not for GGUF or MLX); a warning when it does not
+    say which engine."""
+    if not keep or not baseline:
+        return
+    name = Path(path).name if path else "the compared calibration"
+    have, want = file_engine(baseline, path), engine_family(calibration_name(kind, quant, preset) or "fast")
+    if have is None:
+        print(f"warning: --keep-shipped: {name} does not say which engine it was fitted on (no \"engine\" field); its "
+              "kept thresholds hold only on that engine's probabilities", file=sys.stderr)
+    elif have != want:
+        raise SystemExit(f"--keep-shipped: {name} holds for the {have} engine, this run reads the {want} one: its "
+                         "thresholds were certified on that engine's probabilities (compare with the file of this "
+                         "engine, or leave out --keep-shipped)")
+
+
 def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, reference=None, min_per_set=30,
         min_blend=MIN_BLEND, conformal=(), keep=()):
     """Rows with uncalibrated probabilities -> (calibration dict, report for the table). fmt 2: calibration file 2,
@@ -1689,6 +1735,8 @@ def refit(a, targets, reference, reference_name):
         print(f"warning: {why} (the rows): its thresholds are not compared or kept (as in basal-serve)",
               file=sys.stderr)
         baseline = {k: v for k, v in baseline.items() if k not in UNVALIDATED_OUT}
+    check_keep_engine(check_keep(a.keep_shipped, baseline), baseline, base_file, head["kind"], head["quant"],
+                      head.get("vllm_preset"))
     cal, report = fit(rows, baseline, targets, a.min_per_type, head["fmt"], a.min_family, reference, a.min_per_set,
                       a.min_blend, a.conformal, a.keep_shipped)
     cal["gates"]["ece_reference"] = reference_name
@@ -1886,6 +1934,8 @@ def main(argv=None):
         if decisions and not rows:
             raise SystemExit("no decisions to fit")
         if rows:
+            check_keep_engine(check_keep(a.keep_shipped, c.baseline), c.baseline, c.base_file, c.kind, c.quant,
+                              c.preset)
             cal, report = fit(rows, c.baseline, targets, a.min_per_type, c.fmt, a.min_family, reference, a.min_per_set,
                               a.min_blend, a.conformal, a.keep_shipped)
             cal["gates"]["ece_reference"] = reference_name
