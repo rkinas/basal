@@ -112,9 +112,10 @@ from .cli import add_api_key, headers, positive, refused
 from .engine import resolve
 from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
-from .server import (MODES, UNVALIDATED_OUT, Server, _text, add_engine_args, answer_set, calibration_file,
-                     calibration_name, certified, default_mode, identity_mismatch, load_calibration, model_files_id,
-                     model_identity, refuse_lean_flex, temper, temperature, to_items, validate_baseline)
+from .server import (MODES, QUESTION_TYPES, UNVALIDATED_OUT, Server, _text, add_engine_args, answer_set,
+                     calibration_file, calibration_name, certified, check_calibration, default_mode, identity_mismatch,
+                     load_calibration, model_files_id, model_identity, refuse_lean_flex, temper, temperature, to_items,
+                     validate_baseline)
 from .sets import label_set_id
 from .sets import select as select_set
 from .textio import read_text
@@ -1323,7 +1324,7 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
         thresholds[str(float(risk))] = entry
         if (baseline.get("thresholds") or {}).get(str(float(risk))):  # the compared file as basal-serve applies it
             report["compared"][str(float(risk))] = automated_gate(cert_rows, shipped, baseline, risk)
-        old = (baseline.get("thresholds") or {}).get(str(float(risk)), {}).get("confidence")
+        old = ((baseline.get("thresholds") or {}).get(str(float(risk))) or {}).get("confidence")
         report["targets"][risk] = dict(shipped=old, shipped_cert=gate(shipped_cert, old) if old is not None else None,
                                        fitted=entry, fitted_cert=g_cert,
                                        shipped_per_type={t: c for t in PRIMS
@@ -1386,6 +1387,24 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
     return dict(temperature_per_prim=temps, temperature_source=source, thresholds=thresholds, **extra), report
 
 
+def as_served(data, path):
+    """The compared file as basal-serve reads it, checked before any readout: SystemExit where basal-serve refuses it
+    at start-up (a temperature that is no finite number above 0, a bad bucket name: check_calibration, against the
+    file's own prompt format), and its temperatures as numbers (basal-serve reads "1.2" as 1.2; the fit blended and
+    printed the text and failed after the whole readout)."""
+    if not data:
+        return data
+    check_calibration(data, data.get("prompt", 1), path)
+    out = dict(data)
+    prim, buckets = data.get("temperature_per_prim"), data.get("temperature_per_bucket")
+    if isinstance(prim, dict):
+        out["temperature_per_prim"] = {t: float(T) if t in QUESTION_TYPES else T for t, T in prim.items()}
+    if isinstance(buckets, dict):
+        out["temperature_per_bucket"] = {t: {b: float(T) for b, T in bs.items()} if t in QUESTION_TYPES else bs
+                                         for t, bs in buckets.items()}
+    return out
+
+
 def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical", adapter=None, identity=None):
     """The calibration to compare with and keep, as basal-serve would apply it with these option orders
     (server.load_calibration: the model's file for those orders when it ships one; a file fitted on other orders
@@ -1411,7 +1430,7 @@ def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"
         data = {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}
     if why:
         print(f"warning: {why}: its thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
-    return data, (f if f.exists() else None), why
+    return as_served(data, f), (f if f.exists() else None), why
 
 
 def task_rows(units, responses):
@@ -1742,7 +1761,8 @@ def refit(a, targets, reference, reference_name):
         print(f"warning: {w}", file=sys.stderr)
     base_file = None if a.no_calibration else (
         Path(a.calibration) if a.calibration else (Path(head["baseline"]) if head.get("baseline") else None))
-    baseline = json.loads(read_text(base_file)) if base_file is not None and base_file.exists() else {}
+    baseline = as_served(json.loads(read_text(base_file)), base_file) if base_file is not None and base_file.exists() \
+        else {}
     why = validate_baseline(baseline, base_file.name, head.get("orders"), head.get("layout"),
                             (head.get("model") if head.get("model") not in (None, "None") else None,
                              head.get("revision"), head.get("adapter"), None, head.get("kind"),
