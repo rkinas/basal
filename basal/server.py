@@ -708,10 +708,83 @@ def temperature(cal, q_type, k):
     return float((cal.get("temperature_per_prim") or {}).get(q_type, 1.0))
 
 
+def _sections(cal, path):
+    """The parts of a calibration file basal-serve reads must be objects (a list or a number failed at start-up or at
+    a request with a traceback) -> SystemExit naming the part."""
+    if not isinstance(cal, dict):
+        raise SystemExit(f"{path}: a calibration file is a JSON object, got {type(cal).__name__}")
+    for key in ("temperature_per_prim", "temperature_per_bucket", "thresholds", "conformal", "multi", "task_thresholds"):
+        if cal.get(key) is not None and not isinstance(cal[key], dict):
+            raise SystemExit(f"{path}: {key} must be an object, got {type(cal[key]).__name__}")
+    for t, bs in (cal.get("temperature_per_bucket") or {}).items():
+        if not isinstance(bs, dict):
+            raise SystemExit(f"{path}: temperature_per_bucket[{t!r}] must be an object of {{\"lo-hi\": T}}")
+
+
+def _share(path, where, v, key=False):
+    """A threshold-like value of a calibration file (a confidence, a p_min, a fallback threshold) -> its number:
+    None (no certificate) as it is, a number or numeric text (read as a number, as a temperature is) within 0..1;
+    else SystemExit naming it (a string was compared with a float at a request, HTTP 500). key: a max_error or
+    coverage key ("0.05"), which must read as a number."""
+    if v is None and not key:
+        return None
+    try:
+        x = float(v) if not isinstance(v, bool) else math.nan
+    except (TypeError, ValueError):
+        x = math.nan
+    if not math.isfinite(x) or not 0 <= x <= 1:
+        what = "a max_error or coverage level" if key else "a threshold"
+        raise SystemExit(f"{path}: {where} is {v!r}, {what} is a number from 0 to 1")
+    return x
+
+
+def _entries(path, where, section):
+    """{key: object} of a part of a calibration file (None: nothing), each entry an object (or None) -> SystemExit
+    naming a part or an entry that is not."""
+    if section is None:
+        return
+    if not isinstance(section, dict):
+        raise SystemExit(f"{path}: {where} must be an object, got {type(section).__name__}")
+    for k, e in section.items():
+        if e is not None and not isinstance(e, dict):
+            raise SystemExit(f"{path}: {where}[{k!r}] must be an object, got {type(e).__name__}")
+        yield k, e or {}
+
+
+def check_thresholds(cal, path):
+    """The thresholds, conformal levels, fitted fallback thresholds and task thresholds of a calibration file, as
+    basal-serve reads them at a request (certified, plain_limits, stored_fallback, tasks): objects where it reads
+    objects, and each value None, a number or numeric text within 0..1, read as a number (in place). A hand-edited
+    or corrupt file is refused at start-up with the key named, not answered 500 at a request or GET /v1/models; the
+    files basal-calibrate writes, and every published one, pass unchanged."""
+    for target, e in _entries(path, "thresholds", cal.get("thresholds")):
+        _share(path, f"thresholds key {target!r}", target, key=True)
+        if "confidence" in e:
+            e["confidence"] = _share(path, f"thresholds[{target!r}].confidence", e["confidence"])
+        for t, pe in _entries(path, f"thresholds[{target!r}].per_type", e.get("per_type")):
+            if "confidence" in pe:
+                pe["confidence"] = _share(path, f"thresholds[{target!r}].per_type[{t!r}].confidence", pe["confidence"])
+    for level, e in _entries(path, "conformal.levels", (cal.get("conformal") or {}).get("levels")):
+        _share(path, f"conformal.levels key {level!r}", level, key=True)
+        for t, pe in _entries(path, f"conformal.levels[{level!r}].per_type", e.get("per_type")):
+            if "p_min" in pe:
+                pe["p_min"] = _share(path, f"conformal.levels[{level!r}].per_type[{t!r}].p_min", pe["p_min"])
+    for sid, e in _entries(path, "multi", cal.get("multi")):
+        if e.get("fallback_threshold") is not None:
+            _share(path, f"multi[{sid!r}].fallback_threshold", e["fallback_threshold"])
+    for task, e in _entries(path, "task_thresholds", cal.get("task_thresholds")):
+        for target, thr in e.items():
+            _share(path, f"task_thresholds[{task!r}] key {target!r}", target, key=True)
+            _share(path, f"task_thresholds[{task!r}][{target!r}]", thr)
+
+
 def check_calibration(cal, fmt, path):
     """Malformed buckets or a file fitted for another prompt format are refused at start-up, not on a request. A
     temperature is refused only when temperature() would break on it (float() of it fails, or it is NaN, infinite,
-    0 or below); "1.2" as a string is read as before, and a key that is not a question type is never looked up."""
+    0 or below); "1.2" as a string is read as before, and a key that is not a question type is never looked up. The
+    parts it reads are objects, and its thresholds are checked as it reads them (check_thresholds)."""
+    _sections(cal, path)
+    check_thresholds(cal, path)
     for t, bs in (cal.get("temperature_per_bucket") or {}).items():
         for b in bs:
             if not re.fullmatch(r"\d+-\d+", b) or int(b.split("-")[0]) > int(b.split("-")[1]):
