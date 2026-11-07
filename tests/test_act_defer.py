@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 from test_server import FakeServer
 
 from basal.prompt import RequestError
-from basal.server import act_spec, check_body, http_app
+from basal.server import act_spec, check_body, cost_rows, http_app
 
 CAL = {"temperature_per_prim": {"choice": 1.0},
        "thresholds": {"0.05": {"confidence": 0.9, "per_type": {"choice": {"confidence": 0.9}}}}}
@@ -76,4 +76,5 @@ def test_an_outcome_named_defer_does_not_overwrite_the_defer_costs():
     with pytest.raises(RequestError, match="defer"):
         act_spec("q", {"type": "act", "costs": {"wrong": 1, "defer": 0.2}}, ["defer", "accept"])
     spec = act_spec("q", {"type": "act", "costs": {"wrong": 1, "defer": 0.2}}, ["yes", "no"])   # control
-    assert spec["costs"]["defer"] == {"yes": 0.2, "no": 0.2} and spec["costs"]["yes"] == {"yes": 0.0, "no": 1.0}
+    rows = cost_rows(spec)
+    assert rows["defer"] == {"yes": 0.2, "no": 0.2} and rows["yes"] == {"yes": 0.0, "no": 1.0}

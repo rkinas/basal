@@ -414,7 +414,11 @@ def _cost(name, v):
 
 
 def act_spec(name, q, outcomes):
-    """Cost matrix C[action][outcome] from the full form or the short form {"wrong": W, "defer": D}."""
+    """The costs of an act question -> {costs: C[action][outcome] of the full form (None for the short form), short:
+    (W, D or None) of the short form {"wrong": W, "defer": D} (None for the full form), outcomes, defer, max_error}.
+    The short form is kept as its two numbers: its matrix (W off the diagonal, a defer row of D) is outcomes x
+    outcomes, built for every act question of a request at admission (255 outcomes: 1.6 MiB each), and
+    expected_costs reads the same costs from the two numbers."""
     max_error = q.get("max_error")
     if max_error is not None:
         try:
@@ -425,17 +429,17 @@ def act_spec(name, q, outcomes):
     if not isinstance(costs, dict) or not costs:
         raise RequestError(f"question {name!r}: act needs costs")
     if set(costs) <= {"wrong", "defer"} and not isinstance(costs.get("wrong"), dict):
-        w = _cost(name, costs["wrong"])
-        C = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
+        w, d = _cost(name, costs["wrong"]), None
         if "defer" in costs:
             if "defer" in outcomes:
                 raise RequestError(f"question {name!r}: an outcome named 'defer' clashes with the defer action of costs")
-            C["defer"] = {z: _cost(name, costs["defer"]) for z in outcomes}
+            d = _cost(name, costs["defer"])
         defer = "defer" if "defer" in costs else None
         if q.get("defer_action") is not None and q["defer_action"] != defer:  # the short form has one defer action: "defer"
             raise RequestError(f"question {name!r}: defer_action {q['defer_action']!r} must be 'defer' and costs must give "
                                f"'defer' (the short form {{\"wrong\": W, \"defer\": D}} has no other action)")
-        return _needs_defer(name, dict(costs=C, defer=defer, max_error=max_error))
+        return _needs_defer(name, dict(costs=None, short=(w, d), outcomes=list(outcomes), defer=defer,
+                                       max_error=max_error))
     for a, row in costs.items():
         if not isinstance(row, dict) or set(row) != set(outcomes):
             raise RequestError(f"question {name!r}: costs[{a!r}] must give a cost for every outcome {outcomes}")
@@ -443,7 +447,32 @@ def act_spec(name, q, outcomes):
     defer = q.get("defer_action") or next((a for a in ("defer", "human") if a in C), None)
     if defer not in C and q.get("defer_action") is not None:
         raise RequestError(f"question {name!r}: defer_action {defer!r} is not among the actions {list(C)}")
-    return _needs_defer(name, dict(costs=C, defer=defer, max_error=max_error))
+    return _needs_defer(name, dict(costs=C, short=None, outcomes=list(outcomes), defer=defer, max_error=max_error))
+
+
+def expected_costs(spec, probs):
+    """{action: expected cost} of an act question (act_spec) under the outcome probabilities `probs`, in the order of
+    its actions (the outcomes, then "defer", for the short form; the order given for the full form). The short form
+    sums each action's row as its matrix held it, term for term in the outcomes' order (0.0 on the diagonal, W
+    elsewhere; D on the defer row), so the sums are the same floats as from the matrix."""
+    if spec.get("short") is None:
+        return {a: sum(probs[z] * c for z, c in row.items()) for a, row in spec["costs"].items()}
+    (w, d), outcomes = spec["short"], spec["outcomes"]
+    exp = {y: sum(probs[z] * (0.0 if z == y else w) for z in outcomes) for y in outcomes}
+    if d is not None:
+        exp["defer"] = sum(probs[z] * d for z in outcomes)
+    return exp
+
+
+def cost_rows(spec):
+    """The cost matrix C[action][outcome] of an act question, as the full form gives it (tests, tools)."""
+    if spec.get("short") is None:
+        return spec["costs"]
+    (w, d), outcomes = spec["short"], spec["outcomes"]
+    rows = {y: {z: 0.0 if z == y else w for z in outcomes} for y in outcomes}
+    if d is not None:
+        rows["defer"] = {z: d for z in outcomes}
+    return rows
 
 
 def _needs_defer(name, spec):
@@ -618,7 +647,7 @@ def act_answer(q, probs, conf, cal):
     """Minimum expected cost action; with max_error, automatic actions below the certified threshold of the question's
     type are refused, and all of them when the type has no certified threshold for that target (`deferred`)."""
     spec = q["act"]
-    exp = {a: sum(probs[z] * c for z, c in row.items()) for a, row in spec["costs"].items()}
+    exp = expected_costs(spec, probs)
     action = min(exp, key=exp.get)
     ans = {"type": "act", "action": action, "expected_costs": {a: round(v, 6) for a, v in exp.items()},
            "answer": max(probs, key=probs.get), "probabilities": probs, "confidence": conf}
