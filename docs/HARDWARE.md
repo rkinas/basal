@@ -231,9 +231,10 @@ RTX PRO 6000 Blackwell Max-Q (96 GB):
 | basal-omni-1.0-ultra (bf16) | `fast` | 834 / 1,136 ms | 1.13 / 1.13 / 1.12 / 1.11 / 1.12 | 67.6 GB |
 | | `fast --deterministic` | 835 / 1,136 ms | 1.14 / 1.14 / 1.14 / 1.14 / 1.14 | 68.4 GB |
 
-- **At this length, more clients do not add throughput.** basal reads the answer from one forward pass over the state
-  and the options, with no token-by-token decoding, and one 3k-token prefill already keeps the GPU busy. 32 clients get
-  the decisions/s of one, and the requests wait for each other. 0 errors in every run.
+- **A uniform batch of 3k-token states has no knee: one client already reaches the ceiling.** basal reads the answer
+  from one forward pass over the state and the options, with no token-by-token decoding, and one 3k-token prefill
+  already keeps the GPU busy. 32 clients get the decisions/s of one, and the requests wait for each other. 0 errors in
+  every run.
 - **`--deterministic` costs nothing here.** It matched or beat the batching default: ultra-FP8 1.63 against 1.45–1.50
   decisions/s, mini 12.7 against 11.6–12.2. Each request runs in its own forward passes with deterministic kernels, so
   an answer does not depend on the other requests ([SERVING.md](SERVING.md)). Where batching does pay (short states,
