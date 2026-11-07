@@ -2536,10 +2536,15 @@ class Server:
 
     def log_decision(self, body, out):
         """Propensity log (one JSON line per request): the served probabilities q(a) of every question, so production
-        feedback can later be used off-policy. `reviewed` is filled in by the caller's feedback, not here."""
+        feedback can later be used off-policy. `reviewed` is filled in by the caller's feedback, not here.
+        request_sha256: the sha256 of the request's state and questions, and of its media and language when it has
+        them; the "images" alias is keyed as the media items it stands for (the think server logs the request as it
+        came, decide() as it turned it into media)."""
         payload = [body.get("state"), body.get("questions")]
+        items = body.get("media") if body.get("media") is not None else \
+            images_as_media(body["images"]) if body.get("images") is not None else []
         media = [hashlib.sha256(str(m.get("data", "") if isinstance(m, dict) else m).encode()).hexdigest()
-                 for m in (body.get("media") or body.get("images") or [])]
+                 for m in items]
         if media or body.get("lang"):  # (a request without them keeps the key it always had)
             payload += [media, body.get("lang")]
         h = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()

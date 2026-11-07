@@ -217,7 +217,10 @@ benchmarking a GPU.
 - `--max-len N` sets the context length of the `vllm` and `sglang` modes (default 4096): `--max-len 32768` for long
   documents. The `fast` mode is not affected.
 - `--log-decisions file.jsonl` appends one line per request with the served probabilities (a propensity log, for later
-  use of production feedback).
+  use of production feedback): `ts`, `model`, `request_sha256`, `reviewed` (null, for your feedback) and per question
+  its `type`, answer, `probabilities` and `confidence`. Each line is strict JSON: a NaN or infinite number is written
+  as null. `request_sha256` is the sha256 of the request's state and questions and, from 2.8, of its media (each
+  item's sha256) and `lang` when the request has them; a request without either keeps the key of earlier releases.
 - `--rank-max-candidates N` (default 10,000): the most candidates of `rank` questions in one request (HTTP 422 above);
   every 50 of them are one engine request through the queue all clients share. [NAVIGATE.md](NAVIGATE.md)
 - **Status codes and load (2.3.1)**: an invalid request answers HTTP 422, the GPU out of memory 503 (retry later or
