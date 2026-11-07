@@ -47,6 +47,35 @@ def test_a_stalled_escalation_level_keeps_the_first_answers():
         assert rt.load == {GOOD: 0, STUCK: 0}
 
 
+def test_one_slow_request_leaves_its_replica_in_rotation():
+    """A call past the deadline was slow, not a replica that is down: the other clients' requests still go to it
+    (the router's own /health stays 200). A replica that cannot be reached at all leaves the rotation as before."""
+    async def handler(req):
+        if req.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        body = __import__("json").loads(req.content)
+        if body["state"] == "slow":
+            await asyncio.sleep(60)
+        ans = {q: {"type": "choice", "choice": "a", "probabilities": {"a": 0.9, "b": 0.1}} for q in body["questions"]}
+        return httpx.Response(200, json={"answers": ans, "model": GOOD})
+    rt = R.Router([GOOD], transport=httpx.MockTransport(handler), timeout=0.3)
+    with TestClient(R.app(rt, poll_s=60)) as c:
+        asyncio.run(rt.poll())
+        assert c.post("/v1/systemone", json={"state": "slow", "questions": {"q": {}}}).status_code == 504
+        assert c.post("/v1/systemone", json={"state": "fast", "questions": {"q": {}}}).status_code == 200
+        assert GOOD in rt.ready and c.get("/health").status_code == 200
+
+    async def unreachable(req):
+        if req.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        raise httpx.ConnectTimeout("connect timed out", request=req)
+    rt = R.Router([GOOD], transport=httpx.MockTransport(unreachable), timeout=0.3)
+    with TestClient(R.app(rt, poll_s=60)) as c:
+        asyncio.run(rt.poll())
+        r = c.post("/v1/systemone", json={"state": "s", "questions": {"q": {}}})
+        assert r.status_code == 504 and "connecting" in r.json()["error"] and GOOD not in rt.ready
+
+
 def test_without_a_timeout_requests_have_no_deadline_but_connecting_has_one():
     rt = R.Router([GOOD], transport=transport({}))
     t = rt.client.timeout

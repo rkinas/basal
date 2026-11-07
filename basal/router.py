@@ -693,7 +693,8 @@ class Router:
             return resp.status_code, resp.content, resp.headers.get("content-type", "application/json")
         except (asyncio.TimeoutError, httpx.TimeoutException) as e:
             self.failed[r] += 1
-            self.ready.discard(r)  # (until its next /health poll)
+            if isinstance(e, httpx.ConnectTimeout):  # unreachable: out until its next /health poll. A call past the
+                self.ready.discard(r)  # deadline was slow (a large rank request): the replica stays in rotation
             what = "connecting" if isinstance(e, httpx.ConnectTimeout) else f"after {self.timeout:g} s"
             return 504, json.dumps({"error": f"replica {r}: timed out {what}"}).encode(), "application/json"
         except Exception as e:  # noqa: BLE001
