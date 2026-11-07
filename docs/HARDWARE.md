@@ -231,14 +231,23 @@ RTX PRO 6000 Blackwell Max-Q (96 GB):
 | basal-omni-1.0-ultra (bf16) | `fast` | 834 / 1,136 ms | 1.13 / 1.13 / 1.12 / 1.11 / 1.12 | 67.6 GB |
 | | `fast --deterministic` | 835 / 1,136 ms | 1.14 / 1.14 / 1.14 / 1.14 / 1.14 | 68.4 GB |
 
-- **A uniform batch of 3k-token states has no knee: one client already reaches the ceiling.** basal reads the answer
-  from one forward pass over the state and the options, with no token-by-token decoding, and one 3k-token prefill
-  already keeps the GPU busy. 32 clients get the decisions/s of one, and the requests wait for each other. 0 errors in
-  every run.
-- **`--deterministic` costs nothing here.** It matched or beat the batching default: ultra-FP8 1.63 against 1.45–1.50
-  decisions/s, mini 12.7 against 11.6–12.2. Each request runs in its own forward passes with deterministic kernels, so
-  an answer does not depend on the other requests ([SERVING.md](SERVING.md)). Where batching does pay (short states,
-  several questions per request), see [Long states under load](#long-states-under-load-one-h100).
+H100 80 GB (with FlashAttention 3 installed; the `fast` default then runs it, with compact rows):
+
+| model | server | p50 / p95, one client | decisions/s at 1 / 4 / 8 / 16 / 32 clients | GPU memory |
+|---|---|---|---|---|
+| basal-omni-1.0-mini | `fast` | 37 / 47 ms | 26.7 / 30.5 / 31.5 / 31.5 / 31.5 | 18.9 GB |
+| | `fast --deterministic` | 38 / 48 ms | 26.6 / 29.8 / 29.8 / 29.8 / 29.8 | 19.2 GB |
+
+- **The knee of a uniform batch of 3k-token states.** On the RTX PRO 6000 Blackwell there is none: one client already
+  reaches the ceiling, and 32 clients get the decisions/s of one. On the H100 it comes at 4–8 clients: mini goes from
+  26.7 to 31.5 decisions/s (+18%) and stays there up to 32. basal reads the answer from one forward pass over the
+  state and the options, with no token-by-token decoding, so one 3k-token prefill already keeps the GPU busy, and more
+  clients wait for each other. 0 errors in every run.
+- **`--deterministic` costs little or nothing at this length.** On the RTX PRO 6000 it matched or beat the batching
+  default: ultra-FP8 1.63 against 1.45–1.50 decisions/s, mini 12.7 against 11.6–12.2. On the H100 it gives 29.8
+  decisions/s against 30.5 at 4 clients (−2%) and against 31.5 from 8 on (−5%). Each request runs in its own forward passes with deterministic
+  kernels, so an answer does not depend on the other requests ([SERVING.md](SERVING.md)). Where batching does pay
+  (short states, several questions per request), see [Long states under load](#long-states-under-load-one-h100).
 - **The bf16 ultra fits on the 96 GB card** (68.4 GB at its peak). The `-FP8` checkpoint gives 1.44× its throughput
   (1.63 against 1.13 decisions/s) in 48 GB.
 
