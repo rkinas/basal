@@ -142,3 +142,21 @@ def test_lean_tree_auto():
     assert lean_tree("auto", "flex", "graph") == ("pass2", "flex")
     assert lean_tree("on", "auto", "graph") == ("on", "dense")
     assert lean_tree("pass2", "dense", "graph") == ("pass2", "dense")
+
+
+@pytest.mark.parametrize("env, want", [(None, {"options": {"triton.autotune_pointwise": False}}), ("1", {})])
+def test_compiled_llama_functions_time_no_pointwise_kernels(monkeypatch, env, want):
+    """The compiled Llama code (the lean layer here; the forwards, the early-exit segments and the cascade's merge
+    through the same compile_llama) has Inductor's pointwise autotuning off: a pointwise kernel's block shapes are
+    timed within noise of each other and some give other last bits, so each cold start of basal-2.0-mini could keep
+    other shapes and give other answers (3 sets in 4 starts on an H100). BASAL_POINTWISE_AUTOTUNE=1 times them."""
+    import basal.engine as E
+    seen = []
+    monkeypatch.setattr(torch, "compile", lambda fn, **kw: seen.append(kw) or fn)
+    if env is None:
+        monkeypatch.delenv("BASAL_POINTWISE_AUTOTUNE", raising=False)
+    else:
+        monkeypatch.setenv("BASAL_POINTWISE_AUTOTUNE", env)
+    Lean(tiny(), compile=True)
+    E._merge_fused.__wrapped__()  # (functools.cache: one compile per process)
+    assert seen == [{**want, "dynamic": True}, {**want, "dynamic": True, "fullgraph": True}]

@@ -115,7 +115,8 @@ class Lean:
             self.layers.append((layer.input_layernorm.weight, layer.post_attention_layernorm.weight,
                                 tuple(_params(x) for x in qkv), _params(a.o_proj), tuple(_params(x) for x in gu),
                                 _params(m.down_proj)))
-        self.layer = torch.compile(self._layer, dynamic=True) if compile else self._layer
+        from .engine import compile_llama  # (pointwise kernels untimed, as every compiled Llama function)
+        self.layer = compile_llama(self._layer, dynamic=True) if compile else self._layer
 
     def rms(self, x, w):
         xf = x.float()

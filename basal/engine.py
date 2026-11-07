@@ -948,6 +948,20 @@ def _cascade_varlen(q, k, v, kp, vp, tree, scale):
     return (_merge_fused() if tree.fused else _merge_attention)(o_r, l_r, o_b, l_b).view(B, S, H, d)
 
 
+def compile_llama(fn, **kw):
+    """torch.compile for the compiled functions of the graph engine's Llama forward (the forwards, the per-layer step,
+    the lean layer, the early-exit segments, the cascade's merge), with Inductor's pointwise autotuning off: each
+    pointwise kernel takes its first candidate config, untimed. Timed, a kernel's block shapes are within noise of each
+    other, and some of them give other last bits: run on the same inputs, 6 of 28 of basal-2.0-mini's pointwise kernels
+    (the fused rotary embeddings) changed a few elements with the block shape (H100, torch 2.11). So each cold start
+    kept other shapes and could land in another answer set: 3 sets in 4 starts of basal-2.0-mini on an H100, and giving
+    a start the configs another start had timed gave that start's answers byte for byte. BASAL_POINTWISE_AUTOTUNE=1:
+    timed, as before."""
+    if os.environ.get("BASAL_POINTWISE_AUTOTUNE") == "1":
+        return torch.compile(fn, **kw)
+    return torch.compile(fn, options={"triton.autotune_pointwise": False}, **kw)
+
+
 @functools.cache
 def _merge_fused():
     """_merge_attention compiled for _cascade_varlen (dynamic shapes; a GraphBackend that compiles, with Triton): one
@@ -955,7 +969,7 @@ def _merge_fused():
     which the uncompiled pass 2 launched one by one: on a fast GPU the GPU then waits for the host, and basal-2.0-mini's
     40-question requests ran 0.90x as fast as the dense pass on an H100 (#39). The same operations in the same order in
     fp32 (Inductor's exp is libdevice's, as ATen's). GraphBackend._warm_cascade compiles it at start-up."""
-    return torch.compile(_merge_attention, dynamic=True, fullgraph=True)
+    return compile_llama(_merge_attention, dynamic=True, fullgraph=True)
 
 
 def _layer_call(layer, h, mask, pe, pos, kv):
@@ -1439,7 +1453,7 @@ class GraphBackend(EagerBackend):
         if self.compact and self.gemma is not None:  # its forward reads out at one row per prompt
             self.fwd_c, self.readout_layer = self.gemma.forward_compact, True
         elif self.compact:
-            self.fwd_c = torch.compile(self._forward_compact, dynamic=True) if compile else self._forward_compact
+            self.fwd_c = compile_llama(self._forward_compact, dynamic=True) if compile else self._forward_compact
             last = self.model.model.layers[-1]
             self.readout_layer = readout_layer in ("on", "auto") and type(last).__name__ == "LlamaDecoderLayer" \
                 and type(last.self_attn).__name__ == "LlamaAttention" and type(last.mlp).__name__ == "LlamaMLP"
@@ -1543,10 +1557,10 @@ class GraphBackend(EagerBackend):
             # pass 2 stays uncompiled: compiled graphs for its (rows, branch length, root length) grid took minutes
             # to capture; its graphs replay the normal forward
             if compile == "layer":  # --compile-scope layer: one compiled layer function (_forward_by_layer)
-                self._layer_step = torch.compile(_layer_call, dynamic=True)
+                self._layer_step = compile_llama(_layer_call, dynamic=True)
                 self.fwd = self._forward_by_layer
             else:
-                self.fwd = torch.compile(self._forward, dynamic=True)
+                self.fwd = compile_llama(self._forward, dynamic=True)
 
     @property
     def _dtype(self):
@@ -3070,7 +3084,7 @@ class ExitGraphBackend(GraphBackend):
         if compile:
             import torch._dynamo as dynamo
             dynamo.config.cache_size_limit = 64
-            self.segs = [torch.compile(f, dynamic=True) for f in self.segs]
+            self.segs = [compile_llama(f, dynamic=True) for f in self.segs]
         self.stats = {}
         self._kv = None  # its segments read whole masked rows: the key / value buffer of pass 1 is never used
         if self.dev.type == "cuda":
