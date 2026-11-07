@@ -109,7 +109,12 @@ one shared state (SOAM); asking them in one request is faster than separate requ
 - `GET /v1/models` returns `{"models": [{"name", "description", "release_date", "mode", "early_exit",
   "temperature_per_prim", "certified", "context"}]}`. `certified` maps each `max_error` target to certified confidence
   thresholds by question type (omitted when the calibration does not match); `context` reports the limit, overflow policy
-  and truncation head share. `release_date` is the engine's release date, not the model's.
+  and truncation head share. `release_date` is the engine's release date, not the model's. `revision` and
+  `model_files` (2.8) are the Hugging Face commit the server serves and the digest of its model files
+  ([CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to)), what `basal-calibrate --url` records in
+  `fitted_on`. They are always present, and null when the model is not a Hugging Face cache snapshot (a local
+  directory) or its files cannot be read without opening them (`model_files` only; also null for `--mode gguf`,
+  `ollama` and `llamacpp`).
 - `GET /health` returns `{"status": "ok", "running": R, "queued": Q}` (2.3.1). The counts cover the decision requests
   in flight (`/v1/systemone`, `/v1/basal` and MCP tool calls), from the moment the server has read a request until its
   answer or error. `queued` counts those waiting for the engine: all their queue entries are still in the server's

@@ -1406,7 +1406,7 @@ def as_served(data, path, fmt=None):
 
 
 def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical", adapter=None, identity=None,
-             fmt=None):
+             fmt=None, served=None):
     """The calibration to compare with and keep, as basal-serve would apply it with these option orders
     (server.load_calibration: the model's file for those orders when it ships one; a file fitted on other orders
     without its thresholds; with --adapter the adapter's file, else the model's without its thresholds) and, with
@@ -1414,7 +1414,8 @@ def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"
     another model, revision or adapter (as basal-serve keeps an own file: validate_baseline) -> (calibration, its file
     or None, why its thresholds were left out or None). --url to a server with --adapter (adapter None, the adapter's
     identity in `identity`): the model's file is the base model's, without its thresholds, as load_calibration keeps
-    it in process."""
+    it in process. served: (snapshot, model_files digest) the identity's revision is checked on instead of md, when
+    md is not that revision's snapshot (--url to a server that runs another revision: (None, its digest))."""
     if off or (md is None and not path):
         return {}, None, None
     if orders is None:  # a server that does not report its orders: the file as it is
@@ -1423,7 +1424,8 @@ def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"
     else:
         data, f, why = load_calibration(md, kind, path, quant, orders, preset=preset, layout=layout, adapter=adapter)
     if why is None and identity is not None and data:
-        mismatch = identity_mismatch(data, *identity, md=md, kind=kind)
+        imd, files = served if served is not None else (md, None)
+        mismatch = identity_mismatch(data, *identity, md=imd, kind=kind, files=files)
         if mismatch:
             why, data = f"{f.name}: {mismatch}", {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}
     if why is None and adapter is None and identity is not None and identity[2] and not path and data:
@@ -1908,6 +1910,32 @@ def labelled(a, targets):
     return bodies, decisions, task_bodies, units, small
 
 
+def server_identity(c, entry, a):
+    """--url --model <repo id>: the revision and model files fitted_on records are the ones the server serves
+    (GET /v1/models, 2.8), not those of the revision the local cache resolves --model to (c.revision, c.files),
+    which may be another one. c.served: what the compared file's identity is checked against when they differ (no
+    snapshot of the server's revision here, its model_files digest). As before: --model that is no repo id (no
+    revision), and a server that serves no cache snapshot (revision null). A server before 2.8 does not report them:
+    the cache's are kept, with a warning."""
+    local = c.revision
+    if not local:
+        return
+    if "revision" not in entry:
+        print(f"warning: the server does not report the revision it serves (basal-serve before 2.8): fitted_on "
+              f"records {local[:12]}, the revision the local cache resolves {a.model} to; if the server runs another "
+              "one, pass it with --revision", file=sys.stderr)
+        return
+    if not entry["revision"]:
+        return
+    c.revision = entry["revision"]
+    c.files = entry.get("model_files") or (c.files if local == c.revision else None)
+    if local != c.revision:
+        c.served = (None, c.files)
+        print(f"warning: the server serves revision {c.revision[:12]} of {c.model}, the local cache resolves "
+              f"{a.model} to {local[:12]}: fitted_on records the server's, and the file compared with is the "
+              f"cache's (--revision {c.revision} compares with the server's own)", file=sys.stderr)
+
+
 def http_context(a):
     """--url: the running server (it must serve raw probabilities) and the calibration to compare with -> the engine
     context (base URL, mode, engine text, adapter identity, orders, kind, quant, preset, model, revision, model files,
@@ -1933,15 +1961,18 @@ def http_context(a):
     md = resolve(a.model, a.revision, metadata_only=True) if a.model else None
     c.model, c.revision = model_identity(a.model, md) if md is not None else (a.model or entry.get("name"), None)
     c.files = model_files_id(md, c.kind) if md is not None else None  # (when the cache holds the weights too)
+    c.served = None
+    if md is not None:  # the revision and model files the server serves (2.8)
+        server_identity(c, entry, a)
     c.fmt = entry.get("prompt_format") or (model_format(md) if md is not None else 1)
     # the layout the server reads prompts in (servers before 2.4.1 and canonical ones do not say)
     a.layout = getattr(a, "layout", None) or entry.get("layout") or (model_layout(md) if md is not None
                                                                       else "canonical")
     # without --model the server's name stands in for the model (its --name, or the folder's name with "+adapter"): no
     # identity to check the compared file against
+    identity = (c.model, c.revision, c.adapter) if md is not None else None
     c.baseline, c.base_file, c.base_why = compared(md, c.kind, a.calibration, c.quant, c.orders, a.no_calibration,
-                                                   c.preset, a.layout, fmt=c.fmt,
-                                                   identity=(c.model, c.revision, c.adapter) if md is not None else None)
+                                                   c.preset, a.layout, fmt=c.fmt, identity=identity, served=c.served)
     return c
 
 

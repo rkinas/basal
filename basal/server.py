@@ -968,12 +968,14 @@ def order_average_arg(value):
 
 def models_payload(name, mode, policies, temperatures=None, prompt_format=None, orders=None, media=(),
                    calibration_warning=None, vllm_preset=None, layout=None, two_way=None, option_isolation=False,
-                   certified=None, context=None, adapter=None, buckets=None):
+                   certified=None, context=None, adapter=None, buckets=None, revision=None, model_files=None):
     """GET /v1/models in the official ModelMetadataList shape, plus the serving mode, early-exit levels, the
     temperatures in use ({} = uncalibrated probabilities, what basal-calibrate needs from a running server), the
     model's prompt format, the option orders served, why the --calibration file may not belong to the model, the
     --vllm-preset (--mode vllm), the two-way limits of a model trained with two-way reading, whether its options
-    are read in isolated blocks and the --adapter identity (name@hash)."""
+    are read in isolated blocks and the --adapter identity (name@hash). revision and model_files (2.8): the Hugging
+    Face commit served and its model_files digest, null when the model is no cache snapshot (or the digest cannot be
+    read); always present, so basal-calibrate --url tells a server that does not know them from an older one."""
     entry = {"name": name, "release_date": RELEASE_DATE,
              "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and "
                             "English",
@@ -1001,6 +1003,7 @@ def models_payload(name, mode, policies, temperatures=None, prompt_format=None, 
         entry["context"] = context
     if adapter:  # the LoRA adapter merged at load (basal-calibrate --url records it)
         entry["adapter"] = adapter
+    entry["revision"], entry["model_files"] = revision, model_files  # (basal-calibrate --url records them)
     return {"models": [entry]}
 
 
@@ -1638,6 +1641,8 @@ class Server:
         self.evidence = Evidence(md, model, self.tok, self.fmt) if isinstance(model, torch.nn.Module) \
             and not self.adapter else None
         self.md, self.kind = md, kind
+        # GET /v1/models: the commit and model files served (basal-calibrate --url records them in fitted_on)
+        self.revision, self.model_files = model_identity(a.model, md)[1], model_files_id(md, kind)
         self.context = context_limit(md, self.backend)
         self.cal, cal, self.cal_unvalidated = load_calibration(md, kind, a.calibration, quant, self.orders,
                                                                 a.no_calibration, getattr(a, "vllm_preset", None),
@@ -3173,7 +3178,9 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                                            context={"limit": srv.context[0] if srv.context else None,
                                                     "overflow": srv.overflow, "truncate_head": srv.trunc_head},
                                            adapter=srv.adapter.identity if getattr(srv, "adapter", None) else None,
-                                           buckets=srv.cal.get("temperature_per_bucket")))
+                                           buckets=srv.cal.get("temperature_per_bucket"),
+                                           revision=getattr(srv, "revision", None),
+                                           model_files=getattr(srv, "model_files", None)))
 
     async def health(_):
         body, status = srv.health() if hasattr(srv, "health") else ({"status": "ok", **srv.load()}, 200)

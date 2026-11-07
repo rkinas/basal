@@ -343,6 +343,14 @@ few decisions, and its thresholds and task thresholds are neither compared nor k
 no longer copies them into the new file). With `--url` and no `--model`, the served model is known only by
 the server's name, so the file is not checked.
 
+With `--url` and `--model` (a repository ID), `fitted_on.revision` and `fitted_on.model_files` are the ones the server
+serves, as it reports them in `GET /v1/models` (2.8). Before, they were those of the revision the local cache resolves
+`--model` to, which may be another one: a server pinned to an older revision got main's commit. When the two differ,
+basal-calibrate warns, records the server's, and judges the file it compares with (`--calibration`) by the server's
+model files; the shipped file it compares with is still the cache's (`--revision <commit>` takes the server's own). A
+server that serves no cache snapshot (`revision` null) and a server before 2.8 (no `revision` field) leave the cache's
+revision in the file, as before; for the latter basal-calibrate warns: pass the server's revision with `--revision`.
+
 A revision that changes only the model card holds the same model files, so the file is applied with its thresholds.
 A file without `fitted_on.model_files` (written before basal-calibrate recorded it) is compared through the cache:
 when the cache holds the snapshot of the fitted revision with the same files as the served one (as after an update on
