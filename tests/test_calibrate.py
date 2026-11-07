@@ -230,6 +230,7 @@ def test_a_cache_snapshot_is_recorded_as_its_repo_id_and_commit(tmp_path, monkey
     md = tmp_path / (f"models--Remek--x/snapshots/{sha}" if snapshot else "plain")
     md.mkdir(parents=True)
     (md / "CALIBRATION.json").write_text(json.dumps(SHIPPED), encoding="utf-8")
+    (md / "model.safetensors").write_bytes(b"\x00" * 64)  # (a model folder holds weights: the plain one is matched by them)
     monkeypatch.setattr(server_module, "resolve", lambda *_, **__: md)
     monkeypatch.setattr(server_module, "EagerBackend", StubBackend)
     synthetic(tmp_path / "labelled.jsonl")
@@ -239,7 +240,7 @@ def test_a_cache_snapshot_is_recorded_as_its_repo_id_and_commit(tmp_path, monkey
     if snapshot:
         assert (fitted["model"], fitted["revision"]) == ("Remek/x", sha)
     else:
-        assert fitted["model"] == str(md) and "revision" not in fitted
+        assert fitted["model"] == str(md) and "revision" not in fitted and fitted["model_content"]
     capsys.readouterr()
     srv = Server(parser().parse_args(["--mode", "eager", "--model", str(md), "--calibration", str(out),
                                       "--strict-calibration"]))

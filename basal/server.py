@@ -1195,6 +1195,43 @@ def files_digest(files):
     return hashlib.sha256("".join(f"{k}\t{s}\t{b}\n" for k, (s, b) in sorted(files.items())).encode()).hexdigest()[:16]
 
 
+SAMPLE = 2**20  # model_content: bytes read at the start, the middle and the end of a file larger than 3 of them
+
+
+def model_content(md):
+    """{path: (size, sha256 of its content sampled)} of the files of a model folder that make its answers (all but
+    NOT_MODEL_FILES and hidden paths such as a download's .cache/), read through links, for any folder (a Hugging Face
+    snapshot too): a file up to 3 MiB whole, a larger one by its first, middle and last MiB, so a few MiB are read
+    per file, never the weights whole. Two copies of the same files give the same; two checkpoints differ in their
+    weights' bytes throughout. None when md is no folder or holds no weights."""
+    p = Path(md) if md is not None else None
+    if p is None or not p.is_dir():
+        return None
+    out = {}
+    for f in sorted(p.rglob("*")):
+        rel = f.relative_to(p).as_posix()
+        hidden = any(part.startswith(".") for part in rel.split("/"))
+        if not f.is_file() or hidden or any(fnmatchcase(rel, x) for x in NOT_MODEL_FILES):
+            continue
+        size, h = f.stat().st_size, hashlib.sha256()
+        with open(f, "rb") as fh:
+            if size <= 3 * SAMPLE:
+                h.update(fh.read())
+            else:
+                for at in (0, size // 2 - SAMPLE // 2, size - SAMPLE):
+                    fh.seek(at)
+                    h.update(fh.read(SAMPLE))
+        out[rel] = (size, h.hexdigest())
+    return out if any(r.endswith(WEIGHTS) for r in out) else None
+
+
+def model_content_id(md, kind=None):
+    """fitted_on.model_content of a model folder (16 hex digits over model_content), None when it has none or the
+    engine serves weights the folder does not hold (WEIGHTS_ELSEWHERE)."""
+    files = model_content(md) if kind not in WEIGHTS_ELSEWHERE else None
+    return None if files is None else files_digest(files)
+
+
 def model_files_id(md, kind=None):
     """fitted_on.model_files of a served model (files_digest), None when model_files has none or the engine serves
     weights the model directory does not hold (WEIGHTS_ELSEWHERE)."""
@@ -1240,18 +1277,29 @@ def calibration_mismatch(cal, name, md, adapter=None, kind=None):
     return identity_mismatch(cal, model, rev, adapter.identity if adapter else None, md, kind)
 
 
-def identity_mismatch(cal, model, rev, adapter=None, md=None, kind=None, files=None):
+def identity_mismatch(cal, model, rev, adapter=None, md=None, kind=None, files=None, content=None):
     """calibration_mismatch on an identity already resolved: model (repo id or path), its revision (None: unknown),
     the adapter's identity (None: no adapter) and, for another revision (revision_mismatch), the served snapshot md and
-    engine kind, or the served model_files digest `files` when there is no snapshot to read (a --save-rows file)."""
+    engine kind, or the served model_files digest `files` when there is no snapshot to read (a --save-rows file).
+    A side without a revision (a local folder): the files decide when the file records them (fitted_on.model_content,
+    against `content` or model_content_id(md)), whatever the folders are called, so two copies of the same weights
+    match and another checkpoint in a folder of the same name does not; a file without them is matched by the name."""
     fitted = cal.get("fitted_on")
     if not isinstance(fitted, dict) or not fitted.get("model"):
         return None
     # both Hugging Face snapshots (a revision on each side): the whole repo id, so OrgA/x is not OrgB/x; otherwise the
-    # last part of the path, so a local copy matches its repo id
+    # model files' content when the file records it, else the last part of the path, so a local copy matches its repo
+    # id
     full = bool(fitted.get("revision") and rev)
+    served = None
+    if not full and fitted.get("model_content"):
+        served = content if content is not None else model_content_id(md, kind) if md is not None else None
     key = lambda s: (str(s) if full else Path(str(s)).name).lower()
-    if key(fitted["model"]) != key(model):
+    if served is not None:
+        if fitted["model_content"] != served:
+            return (f"it was fitted on {fitted['model']}, and the served model {model} holds other model files "
+                    "(weights, tokenizer or configuration)")
+    elif key(fitted["model"]) != key(model):
         return f"it was fitted on {fitted['model']}, the served model is {model}"
     if fitted.get("revision") and rev and fitted["revision"] != rev:
         why = revision_mismatch(fitted, md, model, rev, kind, files)
@@ -1261,6 +1309,17 @@ def identity_mismatch(cal, model, rev, adapter=None, md=None, kind=None, files=N
     if fa != adapter:
         return f"it was fitted with adapter {fa or 'none'}, the served adapter is {adapter or 'none'}"
     return None
+
+
+def matched_by_name(cal):
+    """A note when a file of your own (--calibration) was fitted on a local folder and records none of its files (a
+    basal-calibrate before 2.8), so it is matched to the served model by the folder's last name only (another
+    checkpoint in a folder of that name would match too); None otherwise."""
+    fitted = cal.get("fitted_on")
+    if not isinstance(fitted, dict) or not fitted.get("model") or fitted.get("revision") or fitted.get("model_content"):
+        return None
+    return (f"it was fitted on the folder {fitted['model']} and records none of its model files, so it is matched by "
+            "the folder's name alone: refit it with basal-calibrate to tie it to these weights")
 
 
 def foreign_calibration(cal, name, md, kind=None):
@@ -1694,6 +1753,8 @@ class Server:
             print(f"basal: warning: {cal.name}: {self.cal_mismatch}; its thresholds were certified on that model, so "
                   "they are not applied: max_error defers and the answers are marked \"calibration\": \"unvalidated\" "
                   "(refit with basal-calibrate, or --strict-calibration to refuse such a file)", flush=True)
+        elif own and not a.no_calibration and (note := matched_by_name(self.cal)):
+            print(f"basal: warning: {cal.name}: {note}", flush=True)
         if unvalidated:
             base_file = self.adapter and not a.calibration and cal.parent != self.adapter.path
             print(f"basal: warning: {self.cal_unvalidated}; its answers are marked \"calibration\": \"unvalidated\" "

@@ -88,9 +88,10 @@ Method (the one the shipped files were fitted with):
     A kept threshold your FIT and CERT decisions refute is withdrawn; a pooled-only threshold (a file without per-type
     ones) and a file of another engine are refused; the other types are fitted as usual;
   * fitted_on names the model (and its Hugging Face revision, and model_files: the identity of the snapshot's files
-    but its card): basal-serve keeps a --calibration file fitted on another model, or on a revision with other model
-    files, for its temperatures only (its thresholds are not applied, the answers are marked unvalidated) with a
-    warning, and refuses it with --strict-calibration. A revision that changes only the card keeps the file.
+    but its card; model_content: the identity of the folder's files by their content, which matches a local folder):
+    basal-serve keeps a --calibration file fitted on another model, or on a revision with other model files, for its
+    temperatures only (its thresholds are not applied, the answers are marked unvalidated) with a warning, and refuses
+    it with --strict-calibration. A revision that changes only the card keeps the file.
 """
 import argparse
 import asyncio
@@ -114,7 +115,7 @@ from .jsonl import read_lines
 from .prompt import max_options, model_format, model_layout
 from .server import (MODES, QUESTION_TYPES, UNVALIDATED_OUT, Server, _text, add_engine_args, answer_set,
                      calibration_file, calibration_name, certified, check_calibration, default_mode, identity_mismatch,
-                     load_calibration, model_files_id, model_identity, refuse_lean_flex, temper, temperature, to_items,
+                     load_calibration, model_content_id, model_files_id, model_identity, refuse_lean_flex, temper, temperature, to_items,
                      validate_baseline)
 from .sets import label_set_id
 from .sets import select as select_set
@@ -1769,7 +1770,7 @@ def refit(a, targets, reference, reference_name):
     why = validate_baseline(baseline, base_file.name, head.get("orders"), head.get("layout"),
                             (head.get("model") if head.get("model") not in (None, "None") else None,
                              head.get("revision"), head.get("adapter"), None, head.get("kind"),
-                             head.get("model_files"))) if baseline else None
+                             head.get("model_files"), head.get("model_content"))) if baseline else None
     if baseline and not why and not a.calibration and head.get("baseline_why"):
         why = head["baseline_why"]  # the run left out this file's thresholds (the base model's under --adapter)
     if why:  # basal-serve's rule, for the model, orders and layout the rows were read with
@@ -1788,7 +1789,7 @@ def refit(a, targets, reference, reference_name):
                             multi=sum(r["prim"] == "multi" for r in good), date=datetime.date.today().isoformat(),
                             model=head["model"], engine=head["engine"], orders=head["orders"],
                             split="FIT 70% / CERT 30% by group", tool=f"basal-calibrate {__version__} (--from-rows)")
-    cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision", "model_files")
+    cal["fitted_on"].update({k: head[k] for k in ("layout", "adapter", "revision", "model_files", "model_content")
                              if head.get(k) is not None})
     if report["kept"]:
         cal["fitted_on"].update(kept_shipped=report["kept"], kept_shipped_from=kept_from(base_file, baseline))
@@ -1961,6 +1962,7 @@ def http_context(a):
     md = resolve(a.model, a.revision, metadata_only=True) if a.model else None
     c.model, c.revision = model_identity(a.model, md) if md is not None else (a.model or entry.get("name"), None)
     c.files = model_files_id(md, c.kind) if md is not None else None  # (when the cache holds the weights too)
+    c.content = model_content_id(md, c.kind) if md is not None else None  # (a local --model folder: its files)
     c.served = None
     if md is not None:  # the revision and model files the server serves (2.8)
         server_identity(c, entry, a)
@@ -1989,6 +1991,7 @@ def local_context(a):
     a.layout = srv.layout  # --layout, else the model's basal.json "layout"
     c.model, c.revision = model_identity(a.model, srv.md)
     c.files = model_files_id(srv.md, srv.kind)
+    c.content = model_content_id(srv.md, srv.kind)
     c.adapter = srv.adapter.identity if srv.adapter else None
     c.baseline, c.base_file, c.base_why = compared(srv.md, srv.kind, a.calibration, c.quant, c.orders,
                                                    a.no_calibration, c.preset, a.layout, srv.adapter,
@@ -2061,6 +2064,7 @@ def finish(a, c, fitted, targets, small, n_bodies, units, n_task_bodies, task_re
                     model=str(c.model), engine=c.engine, data=Path(a.input).name, requests=n_bodies - len(failed),
                     baseline=str(c.base_file) if c.baseline else None, orders=c.orders)
         head.update(layout=a.layout, adapter=c.adapter, revision=c.revision, model_files=c.files,
+                    model_content=c.content,
                     baseline_why=c.base_why if c.baseline else None)  # (its thresholds left out: the refit too)
         with open(a.save_rows, "w", encoding="utf-8") as f:
             for x in [head] + rows:
@@ -2078,6 +2082,8 @@ def finish(a, c, fitted, targets, small, n_bodies, units, n_task_bodies, task_re
         cal["fitted_on"]["revision"] = c.revision
     if c.revision and c.files:  # basal-serve applies it to another revision with the same model files (model_files)
         cal["fitted_on"]["model_files"] = c.files
+    if c.content:  # a local folder: matched by its files, not its name (server.identity_mismatch)
+        cal["fitted_on"]["model_content"] = c.content
     if report and report["kept"]:  # their temperatures and thresholds are the compared file's, not fitted here
         cal["fitted_on"].update(kept_shipped=report["kept"], kept_shipped_from=kept_from(c.base_file, c.baseline))
     if c.adapter:  # basal-serve applies the file only with this adapter (calibration_mismatch)

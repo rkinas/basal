@@ -334,8 +334,14 @@ its temperatures only, as a file of other option orders: its thresholds, task th
 fallback thresholds are not applied (`max_error` defers, tasks report `automated: null`, answer sets hold every
 option) and every answer is marked `"calibration": "unvalidated"`; with `--strict-calibration` it refuses to start.
 When both are Hugging Face snapshots (a revision on each side) the whole repository ID is compared, so `OrgA/basal-x`
-is not `OrgB/basal-x`; a local copy of a model matches its Hugging Face name by the last part of the path
-(`/data/basal-omni-1.0-max` = `Remek/basal-omni-1.0-max`).
+is not `OrgB/basal-x`. When a side has no revision (a local folder), the files decide: `basal-calibrate` records
+`fitted_on.model_content`, 16 hex digits over the same files' sizes and the sha256 of their content (a file up to 3
+MiB whole, a larger one by its first, middle and last MiB, so a few MiB are read per file), for any folder. A file
+fitted on `/data/run1/final` then does not hold for `/data/run2/final`, another checkpoint in a folder of the same
+name, and holds for a copy of the same weights under any name. A file without `fitted_on.model_content` (written
+before basal-calibrate recorded it) is matched by the last part of the path, as before, so a local copy of a model
+matches its Hugging Face name (`/data/basal-omni-1.0-max` = `Remek/basal-omni-1.0-max`); when such a file was fitted
+on a local folder, basal-serve warns at start-up that it is matched by the folder's name alone.
 The files that ship in a model's directory are not checked. `basal-calibrate` applies the same rule to the file it
 compares with (`--calibration`, or the one a `--save-rows` run compared with, for `--from-rows`): fitted on another
 model, on a revision with other model files or with another adapter, it keeps its temperatures for the types with too
