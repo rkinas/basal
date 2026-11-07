@@ -138,7 +138,7 @@ def test_server_errors_answer_500_and_out_of_memory_503(error, status, code):
 
 
 class Faulty(Engine):
-    """An engine bug deep in run_shared, as #1's TypeError was."""
+    """An engine bug deep in run_shared: a TypeError, as a server error that showed only its one line was."""
 
     def run_shared(self, groups, policy=None):
         return _engine_bug()
@@ -154,8 +154,8 @@ DECISION = {"model": "basal", "input": "Invoice 1240 PLN.",
 
 @pytest.mark.parametrize("path,body,status", [("/v1/systemone", BODY, 500), ("/v1/decisions", DECISION, 500)])
 def test_a_server_error_logs_its_traceback_but_answers_without_it(capsys, path, body, status):
-    """#3: a 500 prints the traceback on stderr, so its cause shows (#1 showed only "request failed: TypeError");
-    the reply is as before, with no traceback in it."""
+    """A 500 prints the traceback on stderr, so its cause shows (the line "request failed: TypeError" alone did not
+    say where); the reply is as before, with no traceback in it."""
     async def go(c):
         return await c.post(path, json=body)
 
