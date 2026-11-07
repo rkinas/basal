@@ -1392,9 +1392,11 @@ def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"
     without its thresholds; with --adapter the adapter's file, else the model's without its thresholds) and, with
     `identity` = (model, revision, adapter identity) of the decisions, without the thresholds of a file fitted on
     another model, revision or adapter (as basal-serve keeps an own file: validate_baseline) -> (calibration, its file
-    or None)."""
+    or None, why its thresholds were left out or None). --url to a server with --adapter (adapter None, the adapter's
+    identity in `identity`): the model's file is the base model's, without its thresholds, as load_calibration keeps
+    it in process."""
     if off or (md is None and not path):
-        return {}, None
+        return {}, None, None
     if orders is None:  # a server that does not report its orders: the file as it is
         f = calibration_file(md, kind, path, quant, preset, layout)
         data, why = (json.loads(read_text(f)) if f.exists() else {}), None
@@ -1404,9 +1406,12 @@ def compared(md, kind, path, quant, orders, off, preset=None, layout="canonical"
         mismatch = identity_mismatch(data, *identity, md=md, kind=kind)
         if mismatch:
             why, data = f"{f.name}: {mismatch}", {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}
+    if why is None and adapter is None and identity is not None and identity[2] and not path and data:
+        why = f"{f.name} belongs to the base model, read with --adapter {identity[2]}"
+        data = {k: v for k, v in data.items() if k not in UNVALIDATED_OUT}
     if why:
         print(f"warning: {why}: its thresholds are not compared or kept (as in basal-serve)", file=sys.stderr)
-    return data, f if f.exists() else None
+    return data, (f if f.exists() else None), why
 
 
 def task_rows(units, responses):
@@ -1742,6 +1747,8 @@ def refit(a, targets, reference, reference_name):
                             (head.get("model") if head.get("model") not in (None, "None") else None,
                              head.get("revision"), head.get("adapter"), None, head.get("kind"),
                              head.get("model_files"))) if baseline else None
+    if baseline and not why and not a.calibration and head.get("baseline_why"):
+        why = head["baseline_why"]  # the run left out this file's thresholds (the base model's under --adapter)
     if why:  # basal-serve's rule, for the model, orders and layout the rows were read with
         print(f"warning: {why} (the rows): its thresholds are not compared or kept (as in basal-serve)",
               file=sys.stderr)
@@ -1902,8 +1909,8 @@ def http_context(a):
                                                                       else "canonical")
     # without --model the server's name stands in for the model (its --name, or the folder's name with "+adapter"): no
     # identity to check the compared file against
-    c.baseline, c.base_file = compared(md, c.kind, a.calibration, c.quant, c.orders, a.no_calibration, c.preset,
-                                       a.layout, identity=(c.model, c.revision, c.adapter) if md is not None else None)
+    c.baseline, c.base_file, c.base_why = compared(md, c.kind, a.calibration, c.quant, c.orders, a.no_calibration,
+                                                   c.preset, a.layout, identity=(c.model, c.revision, c.adapter) if md is not None else None)
     return c
 
 
@@ -1921,8 +1928,8 @@ def local_context(a):
     c.model, c.revision = model_identity(a.model, srv.md)
     c.files = model_files_id(srv.md, srv.kind)
     c.adapter = srv.adapter.identity if srv.adapter else None
-    c.baseline, c.base_file = compared(srv.md, srv.kind, a.calibration, c.quant, c.orders, a.no_calibration, c.preset,
-                                       a.layout, srv.adapter, identity=(c.model, c.revision, c.adapter))
+    c.baseline, c.base_file, c.base_why = compared(srv.md, srv.kind, a.calibration, c.quant, c.orders,
+                                                   a.no_calibration, c.preset, a.layout, srv.adapter, identity=(c.model, c.revision, c.adapter))
     c.engine = mode + (f" --quant {a.quant}" if a.quant else "") + (f" --gguf {Path(a.gguf).name}" if a.gguf else "") \
         + (f" --vllm-preset {c.preset}" if c.preset not in (None, "default") else "") \
         + (f" --adapter {srv.adapter.name}" if srv.adapter else "")
@@ -1990,7 +1997,8 @@ def finish(a, c, fitted, targets, small, n_bodies, units, n_task_bodies, task_re
         head = dict(basal_calibrate_rows=1, fmt=c.fmt, kind=c.kind, quant=c.quant, vllm_preset=c.preset,
                     model=str(c.model), engine=c.engine, data=Path(a.input).name, requests=n_bodies - len(failed),
                     baseline=str(c.base_file) if c.baseline else None, orders=c.orders)
-        head.update(layout=a.layout, adapter=c.adapter, revision=c.revision, model_files=c.files)
+        head.update(layout=a.layout, adapter=c.adapter, revision=c.revision, model_files=c.files,
+                    baseline_why=c.base_why if c.baseline else None)  # (its thresholds left out: the refit too)
         with open(a.save_rows, "w", encoding="utf-8") as f:
             for x in [head] + rows:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")

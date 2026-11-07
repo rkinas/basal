@@ -114,10 +114,10 @@ def test_a_baseline_of_another_model_is_not_compared_or_kept(tmp_path, capsys, m
     assert "fitted on Remek/basal-y, the served model is Remek/basal-x" in err and "not compared or kept" in err
     # the file basal-calibrate compares with in a run: kept for its temperatures only, as basal-serve keeps it
     monkeypatch.setattr(server_module, "resolve", lambda *_, **__: tmp_path)
-    data, f = compared(tmp_path, "eager", str(base), None, 1, False, identity=("Remek/basal-x", None, None))
+    data, f, _ = compared(tmp_path, "eager", str(base), None, 1, False, identity=("Remek/basal-x", None, None))
     assert f == base and data["temperature_per_prim"] == {"noul": 1.1}
     assert not {"thresholds", "task_thresholds"} & set(data)
-    data, _ = compared(tmp_path, "eager", str(base), None, 1, False, identity=("Remek/basal-y", None, None))
+    data, _, _ = compared(tmp_path, "eager", str(base), None, 1, False, identity=("Remek/basal-y", None, None))
     assert data["thresholds"] == SHIPPED["thresholds"]
 
 
@@ -132,7 +132,7 @@ def test_a_baseline_of_another_revision_with_the_same_model_files_is_kept(tmp_pa
     # (R3) drop them
     monkeypatch.setattr(server_module, "resolve", lambda name, *_, **__: Path(name))
     for rev, kept in ((R2, True), (R3, False)):
-        data, _ = compared(hub[rev], "eager", str(base), None, 1, False, identity=("Org/m", rev, None))
+        data, _, _ = compared(hub[rev], "eager", str(base), None, 1, False, identity=("Org/m", rev, None))
         assert ("thresholds" in data) is kept and data["temperature_per_prim"] == {"noul": 1.1}
         assert ("has other model files" in capsys.readouterr().err) is not kept
     # --from-rows: the model files the rows were read with (fitted_on.model_files of the head) decide

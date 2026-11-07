@@ -158,3 +158,42 @@ def test_the_written_file_names_the_file_its_kept_thresholds_come_from(tmp_path)
                                                certified_on="CERT split of the shipped data")
     main([str(data), "--from-rows", "--targets", "0.05", "--out", str(out)])
     assert "kept_shipped_from" not in json.loads(out.read_text(encoding="utf-8"))["fitted_on"]
+
+
+def test_under_an_adapter_the_base_models_thresholds_are_not_kept_nor_by_the_refit(tmp_path, monkeypatch, capsys):
+    """A run against a server with --adapter compares with the model's file, which is the base model's: kept for its
+    temperatures only, as basal-serve keeps it, so --keep-shipped has no threshold to keep. The rows it saves say so,
+    and their --from-rows refit keeps none either (it kept the base model's noul threshold for the adapter)."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    import basal.calibrate as calibrate_module
+    md = tmp_path / "models--owner--stub" / "snapshots" / ("a" * 40)
+    md.mkdir(parents=True)
+    (md / "basal.json").write_text(json.dumps({"prompt": 1}), encoding="utf-8")
+    (md / "CALIBRATION.json").write_text(json.dumps(SHIPPED), encoding="utf-8")
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"state": "s", "questions": {"q": {
+        "type": "choice", "criteria": ["a", "b"], "gold": "a"}}}) + "\n", encoding="utf-8")
+    entry = dict(name="stub", mode="eager", prompt_format=1, orders=1, adapter="stub-adapter@sha256:abc",
+                 temperature_per_prim={})
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: SimpleNamespace(status_code=200, json=lambda: {"models": [entry]}))
+    monkeypatch.setattr(calibrate_module, "resolve", lambda *a, **k: md)
+
+    async def readouts(*args):
+        return [{"answers": {"q": {"probabilities": {"a": 0.8, "b": 0.2}}}}]
+    monkeypatch.setattr(calibrate_module, "over_http", readouts)
+    url = [str(labels), "--url", "http://h", "--model", "owner/stub"]
+    with pytest.raises(SystemExit, match="no noul threshold to keep"):
+        main(url + ["--keep-shipped", "noul", "--out", str(tmp_path / "x.json")])
+    rows, out = tmp_path / "rows.jsonl", tmp_path / "cal.json"
+    main(url + ["--save-rows", str(rows), "--out", str(out)])
+    assert "belongs to the base model" in capsys.readouterr().err
+    assert "belongs to the base model" in json.loads(rows.read_text(encoding="utf-8").splitlines()[0])["baseline_why"]
+    with pytest.raises(SystemExit, match="no noul threshold to keep"):
+        main([str(rows), "--from-rows", "--keep-shipped", "noul", "--targets", "0.05", "--out", str(out)])
+    # a file given with --calibration is applied as it is (it may be fitted with the adapter), as basal-serve does
+    main([str(rows), "--from-rows", "--calibration", str(md / "CALIBRATION.json"), "--keep-shipped", "noul",
+          "--targets", "0.05", "--out", str(out)])
+    assert certified(json.loads(out.read_text(encoding="utf-8")), 0.05, "noul") == 0.6
