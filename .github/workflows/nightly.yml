@@ -10,9 +10,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+# The schedule runs in the public repository only (a private one pays for its minutes; a fork does not need it), and
+# macOS there only. A scheduled run has no event payload, so github.event.repository.private is not known: the
+# repository's name decides. workflow_dispatch runs the Linux job anywhere.
 jobs:
   test-linux:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.repository == 'rkinas/basal' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +39,9 @@ jobs:
       - run: uv run --no-sync pytest -q -n 2 --dist loadfile
 
   test-macos:
+    if: ${{ github.repository == 'rkinas/basal' }}
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:

@@ -8,13 +8,15 @@ on:
 permissions:
   contents: read
 
+# one run per pull request (or branch): a new push cancels the run it supersedes
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -27,6 +29,7 @@ jobs:
 
   test-linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -48,7 +51,10 @@ jobs:
       - run: uv run --no-sync pytest -q -n 2 --dist loadfile  # whole files per worker: module fixtures load once
 
   test-macos:
+    # the public repository only: a private repository pays for its minutes, and macOS ones count 10 times
+    if: ${{ !github.event.repository.private }}
     runs-on: macos-latest  # Apple Silicon: also runs the MLX tests
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -61,6 +67,7 @@ jobs:
 
   test-typescript:  # clients/typescript against basal-serve on the stub engine (its README, "Tests")
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
