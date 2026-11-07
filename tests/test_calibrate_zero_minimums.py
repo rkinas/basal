@@ -1,6 +1,7 @@
 """basal-calibrate with --min-per-type 0 and --min-per-set 0, and --from-rows on a file that is not a rows file:
 a clear result or message, no traceback."""
 import argparse
+import re
 
 import pytest
 
@@ -68,3 +69,14 @@ def test_a_minimum_below_what_the_fit_takes_is_refused_before_any_readout(tmp_pa
     for ok in ("--min-family 1", "--min-blend 0", "--min-per-type 0", "--min-per-set 0"):
         name, v = ok.split()
         calibrate.options(calibrate.parser().parse_args(["x.jsonl", name, v]))
+
+
+def test_an_input_that_cannot_be_read_stops_with_its_name_not_a_traceback(tmp_path):
+    """A missing file, a directory or a binary file is named in the message (labelled() caught only InputError, so
+    they ended in a FileNotFoundError / IsADirectoryError / UnicodeDecodeError traceback)."""
+    binary = tmp_path / "labels.bin"
+    binary.write_bytes(b"\xff\xd8\xff\xe0" + bytes(range(256)) * 4)
+    for path, why in ((tmp_path / "missing.jsonl", "No such file or directory"), (tmp_path, "Is a directory"),
+                      (binary, "not a text file")):
+        with pytest.raises(SystemExit, match=f"^{re.escape(str(path))}: {why}"):
+            calibrate.main([str(path), "--model", "stub"])

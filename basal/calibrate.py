@@ -1891,6 +1891,10 @@ def labelled(a, targets):
         bodies, decisions, task_bodies, units = read(a.input)
     except InputError as e:
         raise SystemExit(str(e)) from None
+    except OSError as e:  # (no such file, a directory, no permission: a message, not a traceback)
+        raise SystemExit(f"{a.input}: {e.strerror or type(e).__name__}") from None
+    except UnicodeDecodeError:
+        raise SystemExit(f"{a.input}: not a text file (UTF-8, or UTF-16 with its BOM)") from None
     print(f"basal-calibrate: {len(decisions)} labelled decisions in {len(bodies)} requests"
           + (f", {len(units)} labelled task decisions in {len(task_bodies)} requests" if units else ""),
           file=sys.stderr)
