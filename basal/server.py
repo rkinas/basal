@@ -28,6 +28,7 @@ branch over the state; the state is computed once per request. `act`, `multi` an
 """
 import argparse
 import asyncio
+import contextvars
 import functools
 import gc
 import hashlib
@@ -237,6 +238,28 @@ class Overloaded(RuntimeError):
 
 
 ERROR_CODES = ("INVALID_REQUEST", "OVERLOADED", "TIMEOUT", "OUT_OF_MEMORY", "INTERNAL_ERROR")
+
+
+class Slot:
+    """A request's place under --max-requests, from the read of its body (taken there, before the body is read: one
+    beyond the cap is refused with Overloaded) to its serve, which takes it over with no second check: a request
+    admitted to read keeps its place. Given back (release) when the request ends before serve (an invalid
+    /v1/decisions body, a client that left while sending). Without it a request that started reading in the await
+    between the read and the serve took the place, and the one whose body was read got 503 after its upload."""
+
+    def __init__(self, srv):
+        srv.overloaded()
+        srv.reading += 1
+        self.srv, self.held = srv, True
+
+    def release(self):
+        if self.held:
+            self.held = False
+            self.srv.reading -= 1
+
+
+ADMITTED = contextvars.ContextVar("basal_admitted", default=None)  # the Slot of the HTTP request being served (its
+#                                                                     serve task copies the route's context)
 
 
 class TimedOut(RuntimeError):
@@ -1760,8 +1783,13 @@ class Server:
         """One client request (POST /v1/systemone, /v1/basal, /v1/decisions or an MCP tool call): decide, which admits
         it first. Counted as in flight from here to its answer or error (GET /health); beyond --max-requests in flight
         it is refused at once (Overloaded), and past --request-timeout it ends (TimedOut: its queued work is dropped,
-        an engine call already running finishes)."""
-        self.overloaded()
+        an engine call already running finishes). An HTTP request's place, taken before its body was read (Slot,
+        ADMITTED), is taken over here with no second check."""
+        slot = ADMITTED.get()
+        if slot is not None and slot.held and slot.srv is self:
+            slot.release()  # (and in flight at once: nothing runs in between)
+        else:
+            self.overloaded()
         self.in_flight += 1
         self.clients += 1
         try:
@@ -3088,28 +3116,23 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
         body, status = error_body(logged(e), error_format)
         return JSONResponse(body, status_code=status, headers=retry(e))
 
-    async def read(request):
-        """The body of a decision request, read (request_json) only within --max-requests: a request beyond them is
-        refused before its body is read (it counts as in flight while it is read)."""
-        if not hasattr(srv, "overloaded"):  # (a server stand-in without the cap)
-            return await request_json(request)
-        srv.overloaded()
-        srv.reading += 1
-        try:
-            return await request_json(request)
-        finally:
-            srv.reading -= 1
 
     def route(answer, error):
-        """A decision route: the body read once (read), answer(body) -> its JSON response, error(e) -> the response
-        of a failure; every request counted for /metrics (a body that is not JSON too). A client that
-        disconnects, while it sends the body or while its request is served (until_disconnect: its queued work is
-        dropped), gets the 499 that nobody reads; that is no failure."""
+        """A decision route: the body read once (request_json) within --max-requests (a Slot taken before it is
+        read: a request beyond them is refused before its body is read, and one admitted keeps its place until its
+        serve takes it over: ADMITTED), answer(body) -> its JSON response, error(e) -> the response of a failure; every
+        request counted for /metrics (a body that is not JSON too). A client that disconnects, while it sends the
+        body or while its request is served (until_disconnect: its queued work is dropped), gets the 499 that nobody
+        reads; that is no failure."""
         async def handle(request):
             t = time.perf_counter()
             counts["requests"] += 1
+            slot = None
             try:
-                out = await until_disconnect(request, answer(await read(request)))
+                slot = Slot(srv) if hasattr(srv, "overloaded") else None  # (a server stand-in without the cap)
+                body = await request_json(request)
+                ADMITTED.set(slot)  # (this request's task: its serve task copies it)
+                out = await until_disconnect(request, answer(body))
                 return JSONResponse(*CLIENT_GONE) if out is None else JSONResponse(out)
             except ClientDisconnect:  # the client left while sending the body: as when it leaves later (not a 500)
                 return JSONResponse(*CLIENT_GONE)
@@ -3118,6 +3141,8 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                 failures[error_code(e)] += 1
                 return error(e)
             finally:
+                if slot is not None:
+                    slot.release()  # (nothing once serve has taken it over)
                 counts["seconds"] += time.perf_counter() - t
         return handle
 

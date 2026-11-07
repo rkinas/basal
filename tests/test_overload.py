@@ -183,3 +183,31 @@ def test_a_request_beyond_max_requests_is_refused_before_its_body_is_read():
         return r
     r = asyncio.run(_with_app(srv, go))
     assert r.status_code == 503 and r.json()["code"] == "OVERLOADED" and sent == [] and srv.reading == 0
+
+
+def test_a_request_admitted_to_read_keeps_its_place_until_it_is_served():
+    """--max-requests 1: A's body is read first, B starts reading (slowly) before A is served. A keeps the place it
+    was admitted with and is answered; B, beyond the cap, is refused before its body is read. (A gave its place back
+    once its body was read, B took it, and A got 503 after its upload.) A request that ends before its serve gives its
+    place back."""
+    srv = AppServer(Counting())
+    srv.max_requests = 1
+    release = asyncio.Event()
+
+    async def slow():
+        yield b'{"state": "x", '
+        await release.wait()
+        yield b'"questions": {"q": {"type": "noul"}}}'
+
+    async def go(c):
+        a = asyncio.create_task(c.post("/v1/systemone", json=BODY))
+        b = asyncio.create_task(c.post("/v1/systemone", content=slow(), headers={"content-type": "application/json"}))
+        await asyncio.sleep(0.2)
+        release.set()
+        ra, rb = await a, await b
+        bad = await c.post("/v1/decisions", json={"input": "x", "questions": []})  # (ends before its serve)
+        return ra, rb, bad, await c.post("/v1/systemone", json=BODY)
+    a, b, bad, after = asyncio.run(_with_app(srv, go))
+    assert a.status_code == 200 and b.status_code == 503 and b.json()["code"] == "OVERLOADED"
+    assert bad.status_code == 400 and after.status_code == 200
+    assert srv.reading == 0 and srv.in_flight == 0
