@@ -87,3 +87,23 @@ def test_the_refit_writes_the_kept_types_into_fitted_on(tmp_path):
     assert "kept_shipped" not in json.loads(out.read_text(encoding="utf-8"))["fitted_on"]
     with pytest.raises(SystemExit, match="no noul temperature to keep"):
         main([str(data), "--from-rows", "--no-calibration", "--keep-shipped", "noul", "--out", str(out)])
+
+
+def noul_errors(per_group=1, n=100, wrong=10):
+    """The choice rows of rows() and n noul decisions above the kept 0.6, `wrong` of them wrong; per_group > 1 puts
+    them in groups of that size, the wrong ones together in the first group."""
+    return rows(n_noul=0) + [dict(prim="noul", group=f"n{i // per_group}", family=f"f{i % 3}", gold=int(i < wrong),
+                                  p=[0.95, 0.05]) for i in range(n)]
+
+
+def test_a_kept_threshold_your_decisions_refute_is_withdrawn():
+    cal, report = fit(noul_errors(), SHIPPED, [0.05], keep=("noul",))
+    noul = cal["thresholds"]["0.05"]["per_type"]["noul"]
+    assert noul["confidence"] is None and noul["refuted"] == 0.6 and noul["kept"] == "shipped"
+    assert "your FIT and CERT decisions refute it: 10 errors in 100 accepted" in noul["reason"]
+    assert certified(cal, 0.05, "noul") is None and cal["temperature_per_prim"]["noul"] == 1.56
+    assert any("the kept shipped threshold 0.6000 is refuted" in w for w in warnings(report, [0.05]))
+    # the same 10 errors in one group of 10 go together (ICC 1, design effect 10): about one independent error in
+    # ten, which refutes nothing
+    cal, _ = fit(noul_errors(per_group=10), SHIPPED, [0.05], keep=("noul",))
+    assert cal["thresholds"]["0.05"]["per_type"]["noul"]["confidence"] == 0.6

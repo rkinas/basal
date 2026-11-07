@@ -1046,8 +1046,9 @@ def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk, tempered=None
         cf, cc = tempered.cs(rf), tempered.cs(rc)
         rho, deff = design_effect(cf, [r["group"] for r in rf])  # FIT's rho, each side's own group sizes
         deff_c = design_effect_of([r["group"] for r in rc], rho)
-        if t in keep:
-            out[t] = kept_entry(cf, cc, certified(baseline, risk, t), deff, deff_c)
+        if t in keep:  # FIT and CERT together test it (neither certified it), with their own design effect
+            _, deff_all = design_effect(cf + cc, [r["group"] for r in rf + rc])
+            out[t] = kept_entry(cf, cc, certified(baseline, risk, t), risk, deff, deff_c, deff_all)
         else:
             out[t], _ = certify(cf, cc, risk, deff, deff_c)
         if rho:
@@ -1055,16 +1056,24 @@ def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk, tempered=None
     return out
 
 
-def kept_entry(cf, cc, thr, deff=1.0, deff_c=1.0):
+def kept_entry(cf, cc, thr, risk, deff=1.0, deff_c=1.0, deff_all=1.0):
     """--keep-shipped: the entry of a type's shipped threshold thr (certified on the compared file's data), with its
-    coverage, error and bound on this file's FIT (cf) and CERT (cc) decisions."""
+    coverage, error and bound on this file's FIT (cf) and CERT (cc) decisions; withdrawn (null: basal-serve defers)
+    when they refute it at `risk`, as a fitted threshold CERT refutes (withdrawn). Neither split took part in
+    certifying it, so both test it together, counted as the independent decisions they are worth (deff_all)."""
     if thr is None:
         return dict(confidence=None, kept="shipped", reason="the compared file has no threshold for this type at this "
                                                             "max_error")
-    g_fit, g_cert = gate(cf, thr, deff), gate(cc, thr, deff_c)
-    return dict(confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"], fit_upper95=g_fit["upper95"],
-                cert_coverage=g_cert["coverage"], cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
-                cert_accepted=g_cert["accepted"], kept="shipped")
+    g_fit, g_cert, g_all = gate(cf, thr, deff), gate(cc, thr, deff_c), gate(cf + cc, thr)
+    entry = dict(confidence=thr, fit_coverage=g_fit["coverage"], fit_error=g_fit["error"], fit_upper95=g_fit["upper95"],
+                 cert_coverage=g_cert["coverage"], cert_error=g_cert["error"], cert_upper95=g_cert["upper95"],
+                 cert_accepted=g_cert["accepted"], kept="shipped")
+    n, e = g_all["accepted"], g_all["errors"]
+    if withdrawn(dict(confidence=thr, cert_accepted=n, cert_error=g_all["error"]), risk, deff_all)["confidence"] is None:
+        entry = dict(entry, confidence=None, refuted=thr,
+                     reason=f"the compared file's threshold {thr:.4f}, but your FIT and CERT decisions refute it: {e} "
+                            f"error{'' if e == 1 else 's'} in {n} accepted, a one-sided 95% lower bound above {risk:g}")
+    return entry
 
 
 def automated_gate(rows, tempered, cal, risk):
@@ -1575,7 +1584,9 @@ def warnings(report, targets):
                            f"action of act and tool on {t} questions with this max_error"
                            + (f" (the compared file certified {shipped:.4f}: --keep-shipped {t} keeps its {t} "
                               "temperature and thresholds together)" if shipped is not None and not x.get("kept")
-                              else ""))
+                              else "")
+                           + (f" (the kept shipped threshold {x['refuted']:.4f} is refuted by your FIT and CERT "
+                              "decisions)" if x.get("kept") and x.get("refuted") is not None else ""))
             elif cert_note(t, risk, x):
                 out.append(cert_note(t, risk, x))
     for t, g in ((report.get("gates") or {}).get("ece_lofo") or {}).items():
