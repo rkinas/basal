@@ -654,6 +654,12 @@ size and sha256, the options that make the requests (`--preset`, `--lang`, `--ea
 `GET /v1/models` (its model, mode and calibration). A `.part` of another input, other options or another server is
 refused, as is one without that record (from basal-run 2.7 or earlier): `--restart` replaces it. `--concurrency` may
 differ.
+
+A server that stops answering stops the run (2.8). After `--stop-after` (16) lines in a row that it did not answer (a
+connection error, or HTTP 502, 503 or 504), `basal-run` exits with the reason. Before, it failed every line after
+them, in seconds, and ended as if done. Those lines are not written, so `<output>.part` ends with the last answer,
+and the same command, run once the server is back, goes on from there. Fewer such lines between answers are error
+lines, as before; `--stop-after 0` never stops.
 Ready-to-run examples (Polish and English) in `basal/examples/` of the repository, also installed with the package
 (`$EX` above):
 

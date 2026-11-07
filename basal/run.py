@@ -21,6 +21,11 @@ after the last answer, are sent again). <output>.part.json records the run: the 
 options that make the requests (--preset, --lang, --early-exit) and the server's GET /v1/models. A .part of another
 input, other options or another server is refused, as is one without that record; --restart replaces it.
 --concurrency may differ.
+
+A server that stops answering (2.8): after --stop-after (16) lines in a row that it did not answer (a connection
+error, or HTTP 502, 503 or 504), the run stops instead of failing every line after them. Those lines are not written,
+so <output>.part ends with the last answer, and the same command, run again once the server is back, goes on from
+there. Fewer such lines between answers are each an "error" line, as any other failed line.
 """
 import argparse
 import asyncio
@@ -39,6 +44,8 @@ from .cli import add_api_key, headers, positive, refused
 from .textio import open_text
 
 LOCAL = ("id", "gold", "group", "family")  # a line's own fields (as basal-calibrate reads them), never sent
+GONE = (502, 503, 504)  # no answer from the server now: a proxy without its server, starting / overloaded, timed out
+STOP_AFTER = 16  # --stop-after: lines in a row the server did not answer, after which the run stops
 
 
 def to_request(item, early_exit=None, preset=None, lang=None):
@@ -81,6 +88,11 @@ def summarise(item, resp):
 
 class KeyRefused(Exception):
     """The server refused the API key (HTTP 401 / 403): every other line would fail the same way."""
+
+
+class ServerGone(Exception):
+    """The server answered none of the last --stop-after lines (a connection error, or HTTP 502 / 503 / 504): it stopped
+    or cannot be reached, and every line after them would fail the same way."""
 
 
 def failed(i, error, answers=None):
@@ -200,18 +212,28 @@ async def run(a, transport=None):
                     body = to_request(it, a.early_exit, getattr(a, "preset", None), getattr(a, "lang", None))
                 except (KeyError, TypeError, ValueError, AttributeError) as e:  # a malformed line: its own error
                     return failed(it["id"], f"not a valid line: {type(e).__name__}: {e}")
+                gone = False  # the server did not answer this line (ServerGone after a run of them)
                 try:
                     r = await c.post(a.url, json=body)
                     if refused(a.url, r.status_code, key):
                         raise KeyRefused(refused(a.url, r.status_code, key))
-                    resp = r.json()
-                except (httpx.HTTPError, ValueError) as e:
+                    gone = r.status_code in GONE
+                    try:
+                        resp = r.json()
+                    except ValueError as e:
+                        resp = {"error": f"HTTP {r.status_code}" if gone else str(e) or type(e).__name__}
+                except httpx.TransportError as e:  # (connection refused or reset, a timeout)
+                    gone, resp = True, {"error": str(e) or type(e).__name__}
+                except httpx.HTTPError as e:
                     resp = {"error": str(e) or type(e).__name__}
             try:
-                return summarise(it, resp)
+                out = summarise(it, resp)
             except (KeyError, TypeError, ValueError, AttributeError, IndexError) as e:
-                return failed(it["id"], f"unexpected answer: {type(e).__name__}: {e}",
-                              resp.get("answers") if isinstance(resp, dict) else None)
+                out = failed(it["id"], f"unexpected answer: {type(e).__name__}: {e}",
+                             resp.get("answers") if isinstance(resp, dict) else None)
+            if gone and "error" in out:
+                out["_gone"] = True
+            return out
 
         def count(r):
             nonlocal n_items, n_err
@@ -224,9 +246,24 @@ async def run(a, transport=None):
             if "correct" in r:
                 graded.append(r["correct"])
 
-        def put(f, r):
+        def write(f, r):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
             count(r)
+
+        held = []  # the last lines the server did not answer, not written yet (written when an answer follows)
+        stop_after = getattr(a, "stop_after", STOP_AFTER)
+
+        def put(f, r):
+            if r.pop("_gone", False) and stop_after:
+                held.append(r)
+                if len(held) >= stop_after:
+                    raise ServerGone(f"the server answered none of the last {len(held)} lines (the last: "
+                                     f"{r['error'][:200]}): it stopped or cannot be reached")
+                return
+            for h in held:
+                write(f, h)
+            held.clear()
+            write(f, r)
 
         want = {"basal_run": 1, "input": fingerprint(a.input), "options": run_options(a),
                 "models": await served_models(c, a.url)}
@@ -266,6 +303,8 @@ async def run(a, transport=None):
                         put(f, await window.popleft())
                 while window:
                     put(f, await window.popleft())
+                for h in held:  # (fewer than --stop-after at the end: error lines, as any other)
+                    write(f, h)
                 done = True
             finally:
                 for t in window:  # the lines in flight are dropped (an exception of a finished one is read)
@@ -299,6 +338,10 @@ def main():
     ap.add_argument("--url", default="http://127.0.0.1:8000/v1/systemone")
     ap.add_argument("--concurrency", type=positive, default=16, help="requests in flight (the server batches them)")
     ap.add_argument("--early-exit", dest="early_exit", default=None, help="e.g. 0.99 (server mode fast-exit)")
+    ap.add_argument("--stop-after", dest="stop_after", type=int, default=STOP_AFTER,
+                    help="stop the run after this many lines in a row that the server did not answer (a connection "
+                         "error, HTTP 502 / 503 / 504), keeping <output>.part for the same command to go on from; 0: "
+                         "never stop (every such line is an error line)")
     ap.add_argument("--restart", action="store_true",
                     help="start again: replace an <output>.part of an interrupted run (by default the same command "
                          "goes on from it, and a .part of another run is refused)")
@@ -315,9 +358,11 @@ def main():
         from .presets import names
         if a.preset not in names():
             ap.error(f"--preset {a.preset}: one of {', '.join(names())}")
+    if a.stop_after < 0:
+        ap.error("--stop-after: 0 (never) or more lines")
     try:
         asyncio.run(run(a))
-    except KeyRefused as e:
+    except (KeyRefused, ServerGone) as e:
         raise SystemExit(f"basal-run: {e}") from None
 
 

@@ -4,6 +4,7 @@ interrupted run keeps its answers so far, and the input is never the output."""
 import argparse
 import asyncio
 import json
+import sys
 
 import httpx
 import pytest
@@ -238,3 +239,74 @@ def test_a_part_of_another_run_is_refused(tmp_path, change, said):
     if change in ("server", "record"):
         go(tmp_path, server, restart=True)
         assert len(server.posts) == 20 and [r["id"] for r in read(tmp_path / "out.jsonl")] == list(range(20))
+
+
+# -- a server that stops answering (2.8) -------------------------------------------------------------------------------
+class Down(Server):
+    """A fake basal server that does not answer the lines in `down` (by their number): a connection error, or an HTTP
+    `status` (502 / 503 / 504) with a body that is not JSON, as a starting server or a proxy gives."""
+
+    def __init__(self, down=(), status=None):
+        super().__init__()
+        self.down, self.status = set(down), status
+
+    def __call__(self, r):
+        if r.method == "POST" and int(json.loads(r.content)["state"].split()[1]) in self.down:
+            self.posts.append(json.loads(r.content)["state"])
+            if self.status:
+                return httpx.Response(self.status, text="Starting")
+            raise httpx.ConnectError("connection refused")
+        return super().__call__(r)
+
+
+def test_a_server_that_goes_away_stops_the_run_and_the_same_command_resumes(tmp_path, capsys):
+    """The server stops answering at line 8: after --stop-after lines it did not answer the run stops (instead of
+    failing all the rest in seconds and ending as if done), writes none of them, and keeps the .part; once the server
+    is back the same command sends the lines from 8 on, and the output is the one of an uninterrupted run."""
+    want = reference(tmp_path)
+    write(tmp_path / "in.jsonl", ITEMS)
+    with pytest.raises(Exception, match="answered none of the last 8 lines .*connection refused") as e:
+        go(tmp_path, Down(down=range(7, 20)), concurrency=4, stop_after=8)
+    assert e.type.__name__ == "ServerGone"
+    assert [r["id"] for r in read(tmp_path / "out.jsonl.part")] == list(range(7))
+    assert not (tmp_path / "out.jsonl").exists()
+    assert "the same command goes on from there" in capsys.readouterr().err
+    back = Server()
+    go(tmp_path, back, concurrency=4)
+    assert back.posts == [f"Order {i} arrived damaged." for i in range(7, 20)]
+    assert read(tmp_path / "out.jsonl") == want
+
+
+def test_a_few_unanswered_lines_between_answers_are_error_lines(tmp_path):
+    """Fewer than --stop-after lines the server did not answer, between answers, are each an error line and the run
+    goes on to the end, as before."""
+    write(tmp_path / "in.jsonl", ITEMS)
+    go(tmp_path, Down(down={3, 4, 11}), concurrency=4, stop_after=3)
+    out = read(tmp_path / "out.jsonl")
+    assert [r["id"] for r in out] == list(range(20))
+    assert [i for i, r in enumerate(out) if "error" in r] == [3, 4, 11]
+
+
+def test_a_starting_server_counts_as_not_answering_and_stop_after_0_never_stops(tmp_path):
+    """HTTP 503 with a body that is not JSON (a server starting up) is a line the server did not answer ("HTTP 503");
+    --stop-after 0 keeps the old behaviour: every such line an error line, and the run ends."""
+    write(tmp_path / "in.jsonl", ITEMS)
+    with pytest.raises(Exception, match="the last: HTTP 503") as e:
+        go(tmp_path, Down(down=range(5, 20), status=503), stop_after=4)
+    assert e.type.__name__ == "ServerGone"
+    assert [r["id"] for r in read(tmp_path / "out.jsonl.part")] == list(range(5))
+    go(tmp_path, Down(down=range(5, 20), status=503), stop_after=0, restart=True)
+    out = read(tmp_path / "out.jsonl")
+    assert len(out) == 20 and all(r["error"] == "HTTP 503" for r in out[5:])
+
+
+def test_basal_run_exits_with_the_reason_when_the_server_went_away(tmp_path, monkeypatch, capsys):
+    write(tmp_path / "in.jsonl", ITEMS)
+    real = httpx.AsyncClient
+    monkeypatch.setattr(run_module.httpx, "AsyncClient",
+                        lambda **kw: real(**dict(kw, transport=httpx.MockTransport(Down(down=range(20))))))
+    monkeypatch.setattr(sys, "argv", ["basal-run", "--input", str(tmp_path / "in.jsonl"), "--output",
+                                      str(tmp_path / "out.jsonl"), "--url", URL, "--stop-after", "5"])
+    with pytest.raises(SystemExit, match="basal-run: the server answered none of the last 5 lines"):
+        run_module.main()
+    assert (tmp_path / "out.jsonl.part").read_text() == "" and not (tmp_path / "out.jsonl").exists()
