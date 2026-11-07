@@ -1098,7 +1098,9 @@ def graph_two_way_refused(model_dir, state_cache_gb=0, prefix=False, batches="de
 
 KV_GROUP = 128  # low-bit state cache: tokens per group of a key channel
 KV_GROUP_D = 64  # and channels per group of a value token
-KV_STACK_BYTES = 64 << 20  # kv_quant_layers: layers stacked per call, up to this many bytes of keys (or values)
+# kv_quant_layers: layers stacked per call, up to this many bytes of keys (or values); the stack and kv_quant's float32
+# temporaries are a few times this per store (16 MB: ~0.1 GB, where 64 MB took ~0.45 GB on a long state)
+KV_STACK_BYTES = 16 << 20
 
 
 @torch.no_grad()

@@ -148,3 +148,54 @@ def test_longest_dequantises_only_the_winner_outside_the_lock(monkeypatch):
     assert found is not None and found[2] == 7 and found[1][0][0].shape == (2, 8, 8)
     assert calls == [False, False]  # keys and values of the winner, outside the lock
     assert seen == [(2, 8, 8)] * 3  # every improving candidate checked on its shape
+
+
+def _layers(name, T):
+    """The [(heads, tokens, head size)] of each layer a model's state cache entry holds for a state of T tokens: its own
+    KV layers (Gemma 4: the first num_hidden_layers - num_kv_shared_layers; a sliding layer keeps its window + MARGIN
+    tokens, Gemma4Graph.kv_lens), from the models' config.json."""
+    if name == "basal-2.0-4.5B":
+        return [(2, T, 128)] * 60
+    if name == "basal-2.0-mini":
+        return [(2, T, 128)] * 32
+    if name == "basal-omni-1.0-mini":  # 42 layers, 18 share KV: 24 own, every 6th full (head size 512)
+        return [(2, T, 512) if i % 6 == 5 else (2, min(T, 512 + 256), 256) for i in range(24)]
+    if name == "basal-omni-1.0-max":  # 48 own: sliding 8 KV heads of 256, full 1 KV head of 512
+        return [(1, T, 512) if i % 6 == 5 else (8, min(T, 1024 + 256), 256) for i in range(48)]
+    if name == "basal-omni-pico":  # Qwen3.5: 6 attention layers (its Gated DeltaNet states are not quantised)
+        return [(2, T, 256)] * 6
+    raise KeyError(name)
+
+
+@pytest.mark.parametrize("name, T, bits", [
+    ("basal-2.0-4.5B", 300, 8), ("basal-2.0-4.5B", 1500, 8), ("basal-2.0-4.5B", 1500, 4), ("basal-2.0-mini", 1500, 8),
+    ("basal-omni-1.0-mini", 300, 8), ("basal-omni-1.0-mini", 1500, 8), ("basal-omni-1.0-mini", 1500, 4),
+    ("basal-omni-1.0-max", 1300, 8), ("basal-omni-pico", 1500, 8)])
+def test_the_stacked_entry_is_each_layers_own_quantisation_for_every_served_layer_shape(name, T, bits):
+    """For the layer shapes of the 4.5B, Gemma 4 (mini, max: two head sizes, sliding layers shorter than a long state)
+    and Qwen3.5: the codes, steps and lows the cache stores for a stack of layers are exactly every layer's own
+    kv_quant, one after another; every layer comes back bit-identical to its own round trip; usable() reads each
+    layer's own shape; and the entry takes the bytes of the per-layer entry from the budget. 16 MB stacks: the 4.5B's
+    60 layers of a 1.5k-token state go in 3 per tensor, not 1."""
+    import basal.engine as E
+    torch.manual_seed(0)
+    shapes = _layers(name, T)
+    kv = [((torch.randn(s) * (1 + i % 5)).bfloat16(), (torch.randn(s) + i).bfloat16()) for i, s in enumerate(shapes)]
+    c = StateCache(1 << 34, bits=bits)
+    c.put(b"k", kv)
+    n, stacks = c.entries[b"k"][0]
+    assert n == len(kv) and sorted(i for idx, _, _ in stacks for i in idx) == list(range(len(kv)))
+    for idx, kq, vq in stacks:
+        for stacked, keys in ((kq, True), (vq, False)):
+            own = [kv_quant(kv[i][0 if keys else 1], bits, keys) for i in idx]
+            for part in range(3):  # codes, steps, lows: the layers' own, concatenated
+                assert torch.equal(stacked[part].flatten(), torch.cat([o[part].flatten() for o in own]))
+    for (k, v), (gk, gv) in zip(kv, c.get(b"k")):
+        assert torch.equal(gk, kv_dequant(kv_quant(k, bits, True), bits, True))
+        assert torch.equal(gv, kv_dequant(kv_quant(v, bits, False), bits, False))
+    assert [(tuple(k.shape), tuple(v.shape)) for k, v in c._shapes(c.entries[b"k"][0])] == [(s, s) for s in shapes]
+    own_size = sum(t.numel() * t.element_size() for k, v in kv for e in (kv_quant(k, bits, True), kv_quant(v, bits, False))
+                   for t in e[:3])
+    assert c.entries[b"k"][1] == own_size
+    per = {s: 2 * s[0] * s[1] * s[2] for s in shapes}  # bf16 bytes of one layer's keys
+    assert len(stacks) == sum(-(-shapes.count(s) // max(1, E.KV_STACK_BYTES // b)) for s, b in per.items())
