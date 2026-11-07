@@ -51,7 +51,9 @@ from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
 GDN_LAYERS = {"linear_attention", "full_attention"}
+# the CUDA capabilities on which a Qwen3.5 model without --mode gets fast (with fla): where its gate passed
 ACCELERATED_ARCHITECTURES = {(9, 0), (12, 0)}
+
 
 def _decoder_config(model_dir, strict=False):
     """config.json of a model directory, the decoder part (text_config of a multimodal wrapper); None if unreadable
@@ -105,9 +107,11 @@ def refused(quant=None, state_cache_gb=0, prefix=False, batches="default", lean=
 
 
 def default_fast():
-    """Whether Qwen3.5 defaults to fast on an allowlisted CUDA capability with importable fla.
-    Checked on H100 (sm90) and RTX 5060 Ti (sm120); other capabilities default to eager."""
-    return (torch.cuda.is_available() and torch.cuda.get_device_capability() in ACCELERATED_ARCHITECTURES and fla_rule() is not None)
+    """Whether a Qwen3.5 model gets --mode fast without --mode: on a capability of ACCELERATED_ARCHITECTURES with fla
+    importable. Checked on H100 (sm90) and RTX 5060 Ti (sm120); other capabilities (sm121, GB10, among them) get
+    eager."""
+    return (torch.cuda.is_available() and torch.cuda.get_device_capability() in ACCELERATED_ARCHITECTURES
+            and fla_rule() is not None)
 
 
 def _rms(x, w, eps):

@@ -188,7 +188,8 @@ def test_server_refuses_other_recurrent_models_before_download(monkeypatch, qwen
 
 
 @pytest.mark.parametrize("cc, fla, mode", [((9, 0), True, "fast"), ((9, 0), False, "eager"), ((8, 0), True, "eager"),
-                                           ((12, 0), True, "fast"), ((12, 0), False, "eager")])
+                                           ((12, 0), True, "fast"), ((12, 0), False, "eager"),
+                                           ((12, 1), True, "eager"), ((10, 0), True, "eager")])  # GB10, B200: not gated
 def test_default_mode_of_qwen35_on_cuda(monkeypatch, qwen35, cc, fla, mode):
     """Without --mode: choose fast only for an allowed CUDA capability with importable fla."""
     monkeypatch.setattr(server_module, "resolve", lambda name, revision=None, metadata_only=False: name)
