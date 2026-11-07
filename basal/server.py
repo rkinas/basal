@@ -1176,12 +1176,13 @@ def calibration_mismatch(cal, name, md, adapter=None, kind=None):
     return None
 
 
-def foreign_calibration(cal, name, md):
+def foreign_calibration(cal, name, md, kind=None):
     """Why a calibration file shipped in the model's own folder was fitted on another model, None when it was not or
-    the file does not say: one basal-calibrate wrote for another model or revision (calibration_mismatch), or one
-    basal-interpolate copied from its source checkpoints (basal.json "interpolation") that no basal-calibrate run on
-    this model has replaced (its fitted_on names no model)."""
-    why = calibration_mismatch(cal, name, md)
+    the file does not say: one basal-calibrate wrote for another model or for a revision with other model files
+    (calibration_mismatch; kind: the served engine), or one basal-interpolate copied from its source checkpoints
+    (basal.json "interpolation") that no basal-calibrate run on this model has replaced (its fitted_on names no
+    model)."""
+    why = calibration_mismatch(cal, name, md, kind=kind)
     if why:
         return why
     p = Path(md) / "basal.json"
@@ -1594,7 +1595,7 @@ class Server:
                                               "file's orders and layout)"), flush=True)
         # a file in the model's own folder fitted on another model (copied by basal-interpolate, or by hand): warned,
         # served as it is (--strict-calibration refuses it)
-        self.cal_foreign = foreign_calibration(self.cal, a.model, md) \
+        self.cal_foreign = foreign_calibration(self.cal, a.model, md, kind) \
             if not own and not self.adapter and not a.no_calibration and self.cal else None
         if self.cal_foreign:
             if getattr(a, "strict_calibration", False):
