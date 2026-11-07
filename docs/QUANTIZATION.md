@@ -272,8 +272,9 @@ with confidence bounds), NVFP4 by a narrow margin. Use block FP8 when ultra has 
 traffic; use NVFP4 when throughput on Blackwell matters more than the last half point of accuracy. `--nvfp4-scope mlp`
 quantises the MLP only (1.6x); it was not better than the full variant.
 
-The state cache is off in block FP8 until 2.5.1: `--state-cache-gb` is not used there (a warning at start-up), since
-continuing a cached state gave NaN answers on ultra (H100). Requests are then served as without the cache.
+The state cache is off in block FP8: `--state-cache-gb` is not used there (a warning at start-up), since continuing a
+cached state gave NaN answers on ultra (H100). Requests are then served as without the cache. The 2.5.0 notes
+announced the cache in block FP8 for 2.5.1; it has not been delivered yet.
 
 ### int8 for GPUs without FP8 (2.5)
 
