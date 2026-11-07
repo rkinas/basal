@@ -17,6 +17,7 @@ calibration file ("task_thresholds"); basal-calibrate fits them on labelled task
 import json
 import math
 import re
+from collections import Counter
 from decimal import Decimal, InvalidOperation
 
 from .prompt import lang_of, reads_request
@@ -156,11 +157,12 @@ def leaves(schema):
     """A JSON schema -> [(path, kind, spec)]: kind is enum, enum_list, boolean, string, number or integer; path is the
     property names joined by "." (the key of the answer's fields). Two fields with the same path (a property named
     "a.b" next to an object "a" with a property "b") are refused: field_keys() gives each path its property names."""
-    out = []
+    out, seen = [], set()  # (seen: linear in the fields; a set built per field made 32,000 of them take 25 s)
     for path, keys, kind, spec in _leaves(schema):
-        if path in {p for p, _, _ in out}:
+        if path in seen:
             raise ValueError(f"extract: two fields have the path {path!r} (a property name with a dot and a nested "
                              "object): rename one")
+        seen.add(path)
         out.append((path, kind, spec))
     return out
 
@@ -295,8 +297,8 @@ def enum_keys(values, path=""):
     """The option keys of an enum's values: the value as text (as before), or its JSON form where two values would get
     the same text (1 and "1") or a value would take the key of "not stated" -> [key per value]."""
     text = [str(v) for v in values]
-    keys = [t if text.count(t) == 1 and t != MISSING else json.dumps(v, ensure_ascii=False)
-            for t, v in zip(text, values)]
+    n = Counter(text)  # (counted once: text.count per value made 32,000 values take 19 s)
+    keys = [t if n[t] == 1 and t != MISSING else json.dumps(v, ensure_ascii=False) for t, v in zip(text, values)]
     if len(set(keys)) < len(keys):
         raise ValueError(f"extract: field {path!r}: enum values repeat ({values[:10]})")
     return keys

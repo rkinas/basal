@@ -302,6 +302,26 @@ def test_extract_with_a_scalar_or_no_schema_answers_its_root_field(schema):
     assert _at({"": 5}, field_keys(schema or {})[""]) == (True, 5)  # basal-calibrate reads the gold at the same key
 
 
+@pytest.mark.parametrize("schema", [
+    {"type": "object", "properties": {"k": {"enum": [f"v{i}" for i in range(20_000)]}}},
+    {"type": "object", "properties": {"k": {"enum": "ab" * 10_000}}},                 # (a string: its characters)
+    {"type": "object", "properties": {f"p{i}": {"type": "boolean"} for i in range(20_000)}},
+])
+def test_a_large_extract_schema_is_read_in_linear_time(schema):
+    """An extract question is expanded in Server.admit, on the event loop, before any limit: the enum values and the
+    fields are read once each (counting each value's text in the list, and a set of the paths built per field, took
+    7-10 s here and froze a server for hours on a 1.2 MB enum)."""
+    import time
+
+    from basal.tasks import expand
+    t = time.perf_counter()
+    try:
+        expand({"state": "s", "questions": {"x": {"type": "extract", "schema": schema}}}, 255)
+    except ValueError:
+        pass  # (a string's repeated characters: refused, 422)
+    assert time.perf_counter() - t < 1.0
+
+
 def test_extract_answers_map_back_to_typed_enum_values():
     from basal.tasks import expand, finish
     schema = {"type": "object", "properties": {"v": {"enum": [1, "1", "__missing__"]},
