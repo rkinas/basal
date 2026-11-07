@@ -42,9 +42,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       # the gate runs uv.lock's versions (floating ones run nightly: nightly.yml), with the CPU build of uv.lock's torch:
-      # on Linux uv.lock pulls ~86 nvidia CUDA wheels (several GB) that no CPU test needs
+      # on Linux uv.lock pulls ~86 nvidia CUDA wheels (several GB) that no CPU test needs. --locked: a uv.lock that
+      # pyproject.toml no longer matches fails here (--frozen would test the stale versions)
       - run: uv venv
-      - run: uv export --frozen --extra test --no-emit-project --no-hashes -o locked.txt
+      - run: uv export --locked --extra test --no-emit-project --no-hashes -o locked.txt
       - run: uv pip install "$(grep -E '^torch==' locked.txt | cut -d' ' -f1)" --index-url https://download.pytorch.org/whl/cpu
       - run: grep -v -E '^(nvidia-|cuda-|triton==|torch==)' locked.txt > deps.txt && uv pip install -r deps.txt
       - run: uv pip install --no-deps -e .
@@ -62,7 +63,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
           python-version: "3.13"
-      - run: uv sync --frozen --extra test
+      - run: uv sync --locked --extra test
       - run: uv run --no-sync pytest -q -n 2 --dist loadfile  # whole files per worker: module fixtures load once
 
   test-typescript:  # clients/typescript against basal-serve on the stub engine (its README, "Tests")
@@ -81,7 +82,7 @@ jobs:
       # the gate runs uv.lock's versions (floating ones run nightly: nightly.yml), with the CPU build of uv.lock's torch:
       # on Linux uv.lock pulls ~86 nvidia CUDA wheels (several GB) that no CPU test needs
       - run: uv venv
-      - run: uv export --frozen --extra test --no-emit-project --no-hashes -o locked.txt
+      - run: uv export --locked --extra test --no-emit-project --no-hashes -o locked.txt
       - run: uv pip install "$(grep -E '^torch==' locked.txt | cut -d' ' -f1)" --index-url https://download.pytorch.org/whl/cpu
       - run: grep -v -E '^(nvidia-|cuda-|triton==|torch==)' locked.txt > deps.txt && uv pip install -r deps.txt
       - run: uv pip install --no-deps -e .

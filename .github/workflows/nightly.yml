@@ -33,9 +33,11 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
           python-version: ${{ matrix.python }}
+      # floating: no uv.lock, the newest versions pyproject.toml allows (the CPU build of the newest torch)
       - run: uv venv
       - run: uv pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: uv pip install -e ".[test]"
+      - run: uv pip list  # the versions this run tested, for comparison with uv.lock's
       - run: uv run --no-sync pytest -q -n 2 --dist loadfile
 
   test-macos:
@@ -51,4 +53,5 @@ jobs:
           python-version: "3.13"
       - run: uv venv
       - run: uv pip install -e ".[test]"
+      - run: uv pip list
       - run: uv run --no-sync pytest -q -n 2 --dist loadfile
