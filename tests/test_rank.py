@@ -158,6 +158,39 @@ def test_rank_in_flight_counts_its_requests():
     assert srv.in_flight == 0 and all(f >= q for f, q in seen) and max(f for f, _ in seen) >= 2
 
 
+@pytest.mark.parametrize("others", [False, True])
+def test_a_failed_rank_request_cancels_its_other_requests(others):
+    """One failed sub-request fails the rank request, and the others are cancelled: their work (being prepared, queued)
+    is dropped, never run for nobody after the client got its error (a server answering the next clients behind
+    it)."""
+    srv = server(lambda t: 1.0)
+    started, finished = [], []
+    decide = srv.decide
+
+    async def spy(body):
+        if any(rank.is_rank(q) for q in body["questions"].values()):
+            return await decide(body)
+        i = len(started)
+        started.append(i)
+        if i == 0:
+            raise RequestError("the first chunk is longer than the context")
+        await asyncio.sleep(0.3)  # (a long preparation)
+        finished.append(i)
+        return await decide(body)
+    srv.decide = spy
+    body = {"state": "Q?", "questions": {"r": {"type": "rank", "instructions": INSTR, "top": 0, "chunk": 2,
+                                               "candidates": list("abcdefgh")}}}
+    if others:
+        body["questions"]["q"] = {"type": "noul", "instructions": "Other?"}
+
+    async def go():
+        with pytest.raises(RequestError, match="first chunk"):
+            await srv._run(body)
+        await asyncio.sleep(0.6)  # the others would have finished by now
+    asyncio.run(go())
+    assert len(started) == 4 + others and finished == [] and srv.in_flight == 0
+
+
 @pytest.mark.parametrize("q, msg", [
     ({"instructions": "Is it relevant?", "candidates": ["a", "b"]}, "{candidate}"),
     ({"candidates": "a b"}, "candidates must be"),

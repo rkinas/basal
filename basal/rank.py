@@ -187,6 +187,21 @@ def fits(srv, state, spec):
     return n + len(srv.tok(spec["instructions"], add_special_tokens=False).input_ids) + MARGIN <= limit[0]
 
 
+async def every(aws):
+    """The results of aws (a request's sub-requests), as asyncio.gather; when one fails, the others are cancelled
+    before its error is raised: their queued work is dropped (Server.ask) and a preparation not started yet never
+    runs, as for a client that disconnects. gather alone left them running for nobody after the client got its error,
+    and every later request waited behind them."""
+    tasks = [asyncio.ensure_future(a) for a in aws]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def sub(srv, body):
     """A sub-request through Server.decide, counted in flight (GET /health) like a client request."""
     srv.in_flight += 1
@@ -210,7 +225,7 @@ async def screen(srv, state, spec, fields):
               for n, i in enumerate(idx)}
         bodies.append(dict(fields, state=compose(state, text, spec["order"]), questions=qs))
         parts.append((idx, names))
-    outs = await asyncio.gather(*(sub(srv, b) for b in bodies))
+    outs = await every(sub(srv, b) for b in bodies)
     yes = [0.0] * len(spec["cands"])
     for (idx, _), out in zip(parts, outs):
         for n, i in enumerate(idx):
@@ -287,7 +302,7 @@ async def decide(srv, body):
     jobs = [rank_one(srv, state, s, fields) for s in specs]
     if others:
         jobs.append(srv.decide(dict(body, questions=others)))
-    res = await asyncio.gather(*jobs)
+    res = await every(jobs)
     answers, subs = {}, []
     if others:
         rest = res.pop()
