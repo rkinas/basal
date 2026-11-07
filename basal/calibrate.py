@@ -1385,7 +1385,8 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
                "temperature_source": dict(source, **{f"choice {k}": v for k, v in bsource.items()}),
                "thresholds": thresholds, **extra}
         return cal, report
-    return dict(temperature_per_prim=temps, temperature_source=source, thresholds=thresholds, **extra), report
+    # (prompt 1 said, as a file 2 says 2: basal-serve refuses the file for a model of the other format at start-up)
+    return dict(prompt=1, temperature_per_prim=temps, temperature_source=source, thresholds=thresholds, **extra), report
 
 
 def as_served(data, path, fmt=None):

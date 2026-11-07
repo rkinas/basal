@@ -40,8 +40,8 @@ def test_bucket_temperatures_are_fitted_where_there_are_enough_decisions():
     assert kept["temperature_per_bucket"]["choice"]["27-255"] == 1.7     # --min-blend 0: the shipped one is kept
     assert 1.6 < cal["temperature_per_prim"]["noul"] < 2.5
     assert set(report["buckets"]) == {name for name, _, _ in BUCKETS}
-    one, _ = fit(data, {}, [0.05], 50, fmt=1)  # format 1: the 1.5 file, no buckets
-    assert "temperature_per_bucket" not in one and "prompt" not in one
+    one, _ = fit(data, {}, [0.05], 50, fmt=1)  # format 1: no buckets, and its format said (basal-serve checks it)
+    assert "temperature_per_bucket" not in one and one["prompt"] == 1
 
 
 def test_table_shows_the_temperatures_as_served():

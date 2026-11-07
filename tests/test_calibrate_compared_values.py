@@ -70,3 +70,16 @@ def test_the_run_compares_with_the_numbers_basal_serve_reads(tmp_path):
     path.write_text(json.dumps({"temperature_per_prim": {"noul": "1.2", "custom": "x"}}), encoding="utf-8")
     data, f, _ = compared(tmp_path, "eager", str(path), None, None, False)
     assert data["temperature_per_prim"] == {"noul": 1.2, "custom": "x"} and f == path  # (not a type: never read)
+
+
+def test_a_file_basal_calibrate_writes_for_format_1_says_so(tmp_path):
+    """A file 1 said no format, so basal-serve took it for a format-2 model (its temperatures fitted on other
+    prompts), as it never takes a file 2 for a format-1 model; the --from-rows refit writes it the same way."""
+    from basal.calibrate import fit
+    from basal.server import check_calibration
+    written, _ = fit(rows(), {}, [0.05], fmt=1)
+    assert written["prompt"] == 1
+    with pytest.raises(SystemExit, match="fitted for prompt format 1, the model uses format 2"):
+        check_calibration(written, 2, "CALIBRATION.custom.json")
+    check_calibration(written, 1, "CALIBRATION.custom.json")
+    assert refit(tmp_path, {"temperature_per_prim": {"choice": 1.04, "noul": 1.56}})["prompt"] == 1

@@ -414,7 +414,9 @@ labelled `multi` questions `multi`, and from task questions `task_thresholds` (w
 `task_gates` (their FIT and CERT figures). A file fitted on task questions only says where its decision calibration
 comes from in `decision_calibration`. For a prompt-format-2 model it is
 calibration file 2: `"prompt": 2` and `temperature_per_bucket` (the table then has one row per bucket under `choice`);
-basal-serve refuses a file fitted for another prompt format than the model's. The table printed at the end:
+for a format-1 model it says `"prompt": 1`. basal-serve refuses a file fitted for another prompt format than the
+model's (a file 1 written before 2.8 does not say its format, and is read as one of the model's), and basal-calibrate
+refuses such a file to compare with. The table printed at the end:
 
 ```
 type        n   FIT  CERT  accuracy   temperature shipped -> fitted   ECE on CERT shipped -> fitted
