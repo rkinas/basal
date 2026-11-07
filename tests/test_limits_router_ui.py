@@ -60,6 +60,24 @@ def test_ui_full_keeps_the_newest_requests_within_its_byte_budget(monkeypatch):
     assert [b[0] for b in u.bodies] == [4]
 
 
+def test_ui_full_keeps_the_bytes_its_budget_counts_not_the_parsed_body():
+    """The budget counts a body's bytes as sent; the parsed body can be many times larger in memory (an array of empty
+    objects: about 19x, so 256 MiB of such bodies held about 5 GB). The bytes are kept, and parsed when the page asks
+    for the request, which then reads as it did."""
+    _, u, _ = app_of(full=True)
+
+    async def handler(_):
+        return types.SimpleNamespace(status_code=422, body=b'{"error": "x"}')
+    rec = u.record(handler, "/v1/systemone")
+    body = {"state": [{}] * 1000, "questions": {}}
+    raw = json.dumps(body).encode()
+    asyncio.run(rec(types.SimpleNamespace(_json=body, _body=raw)))
+    assert u.bodies[0][1] is raw and u.kept_bytes == len(raw) + len(b'{"error": "x"}')
+    assert json.loads(u.request_json(1))["request"] == body
+    asyncio.run(rec(types.SimpleNamespace(_json=None, _body=b"[" * 5000)))  # (not JSON to the route: text, as before)
+    assert json.loads(u.request_json(2))["request"] == "[" * 5000
+
+
 def test_ui_full_shows_a_kept_request_that_held_a_lone_surrogate():
     from test_ui import on
     srv, u, app = app_of(full=True)

@@ -339,8 +339,9 @@ class UI:
         from . import __version__
         self.srv, self.a, self.mode, self.version = srv, a, mode, __version__
         self.ring = deque(maxlen=RING)  # (end perf_counter, endpoint, status, seconds, questions, options[, id])
-        # --ui full: (id, parsed body (or its bytes when it was not JSON), answer bytes, ring row, the name of the API
-        # key that made it or None, bytes of body and answer as sent) of the last RECENT, FULL_BYTES of them at most
+        # --ui full: (id, the body's bytes as sent (parsed when GET /ui/request/<id> reads it), answer bytes, ring row,
+        # the name of the API key that made it or None, bytes of body and answer as sent) of the last RECENT,
+        # FULL_BYTES of them at most
         self.bodies, self.ids = (deque(maxlen=RECENT), itertools.count(1)) if full else (None, None)
         self.kept_bytes = 0
         self.wall0, self.perf0 = time.time(), time.perf_counter()
@@ -379,7 +380,9 @@ class UI:
             n = len(raw or b"") + len(answer or b"")
             if len(bodies) == bodies.maxlen:
                 self.kept_bytes -= bodies[0][5]
-            bodies.append((rid, body if body is not None else raw, answer, row, key.get("name") if key else None, n))
+            # the bytes the budget counts, not the parsed body: that one is many times larger in memory (an array of
+            # empty objects: ~19x) and would hold several GB within the budget
+            bodies.append((rid, raw if raw is not None else body, answer, row, key.get("name") if key else None, n))
             self.kept_bytes += n
             while self.kept_bytes > FULL_BYTES and len(bodies) > 1:  # (a large body pushes the older ones out)
                 self.kept_bytes -= bodies.popleft()[5]
@@ -422,8 +425,11 @@ class UI:
         _, body, answer, row, owner, _ = kept
         if key is not None and not key.get("admin", False) and key.get("name") != owner:
             return False
-        if isinstance(body, (bytes, bytearray)):
-            body = body.decode("utf-8", "replace")
+        if isinstance(body, (bytes, bytearray)):  # (as sent: parsed here, as the route parsed it; else as text)
+            try:
+                body = json.loads(body)
+            except (ValueError, RecursionError):
+                body = body.decode("utf-8", "replace")
         meta = {"id": rid, "time": round(self.wall0 + row[0] - self.perf0, 3), "endpoint": row[1], "status": row[2],
                 "ms": _ms(row[3]), "questions": row[4], "options": row[5]}
         try:
