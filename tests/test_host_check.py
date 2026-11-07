@@ -59,6 +59,23 @@ def test_a_loopback_server_without_keys_answers_only_its_own_host(headers, statu
     assert got == status and health == 200 and len(calls) == (1 if status == 200 else 0)
 
 
+def test_a_probe_of_health_is_answered_whatever_host_it_names():
+    """GET and HEAD of /health and /health/ stay open, as the API keys leave them (a load balancer or a proxy probes
+    with a host of its own); every other route is still checked."""
+    a = parser().parse_args(["--mode", "eager", "--host", "127.0.0.1"])
+    srv = AppServer(Engine())
+    app = served_app(srv, a)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000") as c:
+            h = {"host": "basal.internal"}
+            return [(await c.request(m, p, headers=h)).status_code for m in ("GET", "HEAD") for p in ("/health",
+                                                                                                    "/health/")], \
+                (await c.get("/v1/models", headers=h)).status_code
+    probes, other = asyncio.run(go())
+    assert probes == [200, 200, 200, 200] and other == 403
+
+
 def test_allowed_hosts_and_cors_origins_widen_it_and_a_network_bind_is_not_checked():
     calls = []
     assert requests(["--host", "127.0.0.1", "--allowed-hosts", "basal.lan"], calls)({"host": "basal.lan"})[0] == 200

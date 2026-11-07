@@ -167,12 +167,13 @@ def _host_of(value):
 def host_check(app, hosts, cors_origins=()):
     """ASGI: a request whose Host header names a host outside `hosts`, or that comes from a web page of another origin
     (an Origin header outside `hosts` and --cors-origins), answers 403 before the app reads it: a page cannot reach a
-    loopback server through DNS rebinding, nor send it requests from another site. GET /health stays open."""
+    loopback server through DNS rebinding, nor send it requests from another site. GET and HEAD of /health and /health/
+    stay open, as protect leaves them (a load balancer or a proxy probes with a host of its own)."""
     from urllib.parse import urlsplit
     origins = {o.rstrip("/").lower() for o in cors_origins}
 
     async def checked(scope, receive, send):
-        if scope["type"] != "http" or (scope["path"] == "/health" and scope["method"] == "GET"):
+        if scope["type"] != "http" or (scope["path"] in ("/health", "/health/") and scope["method"] in ("GET", "HEAD")):
             await app(scope, receive, send)
             return
         headers = dict(scope.get("headers", ()))
