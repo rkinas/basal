@@ -289,6 +289,19 @@ def test_extract_field_paths_and_enum_values_keep_their_meaning():
     assert task_units("e", q, {"customer.name": "Alice"}, "Customer: Alice") == [("customer.name", ("string", "Alice"))]
 
 
+@pytest.mark.parametrize("schema", [None, {}, {"type": "string"}, {"type": "integer"}, {"enum": ["a", "b"]}])
+def test_extract_with_a_scalar_or_no_schema_answers_its_root_field(schema):
+    """A scalar schema (or none) is one field at the root, answered under the key "" as before field paths were
+    tuples; their empty tuple failed the answer's assembly with a ValueError (a 500)."""
+    from basal.calibrate import _at
+    from basal.tasks import field_keys
+    q = {"type": "extract"} if schema is None else {"type": "extract", "schema": schema}
+    x = run(FakeServer(by_text(lambda s, o: 1)), {"state": "Invoice FV/12\nTotal: 5", "questions": {"x": q}})
+    assert list(x["answers"]["x"]["data"]) == [""] and list(x["answers"]["x"]["fields"]) == [""]
+    assert field_keys(schema or {}) == {"": ("",)}
+    assert _at({"": 5}, field_keys(schema or {})[""]) == (True, 5)  # basal-calibrate reads the gold at the same key
+
+
 def test_extract_answers_map_back_to_typed_enum_values():
     from basal.tasks import expand, finish
     schema = {"type": "object", "properties": {"v": {"enum": [1, "1", "__missing__"]},

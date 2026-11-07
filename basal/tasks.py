@@ -166,9 +166,10 @@ def leaves(schema):
 
 
 def field_keys(schema):
-    """{path: the property names from the root} of every field of leaves(schema)."""
+    """{path: the property names from the root} of every field of leaves(schema). A scalar schema is one field at the
+    root, under the name "" (its data {"": value}, as when paths were split at their dots)."""
     leaves(schema)  # the same checks
-    return {path: keys for path, keys, _, _ in _leaves(schema)}
+    return {path: keys or ("",) for path, keys, _, _ in _leaves(schema)}
 
 
 def _leaves(schema, keys=()):
