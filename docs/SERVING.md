@@ -644,6 +644,15 @@ Answers are written as they arrive, in input order, to `<output>.part`, which be
 interrupted run keeps its answers so far there). An existing `--output` file is replaced when the run ends (an
 interrupted run leaves it as it was); `--output` cannot be the `--input` file. At the end `basal-run` prints a summary
 (items per second, median latency and accuracy if gold labels are present).
+
+An interrupted run is resumed by running the same command again (2.8): `basal-run` keeps the answers in
+`<output>.part` and sends only the lines after them, so a run of tens of hours loses no more than the lines in flight
+when it stopped. A line cut short by the interruption, and errors written after the last answer (a server that went
+away), are sent again; an error between answers stays. `<output>.part.json` records the run: the `--input` file's
+size and sha256, the options that make the requests (`--preset`, `--lang`, `--early-exit`) and the server's
+`GET /v1/models` (its model, mode and calibration). A `.part` of another input, other options or another server is
+refused, as is one without that record (from basal-run 2.7 or earlier): `--restart` replaces it. `--concurrency` may
+differ.
 Ready-to-run examples (Polish and English) in `basal/examples/` of the repository, also installed with the package
 (`$EX` above):
 

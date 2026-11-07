@@ -14,10 +14,18 @@ Output (one line per input line, same order): {"id", "answers", "latency_ms"} pl
 back gets "error" instead, and the other lines go on. Lines are read and answers written as they go (at most a few
 times --concurrency lines are held), into <output>.part, renamed to <output> at the end (an existing <output> is
 replaced then): an interrupted run keeps the answers so far, in order, in <output>.part. A summary (accuracy if gold is present, latency) is printed at the end.
+
+Resuming (2.8): the same command, run again after an interruption, goes on from <output>.part instead of starting
+again: its answers are kept and only the lines after them are sent (a line cut short by the interruption, and errors
+after the last answer, are sent again). <output>.part.json records the run: the --input file's size and sha256, the
+options that make the requests (--preset, --lang, --early-exit) and the server's GET /v1/models. A .part of another
+input, other options or another server is refused, as is one without that record; --restart replaces it.
+--concurrency may differ.
 """
 import argparse
 import asyncio
 import collections
+import hashlib
 import json
 import os
 import statistics
@@ -102,11 +110,81 @@ def lines(path):
             yield item if isinstance(item, dict) else ValueError(f"line {n}: not a JSON object")
 
 
+def fingerprint(path):
+    """The --input file's size and sha256, or None when it is not a file (a pipe cannot be read again to check it)."""
+    p = Path(path)
+    if not p.is_file():
+        return None
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return {"bytes": p.stat().st_size, "sha256": h.hexdigest()}
+
+
+def run_options(a):
+    """The options that make the requests: a resumed run must send the same."""
+    return {"preset": getattr(a, "preset", None), "lang": getattr(a, "lang", None), "early_exit": a.early_exit}
+
+
+async def served_models(c, url):
+    """GET /v1/models of the server behind --url (the served model, mode, calibration), or None when it does not
+    answer it."""
+    if "/v1/" not in url:
+        return None
+    try:
+        r = await c.get(url.split("/v1/")[0] + "/v1/models")
+        return r.json() if r.status_code == 200 else None
+    except Exception:  # noqa: BLE001  (not served, not JSON, down)
+        return None
+
+
+def resume_refused(record, want, part):
+    """Why <output>.part cannot be continued by this run (its record against this run's), or None."""
+    if record is None:
+        return f"it has no record of its run ({part}.json, written by basal-run 2.8 and later)"
+    if want["input"] is None:
+        return "the --input is not a file, so it cannot be checked to be the same"
+    if record.get("input") != want["input"]:
+        return "another --input (its size or contents differ)"
+    other = [k for k in want["options"] if record.get("options", {}).get(k) != want["options"][k]]
+    if other:
+        return "other options: " + ", ".join(f"--{k.replace('_', '-')}" for k in other)
+    if record.get("models") is not None and want["models"] is not None and record["models"] != want["models"]:
+        return "another server (its GET /v1/models differs: another model, mode or calibration)"
+    return None
+
+
+def kept(part, items):
+    """The answers of <output>.part a resumed run keeps: its complete lines, each the answer of the input line of its
+    place (its id), up to the last one without an error -> (bytes kept, [what the summary counts of each]). A line
+    cut short by the interruption and the errors after the last answer are sent again."""
+    good, end, upto = [], 0, (0, 0)  # (bytes, lines) up to the last answer
+    with open(part, "rb") as f:
+        for i, it in enumerate(items):
+            line = f.readline()
+            if not line.endswith(b"\n"):  # (the end, or a line cut short)
+                break
+            try:
+                r = json.loads(line)
+            except ValueError:
+                break
+            want = it.get("id", i) if isinstance(it, dict) else i
+            if not isinstance(r, dict) or r.get("id") != want:
+                break
+            good.append({k: r[k] for k in ("error", "latency_ms", "correct") if k in r})
+            end += len(line)
+            if "error" not in r:
+                upto = (end, len(good))
+    return upto[0], good[: upto[1]]
+
+
 async def run(a, transport=None):
     if same_file(a.input, a.output):
         raise SystemExit(f"--output {a.output} is the --input file: give another file (the answers would replace "
                          "the requests)")
     part = Path(str(a.output) + ".part")
+    record_path = Path(str(part) + ".json")
     sem = asyncio.Semaphore(a.concurrency)
     window = collections.deque()  # the lines in flight, in input order (a bounded reorder buffer)
     n_items = n_err = 0
@@ -135,9 +213,8 @@ async def run(a, transport=None):
                 return failed(it["id"], f"unexpected answer: {type(e).__name__}: {e}",
                               resp.get("answers") if isinstance(resp, dict) else None)
 
-        def put(f, r):
+        def count(r):
             nonlocal n_items, n_err
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
             n_items += 1
             if "error" in r:
                 n_err += 1
@@ -147,11 +224,43 @@ async def run(a, transport=None):
             if "correct" in r:
                 graded.append(r["correct"])
 
+        def put(f, r):
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            count(r)
+
+        want = {"basal_run": 1, "input": fingerprint(a.input), "options": run_options(a),
+                "models": await served_models(c, a.url)}
+        skip = 0
+        if part.exists() and not getattr(a, "restart", False):
+            try:
+                record = json.loads(record_path.read_text(encoding="utf-8")) if record_path.exists() else None
+            except ValueError:
+                record = None
+            why = resume_refused(record, want, part)
+            if why:
+                raise SystemExit(f"basal-run: {part} is from another run: {why}. --restart replaces it (its answers "
+                                 "are lost), or give another --output")
+            size, old = kept(part, lines(a.input))
+            with open(part, "r+b") as f:
+                f.truncate(size)
+            for r in old:
+                count(r)
+            skip = len(old)
+            unchecked = " (the server not compared: no GET /v1/models)" if want["models"] is None else ""
+            print(f"basal-run: resuming {part}: {skip} answers kept, going on from line {skip + 1}{unchecked}",
+                  file=sys.stderr)
+        else:
+            tmp = Path(str(record_path) + ".tmp")
+            tmp.write_text(json.dumps(want, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, record_path)
+
         done = False
         t0 = time.perf_counter()
-        with open(part, "w", encoding="utf-8") as f:
+        with open(part, "a" if skip else "w", encoding="utf-8") as f:
             try:  # (KeyRefused ends the run below, after the answers so far are kept)
                 for i, it in enumerate(lines(a.input)):
+                    if i < skip:  # (answered by the run this one resumes)
+                        continue
                     window.append(asyncio.ensure_future(one(i, it)))
                     while len(window) >= 4 * a.concurrency or window and window[0].done():
                         put(f, await window.popleft())
@@ -166,9 +275,11 @@ async def run(a, transport=None):
                         t.exception()
                 if not done:
                     f.flush()
-                    print(f"basal-run: stopped; the {n_items} answers so far are in {part}", file=sys.stderr)
+                    print(f"basal-run: stopped; the {n_items} answers so far are in {part}: the same command goes on "
+                          "from there (--restart starts again)", file=sys.stderr)
         wall = time.perf_counter() - t0
     os.replace(part, a.output)
+    record_path.unlink(missing_ok=True)
     s = {"items": n_items, "errors": n_err, "seconds": round(wall, 2),
          "items_per_s": round(n_items / wall, 1) if wall else None,
          "server_latency_p50_ms": round(statistics.median(lat), 2) if lat else None}
@@ -188,6 +299,9 @@ def main():
     ap.add_argument("--url", default="http://127.0.0.1:8000/v1/systemone")
     ap.add_argument("--concurrency", type=positive, default=16, help="requests in flight (the server batches them)")
     ap.add_argument("--early-exit", dest="early_exit", default=None, help="e.g. 0.99 (server mode fast-exit)")
+    ap.add_argument("--restart", action="store_true",
+                    help="start again: replace an <output>.part of an interrupted run (by default the same command "
+                         "goes on from it, and a .part of another run is refused)")
     add_api_key(ap)
     a = ap.parse_args()
     if a.list_presets:
