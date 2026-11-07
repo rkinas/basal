@@ -1048,7 +1048,7 @@ def per_type_thresholds(fit_rows, cert_rows, temps, buckets, risk, tempered=None
         deff_c = design_effect_of([r["group"] for r in rc], rho)
         if t in keep:  # FIT and CERT together test it (neither certified it), with their own design effect
             _, deff_all = design_effect(cf + cc, [r["group"] for r in rf + rc])
-            out[t] = kept_entry(cf, cc, certified(baseline, risk, t), risk, deff, deff_c, deff_all)
+            out[t] = kept_entry(cf, cc, shipped_threshold(baseline, risk, t), risk, deff, deff_c, deff_all)
         else:
             out[t], _ = certify(cf, cc, risk, deff, deff_c)
         if rho:
@@ -1200,9 +1200,18 @@ def clean_rows(rows):
     return kept, dropped
 
 
+def shipped_threshold(baseline, risk, t):
+    """The compared file's own threshold for type t at max_error risk (thresholds[risk].per_type[t]), None when it has
+    none. Unlike server.certified, never the pooled threshold of a format-1 file without per_type (the basal-1.5
+    files): it was certified over all the types together, so kept per type it would become a certificate of each."""
+    entry = ((baseline or {}).get("thresholds") or {}).get(str(float(risk))) or {}
+    return ((entry.get("per_type") or {}).get(t) or {}).get("confidence")
+
+
 def check_keep(keep, baseline):
     """--keep-shipped: the types to keep, in PRIMS order; SystemExit when a type is not choice / noul / score, or the
-    compared file has no temperature or no threshold for it (a shipped threshold holds with its temperature only)."""
+    compared file has no temperature or no per-type threshold for it (a shipped threshold holds with its temperature
+    only; shipped_threshold)."""
     keep = set(keep)
     if not keep:
         return ()
@@ -1214,9 +1223,16 @@ def check_keep(keep, baseline):
         if t not in shipped_T:
             raise SystemExit(f"--keep-shipped {t}: the compared calibration has no {t} temperature to keep "
                              "(give --calibration FILE or --model; not with --no-calibration)")
-        if not any(certified(baseline, float(r), t) is not None for r in (baseline.get("thresholds") or {})):
-            raise SystemExit(f"--keep-shipped {t}: the compared calibration has no {t} threshold to keep (a file "
-                             "fitted on other option orders loses its thresholds, as in basal-serve)")
+        risks = [float(r) for r in (baseline.get("thresholds") or {})]
+        if any(shipped_threshold(baseline, r, t) is not None for r in risks):
+            continue
+        if any(certified(baseline, r, t) is not None for r in risks):
+            raise SystemExit(f"--keep-shipped {t}: the compared calibration has no {t} threshold of its own, only one "
+                             "pooled over all the types (a file written before per-type thresholds): it was not "
+                             f"certified on {t} decisions, so it is not kept as their certificate")
+        raise SystemExit(f"--keep-shipped {t}: the compared calibration has no {t} threshold to keep (a file fitted "
+                         "on other option orders, another layout or another model loses its thresholds, as in "
+                         "basal-serve)")
     return tuple(t for t in PRIMS if t in keep)
 
 
@@ -1254,7 +1270,7 @@ def fit(rows, baseline, targets, min_per_type=50, fmt=1, min_family=30, referenc
         report["targets"][risk] = dict(shipped=old, shipped_cert=gate(shipped_cert, old) if old is not None else None,
                                        fitted=entry, fitted_cert=g_cert,
                                        shipped_per_type={t: c for t in PRIMS
-                                                         if (c := certified(baseline, risk, t)) is not None})
+                                                         if (c := shipped_threshold(baseline, risk, t)) is not None})
     for k in floor_thresholds(thresholds, targets):  # a floored target's figures, as served
         report["targets"][float(k)].update(fitted=thresholds[k], fitted_cert=gate(cs_cert, thresholds[k]["confidence"]))
     automated, automated_pooled, automated_error = {}, {}, {}

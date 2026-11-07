@@ -107,3 +107,15 @@ def test_a_kept_threshold_your_decisions_refute_is_withdrawn():
     # ten, which refutes nothing
     cal, _ = fit(noul_errors(per_group=10), SHIPPED, [0.05], keep=("noul",))
     assert cal["thresholds"]["0.05"]["per_type"]["noul"]["confidence"] == 0.6
+
+
+POOLED = {"temperature_per_prim": {"choice": 1.04, "noul": 1.56}, "thresholds": {"0.05": {"confidence": 0.6}}}
+
+
+def test_a_pooled_only_threshold_is_not_kept_as_a_type_certificate():
+    # a format-1 file without per_type (basal-1.5): its one threshold was certified over all the types together
+    assert certified(POOLED, 0.05, "noul") == 0.6                  # basal-serve applies it to every type of that file
+    with pytest.raises(SystemExit, match="only one pooled over all the types"):
+        check_keep(("noul",), POOLED)
+    _, report = fit(rows(), POOLED, [0.05])
+    assert not any("--keep-shipped" in w for w in warnings(report, [0.05]))   # no hint at an option that refuses
