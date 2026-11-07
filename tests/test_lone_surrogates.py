@@ -1,4 +1,4 @@
-"""A lone surrogate ("\ud800", valid JSON but no Unicode text) anywhere in a request answers 422 (400 on
+"""A lone surrogate ("\\ud800", valid JSON but no Unicode text) anywhere in a request answers 422 (400 on
 /v1/decisions) before the engine runs, instead of a 500 from the tokenizer or the answer's UTF-8; an escaped pair
 (an emoji) is one character and is decided as before; --ui full can still show a kept request that held one."""
 import asyncio
