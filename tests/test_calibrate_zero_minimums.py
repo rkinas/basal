@@ -56,3 +56,15 @@ def test_refit_on_a_good_header_and_a_bad_row_names_the_line(tmp_path, bad):
     path.write_text('{"basal_calibrate_rows": 1}\n' + '{"prim": "choice"}\n' + bad + "\n", encoding="utf-8")
     with pytest.raises(SystemExit, match=r"line 3 is not a row"):
         calibrate.refit(argparse.Namespace(input=str(path)), [0.05], None, None)
+
+
+@pytest.mark.parametrize("flag, value, low", [("--min-family", "0", 1), ("--min-blend", "-1", 0),
+                                              ("--min-per-type", "-1", 0), ("--min-per-set", "-5", 0)])
+def test_a_minimum_below_what_the_fit_takes_is_refused_before_any_readout(tmp_path, flag, value, low):
+    """--min-family 0 (an empty family's ECE) and --min-blend -1 (max() of no candidate) failed after the whole
+    readout; they are refused with the command line, as --targets is."""
+    with pytest.raises(SystemExit, match=f"{flag} {value}: give {low} or more"):
+        calibrate.main([str(tmp_path / "labels.jsonl"), flag, value])
+    for ok in ("--min-family 1", "--min-blend 0", "--min-per-type 0", "--min-per-set 0"):
+        name, v = ok.split()
+        calibrate.options(calibrate.parser().parse_args(["x.jsonl", name, v]))

@@ -1871,6 +1871,11 @@ def options(a):
         raise SystemExit(f"--conformal {a.conformal!r}: give coverage levels such as 0.8,0.9,0.95") from None
     if not all(0 < x < 1 for x in a.conformal):
         raise SystemExit("--conformal levels must lie between 0 and 1")
+    # (checked before any readout: --min-family 0 and --min-blend -1 failed with a traceback after the whole run)
+    for flag, value, low in (("--min-family", a.min_family, 1), ("--min-blend", a.min_blend, 0),
+                             ("--min-per-type", a.min_per_type, 0), ("--min-per-set", a.min_per_set, 0)):
+        if value < low:
+            raise SystemExit(f"{flag} {value}: give {low} or more")
     a.keep_shipped = tuple(x.strip() for x in (a.keep_shipped or "").split(",") if x.strip())
     if a.calibration and not Path(a.calibration).exists():
         raise SystemExit(f"--calibration {a.calibration}: no such file")
