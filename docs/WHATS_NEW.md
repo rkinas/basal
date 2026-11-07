@@ -1,3 +1,200 @@
+# What is new in basal 2.6.0
+
+Released 7 November 2026. Bug fixes, most of them contributed by Rafal Wiktorowicz (NovaraX), Dariusz Koryto and Grzegorz
+Stark, and our own. Answers to valid requests are byte-identical to 2.5.5 except where a fix below says it changes
+them (checked on an H100 and on an RTX PRO 6000 Blackwell with basal-omni-1.0-mini in `--mode fast` and `--mode
+eager`, basal-omni-1.0-mini-FP8, basal-omni-pico and basal-2.0-mini-FP8 in `--mode fast`). The answers that change:
+a typeset minus in `extract` (#121), the language of a truncated state (#126), amounts written with special spaces
+and rank listings with line breaks (#120), images with transparency, an EXIF orientation or more than 4,096 px a
+side (#120), and the start-to-start answer sets of basal-omni-pico on the RTX PRO 6000 Blackwell and in `--mode
+eager` and of basal-2.0 in `--mode fast`, now one set (#137). New refusals: an animated or multi-page image
+(#120), two short-form `act` inputs (#125), `--targets` below 1e-6 (#116) and a calibration temperature that is not
+a finite number above 0 (#119). A request whose client disconnects is cancelled and answers 499 (#132).
+
+- **`--mode mlx` refuses the state cache for a RoPE that depends on the sequence length** (`--state-cache-gb`,
+  `--prefix-cache`). Cached keys are continued in forwards of other lengths. With a dynamic-NTK RoPE, a state
+  continued from the cache was therefore read with keys rotated for another length. On a small test model past its
+  `max_position_embeddings` this gave probabilities 6e-5 off the uncached ones, which the cache otherwise matches bit
+  for bit. Such a model is now refused at start with a message. The default, linear, llama3, yarn, longrope and
+  Gemma 4's proportional RoPE take the cache as before; every basal model uses one of them, so nothing changes for
+  basal's models. The `--state-cache-gb` help and SERVING.md also say that the cache is shared by all clients: a
+  client can tell from the response time whether a state it guesses is cached. Contributed by Grzegorz Stark
+  (@gstark0), [#50](https://github.com/rkinas/basal/pull/50).
+- **A worked example: helpdesk ticket triage** (`examples/triage/`): the `triage` preset on 300 labelled Polish
+  tickets, a held-out set and a blind safety set, `basal-calibrate` input with the Polish and the English wording, a
+  webhook that routes tickets to queues (an alarm queue first for a risk to people), and a guide in English and Polish
+  with the measured results. Contributed by Dariusz Koryto (@dkoryto), [#96](https://github.com/rkinas/basal/pull/96).
+- **Files saved by Notepad or PowerShell 5 are read** (basal-serve, basal-calibrate, basal-run, basal-bench,
+  basal-agree, basal-selfcheck and the other tools): a calibration, API key, `--reference` or JSONL file saved with a
+  BOM (Notepad) or in UTF-16 (PowerShell 5 `>` and `Out-File`) stopped basal-serve at start-up or failed on its first
+  line. These files are now read in UTF-8 with or without a BOM and in UTF-16 with its BOM. A UTF-8 file without a BOM
+  reads as before, and JSONL input is still split at `\n` only. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#115](https://github.com/rkinas/basal/pull/115), [#123](https://github.com/rkinas/basal/pull/123).
+- **A valid Bearer is accepted next to a stale X-API-Key** (basal-serve `--api-keys`): with both headers sent, the
+  `X-API-Key` won, so a stale one gave a 401 even with a valid `Authorization: Bearer`. A request is now let through
+  when either header holds a valid key. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#115](https://github.com/rkinas/basal/pull/115).
+- **A load balancer's probe of `/health` is open** (basal-serve `--api-keys`): only `GET /health` was open, so
+  `HEAD /health` and `/health/` got a 401 and took the server out of rotation. `GET` and `HEAD` of `/health` and
+  `/health/` are now open; every other route still needs a key. Without `--api-keys`, `GET /health/` answers 200
+  instead of a redirect. Contributed by Rafal Wiktorowicz (NovaraX), [#115](https://github.com/rkinas/basal/pull/115).
+- **basal-calibrate refuses `--targets` below 1e-6**: a tiny `max_error` made the threshold scan very slow, and 1e-17
+  ended in a `ZeroDivisionError`; such a target would need millions of labelled decisions. The parser now asks for
+  targets in [1e-6, 1). A per-bucket temperature of calibration file 2 that sits on the edge of the search is warned
+  about, as a type's already was. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#116](https://github.com/rkinas/basal/pull/116).
+- **`fitted_on` counts the decisions that were fitted** (basal-calibrate, `--from-rows` too): rows left out of the fit
+  (NaN probabilities, a gold that is no option index) were still counted in `fitted_on.decisions` and in the
+  sample-size warning of `--from-rows`; `decisions` is now `fit + cert` again.
+  [#116](https://github.com/rkinas/basal/pull/116).
+- **A gold that is not an option index is no longer scored in silence** (basal-bench, basal-agree): a gold of `true`,
+  `false`, `7`, `-1` or `"B"` was read as an option (`false` as option 0), so basal-bench showed an accuracy of 0.9
+  or 1.0 and basal-agree counted the item as never correct. basal-bench now stops before any engine is loaded and
+  names the file and line of the question; basal-agree leaves such items out of the accuracy and says how many.
+  Contributed by Rafal Wiktorowicz (NovaraX), [#117](https://github.com/rkinas/basal/pull/117).
+- **`basal-loadtest --determinism` sees an answer that vanished under load**: the answers alone and under load were
+  zipped, so a question missing under load was cut away and the request counted as identical. It now counts as the
+  largest change, 1.0. With fewer than 2 x N distinct questions, the run warns that the mixed pass repeats requests of
+  the probe (a weaker test). Contributed by Rafal Wiktorowicz (NovaraX),
+  [#117](https://github.com/rkinas/basal/pull/117).
+- **basal-serve refuses a calibration temperature that would break the answers**: a temperature of 0 or NaN gave
+  NaN probabilities (a 500 or NaN answers), one below 0 inverted the ranking without any error, and infinity gave
+  uniform answers. A hand-edited or corrupt calibration file with such a temperature for a question type now stops
+  basal-serve at start-up with the key named. Files that basal-calibrate writes are unaffected, and a temperature
+  written as a string (`"1.2"`) is read as before. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#119](https://github.com/rkinas/basal/pull/119).
+- **A missing `--api-keys` file is warned about at start-up** (basal-serve): the server started and answered 401 to
+  every request without a hint. It still starts (the file is read again while it runs), and says so on stderr.
+  Contributed by Rafal Wiktorowicz (NovaraX), [#119](https://github.com/rkinas/basal/pull/119).
+- **Amounts written with an NBSP, a thin or another Unicode space are read whole** (`"facts": "auto"`): a space other
+  than the plain one between the digit groups, or before `zł` / `PLN` / `EUR`, cut the amount to its tail or hid it.
+  "1 234,56 zł" with an NBSP got the VAT of 234,56 zł, two totals with thin spaces were compared as "500,00 zł >
+  0,00 zł", and "1 250 000,00 zł" with narrow NBSPs gave "0,00 zł × 1,08". Every space separator of Unicode (Zs: NBSP,
+  the narrow NBSP, the figure, thin, en / em and ideographic spaces) now counts as the plain space does. This changes
+  the facts appended to such a state, and so its answers: they are now the facts of the same text written with plain
+  spaces. A state whose amounts use plain spaces only gets the same facts as before. A long run of digit groups
+  separated by such spaces is still read in linear time. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#120](https://github.com/rkinas/basal/pull/120).
+- **A rank candidate or group name with a line break cannot forge a listing line** (`rank`): the screening list put
+  a candidate's text in raw, so its second line could read as the entry of another candidate ("Passage 1: ...") or
+  as a group line. Each line of a candidate's text after its first is now indented by two spaces. A group name is
+  put on one line, and so is every line break Python knows (`\r`, `\r\n`, `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`,
+  U+2028, U+2029). This changes the screening prompt, and so the scores and the final choice, of every request
+  whose list holds such a text. That covers most multi-line passages, and a text ending in a line break, which is
+  now dropped. Lists of one-line candidates and group names are read as before. Contributed by Rafal Wiktorowicz
+  (NovaraX), [#120](https://github.com/rkinas/basal/pull/120).
+- **A typeset minus keeps its sign** (`extract` number / integer fields): a value written with U+2212 (`−5`, the
+  minus of typeset and word-processed text) lost its sign and was read as 5. It is now -5, as `-5` is. This changes
+  the `value` of such a field (and `data`); the span chosen, its text and offsets, and every probability are as
+  before. basal-calibrate reads such a gold value the same way. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#121](https://github.com/rkinas/basal/pull/121).
+- **`basal-router --gpus` follows your `CUDA_VISIBLE_DEVICES`**: each replica got the `--gpus` entry itself as its
+  `CUDA_VISIBLE_DEVICES`, so with `CUDA_VISIBLE_DEVICES=2,3`, `--gpus 0,1` started the replicas on GPUs 0 and 1,
+  outside your mask. With the variable set, an entry of `--gpus` is now an index of the GPUs it lists (`--gpus 0,1`
+  runs on 2 and 3), as CUDA numbers them, and anything else (an index past the list, a UUID, an empty entry) is
+  refused before a replica starts. Without it, `--gpus` takes the GPUs' own ids, as before. Contributed by Rafal
+  Wiktorowicz (NovaraX), [#121](https://github.com/rkinas/basal/pull/121).
+- **A NaN no longer passes basal-selfcheck, basal-agree or `basal-loadtest --determinism`**: `max()` and the
+  comparisons skip NaN, so an answer or a reference with a NaN probability counted as agreeing (one NaN readout of four
+  gave an agreement of 1.0 and a max |dp| of 0.0), and under load a NaN or `inf - inf` gave a max_abs_diff of nan or
+  0.0. A NaN or infinite probability on either side is now a disagreement with the largest change, 1.0. Contributed
+  by Rafal Wiktorowicz (NovaraX), [#122](https://github.com/rkinas/basal/pull/122).
+- **basal-agree with `--n-single 0`, `--n-multi 0` or `--per-call 0`**: the first two divided by zero after the whole
+  run, and its results were lost; the row now leaves out the measure it has no readouts for. `--per-call 0` is
+  refused with a message before any model is loaded instead of a `ValueError`. Contributed by Rafal Wiktorowicz
+  (NovaraX), [#122](https://github.com/rkinas/basal/pull/122).
+- **A bad line in a question file names its file and line** (basal-bench, basal-loadtest, `basal-bench --order-check`):
+  a line that is not JSON, or JSON that is no object (`5`, `null`), stopped the command with a bare traceback; it now
+  stops with `<file>:<line>` and what is wrong. A text or a list line that held the word "options" was taken as a
+  question and failed later; it is skipped. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#123](https://github.com/rkinas/basal/pull/123).
+- **`--out` in a folder that does not exist is created** (basal-loadtest, basal-bench, basal-agree): the result was
+  lost to a `FileNotFoundError` after the whole run. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#123](https://github.com/rkinas/basal/pull/123).
+- **basal-agree's reference cache**: an empty or relative `XDG_CACHE_HOME` put the cache under the current folder; it
+  is ignored, as the XDG rule says, and the cache goes to `~/.cache`. The cache is written to a temporary file and
+  moved into place, so a kill in the middle of the write no longer leaves a truncated file that failed every later
+  run. Contributed by Rafal Wiktorowicz (NovaraX), [#123](https://github.com/rkinas/basal/pull/123).
+- **`basal-loadtest --determinism` reports `load_errors`**: when the requests mixed in under load failed, the report
+  still said identical N of N; it now counts the mixed-in requests that were not a 200. Contributed by Rafal
+  Wiktorowicz (NovaraX), [#123](https://github.com/rkinas/basal/pull/123).
+- **act's short form refuses what it cannot serve** (`act`, `costs: {"wrong": W, "defer": D}`): an outcome named
+  `defer` next to a defer cost had its row overwritten by the defer row, so answering "defer" and deferring became
+  one action and the decision could be wrong without an error; and a `defer_action` other than `defer` was ignored
+  without a word. Both are now a request error (HTTP 422) that names the problem. Requests without them are answered
+  as before. Contributed by Rafal Wiktorowicz (NovaraX), [#125](https://github.com/rkinas/basal/pull/125).
+- **A truncated state keeps the language of the request** (`--context-overflow truncate`, the default): the questions
+  rebuilt over the cut state took the language of the cut state. A Polish state whose Polish letters were all in the
+  middle that the cut dropped got English option words (`Yes` / `No` for `Tak` / `Nie`) and the English branch text of
+  `multi` and `tool` questions, under the Polish prompt. This changes answers in such a request when it has no `lang`
+  and the question's own text has no Polish letter: `noul` and `act` questions with the default yes / no words, every
+  `multi` label, and `tool` questions (their default question and extra options). They are now read as the same
+  request with `"lang": "pl"`. Requests that are not cut, that give `lang`, or whose kept head and tail still have a
+  Polish letter are answered as before. Contributed by Rafal Wiktorowicz (NovaraX),
+  [#126](https://github.com/rkinas/basal/pull/126).
+- **A request whose client disconnects is cancelled** (basal-serve): a client that timed out or closed its
+  connection left its request to run in full, since uvicorn does not cancel the handler, and a burst of them held the
+  GPU for minutes (48 abandoned 6k-token requests: 74 s on a GB10). POST /v1/systemone, /v1/basal and /v1/decisions
+  now cancel the request as soon as the client is gone: its queued entries never reach the engine (3.8 s, the batch
+  already on the GPU), the reasoning of a think request stops, and it answers 499. A client that stays connected gets
+  its answer as before. Reported and contributed by Dariusz Koryto (@dkoryto),
+  [#129](https://github.com/rkinas/basal/issues/129); [#132](https://github.com/rkinas/basal/pull/132).
+- **A client that leaves while sending its body is no server error** (basal-serve): a connection closed before the
+  request body was complete answered 500 and logged a traceback ("Exception in ASGI application" on POST
+  /v1/systemone and /v1/basal), and /v1/decisions also counted it as a failed request. It now answers 499, as a client
+  that leaves later does, with nothing logged ([#137](https://github.com/rkinas/basal/pull/137)).
+- **A client that disconnects cancels its request behind basal-router and at `/mcp` too** (basal-router,
+  `basal-serve --mcp on`): the router held its connection to the replica until the replica answered, so the
+  replica never saw the client leave and ran the request in full. The router now cancels its own call to the
+  replica, and with it any escalation, blend or fallback call. That closes the connection, and the replica cancels
+  the request in turn: its work still waiting for the engine is dropped. An MCP tool call whose client disconnects
+  is cancelled the same way. Both answer 499, as basal-serve does ([#137](https://github.com/rkinas/basal/pull/137)).
+- **How to tell an old Rosetta environment on a Mac** (docs; `--mode mlx`, `--mode gguf` on a Mac): an environment
+  made earlier with an x86_64 Python keeps its x86_64 packages under the install lines' `--allow-existing`. The
+  interpreter becomes arm64 and basal's own packages are replaced, but any other package stays x86_64 and fails to
+  import. README, INSTALL.md, PORTS.md and GGUF.md now give a one-line check of the environment's wheels, and say to
+  make it once with `--clear` when the check lists any ([#137](https://github.com/rkinas/basal/pull/137)).
+- **basal-omni-pico answers the same at every start on the RTX PRO 6000 Blackwell, and in `--mode eager`** (Qwen3.5
+  models on CUDA): fla's kernel configs were recorded for the H100 only and pinned in `--mode fast` only, so
+  elsewhere fla timed its kernels at every start. Some of their configs time within 0.4% of each other and round
+  differently, so each start could land in another answer set: on an RTX PRO 6000 Blackwell Max-Q, 2.5.5's pico gave
+  3 sets in 6 cold starts in `--mode fast` and 2 sets in 3 starts in `--mode eager`, its default there: probabilities
+  up to 0.019 apart, and one or two of 18 test requests (long compress requests) kept other sentences. basal now
+  ships the configs that GPU picked as well, and `--mode eager` pins them as `--mode fast` does, so every start gives
+  the same answers; `--mode fast` there also starts in 80 s instead of 220 s (nothing timed). This is an intended
+  answer change on that GPU: pico in `--mode fast` now always gives one of 2.5.5's sets, and pico in `--mode eager`
+  one set of its own. On the H100 `--mode eager` takes the recorded configs too, and gave 2.5.5's answers (3 cold
+  starts, and 2 of 2.5.5); `--mode fast` there does not change. On a GPU without a recorded table the first start
+  times the kernels and keeps its picks in `~/.cache/basal/fla/`, and later starts take them, so a restart answers as
+  the first start did. The ready line and `/ui` say `fla configs pinned`, `kept` or `timed` ([#137](https://github.com/rkinas/basal/pull/137)).
+- **basal-2.0 models answer the same at every start in `--mode fast`** (the CUDA graph engine's compiled Llama
+  forward, bf16 and FP8 checkpoints): Inductor timed the block shapes of every pointwise kernel at the first start, and
+  some block shapes of the fused rotary-embedding kernels give other last bits in a few elements. The timings are
+  within noise of each other, so a cold start of basal-2.0-mini on an H100 could keep another shape and land in
+  another answer set (3 sets in 4 starts: probabilities up to 0.021 apart, two long compress requests keeping other
+  sentences); a start given the shapes another start had timed gave that start's answers byte for byte. The compiled
+  Llama functions now take each pointwise kernel's first shape without timing, so every start runs the same kernels.
+  This is an intended answer change for basal-2.0-mini bf16 on the H100: every start now gives the set 2.5.5's starts
+  gave most often (9 of 11). basal-2.0-mini-FP8, basal-omni and basal-omni-pico do not change. A prepared start-up
+  built before this change leaves these kernels to compile at start (the answers do not depend on it).
+  `BASAL_POINTWISE_AUTOTUNE=1` times them as before ([#137](https://github.com/rkinas/basal/pull/137)).
+- **How far concurrent clients go over 3k-token states**
+  ([HARDWARE.md](HARDWARE.md#concurrent-clients-over-3k-token-states-basal-omni)): basal-omni-1.0-mini, -ultra-FP8 and
+  -ultra (bf16) on an RTX PRO 6000 Blackwell, and mini on an H100, `basal-loadtest --synthetic 3000` at 1 to 32
+  clients, with and without `--deterministic`. One 3k-token prefill keeps the GPU busy, so throughput stays flat from
+  one client to 32 on the RTX PRO 6000 and gains 18% by 4–8 clients on the H100; `--deterministic` costs 0–5% at that
+  length. The table comes with the command to measure it on another GPU. Asked by @patrykorwat,
+  [#136](https://github.com/rkinas/basal/issues/136) ([#137](https://github.com/rkinas/basal/pull/137)).
+- **Images are read as they are meant to be seen** (`media`, basal-omni with `--media on`): a transparent image was
+  converted to RGB by dropping its alpha channel, so black text on a transparent background became black on black.
+  It is now composited onto white. A phone photo is now turned as its EXIF orientation says; it was read sideways or
+  upside down. An image larger than 4,096 px a side is now shrunk to 4,096 px (keeping its aspect) before the
+  model's own resize, so 8 images of 50 megapixels no longer hold 1.1 GB per request. An animated GIF, PNG or WebP, or
+  a multi-page TIFF, was read as its first frame without a word, and is now refused (HTTP 422); an MPO phone photo is
+  still read as its photo. These change the answers to transparent images, to images with an EXIF orientation other
+  than the normal one, and to images over 4,096 px a side. Opaque, upright images of at most 4,096 px a side are read
+  as before. Contributed by Rafal Wiktorowicz (NovaraX), [#120](https://github.com/rkinas/basal/pull/120).
+
 # What is new in basal 2.5.5
 
 Released 6 November 2026. Bug fixes, contributed by Rafal Wiktorowicz (NovaraX), and our own. Answers to valid requests

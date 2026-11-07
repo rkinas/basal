@@ -164,6 +164,7 @@ Thank you to the people whose work is in this repository, by pull request:
   ([#56](https://github.com/rkinas/basal/pull/56)).
 - Grzegorz Stark ([@gstark0](https://github.com/gstark0)): `--state-cache-gb` and `--prefix-cache` on Apple Silicon
   (`--mode mlx`), with the guard against MLX's fused attention losing precision for a few queries over a cache
+  ([#50](https://github.com/rkinas/basal/pull/50)); in 2.6.0 the refusal of a RoPE that depends on the sequence length there
   ([#50](https://github.com/rkinas/basal/pull/50)).
 - Dariusz Koryto ([@dkoryto](https://github.com/dkoryto)): continuous integration, ruff and the CPU tests on Linux and
   macOS for every pull request ([#53](https://github.com/rkinas/basal/pull/53)); a Python client for every question
@@ -171,11 +172,12 @@ Thank you to the people whose work is in this repository, by pull request:
   request with task questions refused instead of misread ([#59](https://github.com/rkinas/basal/pull/59));
   `basal-interpolate` ([#60](https://github.com/rkinas/basal/pull/60)); changelog fragments in `docs/changes`
   ([#55](https://github.com/rkinas/basal/pull/55)); and in 2.5.3 `basal-run --preset` fixed
-  ([#91](https://github.com/rkinas/basal/pull/91)), batch flags measured on the DGX Spark
+  ([#91](https://github.com/rkinas/basal/pull/91)), batch flags measured on a Dell Pro Max with GB10
   ([#94](https://github.com/rkinas/basal/pull/94)), tests independent of their order, GPU, torch version and runner
   speed ([#86](https://github.com/rkinas/basal/pull/86), [#87](https://github.com/rkinas/basal/pull/87),
   [#88](https://github.com/rkinas/basal/pull/88)) and the CI on two workers
-  ([#89](https://github.com/rkinas/basal/pull/89)).
+  ([#89](https://github.com/rkinas/basal/pull/89)); and in 2.6.0 a request cancelled when its client disconnects
+  ([#132](https://github.com/rkinas/basal/pull/132)) and the helpdesk triage example ([#96](https://github.com/rkinas/basal/pull/96)).
 - Rafal Wiktorowicz ([@onlypositivetravelvibes-dotcom](https://github.com/onlypositivetravelvibes-dotcom)): the 2.5.2
   fixes: the start-up 503 for every HTTP method ([#80](https://github.com/rkinas/basal/pull/80)), config probes that
   say why they fell back ([#81](https://github.com/rkinas/basal/pull/81)), `basal-serve` on native Windows and
@@ -191,7 +193,12 @@ Thank you to the people whose work is in this repository, by pull request:
   ([#118](https://github.com/rkinas/basal/pull/118)), SIGTERM and `basal-serve`'s exit handlers
   ([#123](https://github.com/rkinas/basal/pull/123)), and media base64, short engine results and numbers too large
   for a float ([#120](https://github.com/rkinas/basal/pull/120), [#126](https://github.com/rkinas/basal/pull/126),
-  [#122](https://github.com/rkinas/basal/pull/122)).
+  [#122](https://github.com/rkinas/basal/pull/122)); in 2.6.0 files saved on Windows and the `--api-keys` rules ([#115](https://github.com/rkinas/basal/pull/115)),
+  `--targets` and the bucket edge of `basal-calibrate` ([#116](https://github.com/rkinas/basal/pull/116)), gold checks and the determinism report
+  ([#117](https://github.com/rkinas/basal/pull/117)), the calibration temperature check ([#119](https://github.com/rkinas/basal/pull/119)), images, amounts and rank listings
+  ([#120](https://github.com/rkinas/basal/pull/120)), the GPU mask and the typeset minus ([#121](https://github.com/rkinas/basal/pull/121)), NaN comparators
+  ([#122](https://github.com/rkinas/basal/pull/122)), question-file errors and the agree cache ([#123](https://github.com/rkinas/basal/pull/123)), act's short form
+  ([#125](https://github.com/rkinas/basal/pull/125)) and a truncated state's language ([#126](https://github.com/rkinas/basal/pull/126)).
 
 Measurements in the docs, from issues: Kamil ([@kamilrosa](https://github.com/kamilrosa)), Apple M5 Pro numbers for
 basal-1.0, basal-2.0 and basal-omni ([#7](https://github.com/rkinas/basal/issues/7),

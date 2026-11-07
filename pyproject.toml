@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "basal"
-version = "2.5.5"
+version = "2.6.0"
 description = "Inference engine for basal: fast, calibrated typed decisions (choice / yes-no / score) for Polish and English"
 readme = "README.md"
 license = "Apache-2.0"

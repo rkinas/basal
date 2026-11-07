@@ -210,7 +210,7 @@ def test_key_of_a_shipped_directory(tmp_path, monkeypatch):
 def test_patch_release_keeps_the_key():
     """The basal version in the key is the compiled-code version: 2.5.1 changes no compiled code, so it keys as 2.5.0
     and loads the directories shipped for 2.5.0."""
-    assert prepared.environment()["basal"] == prepared.PREPARED_ENGINE == "2.5.0"
+    assert prepared.environment()["basal"] == prepared.PREPARED_ENGINE == "2.6.0"
 
 
 def test_compiled_code_version_follows_the_release():

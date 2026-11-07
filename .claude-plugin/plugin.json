@@ -1,7 +1,7 @@
 {
   "name": "basal",
   "description": "Typed decisions with calibrated confidence from a local basal server: state and question design, presets, abstain thresholds, calibration.",
-  "version": "2.5.5",
+  "version": "2.6.0",
   "license": "Apache-2.0",
   "homepage": "https://github.com/rkinas/basal",
   "skills": "./skills"

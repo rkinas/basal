@@ -39,7 +39,7 @@ FILES = ("inductor.bin", "fla_configs.json", "manifest.json")
 # The compiled-code version, the basal version in the key: bump it when a release changes compiled / graph code (the
 # engine's layer functions); a patch that only changes Python around it keeps it, so the directories shipped in the
 # model repositories still load (2.5.1 keeps 2.5.0's). A new minor release sets its own (tests/test_prepared.py).
-PREPARED_ENGINE = "2.5.0"
+PREPARED_ENGINE = "2.6.0"
 
 
 def cache_root():
