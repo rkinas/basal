@@ -26,6 +26,7 @@ built for (basal-prepare --into-model). Downloading the model leaves prepared/ o
 auto fetches the one directory of its own key, if the repository has it (fetch).
 """
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -171,6 +172,7 @@ def load(d):
     entry against its own key, so kernels of flags this start does not use only cost the reading."""
     from .engine import persist_compile_cache
     persist_compile_cache()
+    own_autotune_cache()
     out = {"dir": str(d)}
     files, res = sorted(Path(d).glob("inductor*.bin")), []
     for f in files:
@@ -186,6 +188,59 @@ def load(d):
         gdn_graph.FLA_CONFIGS = f  # fla_pin reads it when the Qwen3.5 engine is built
         out["fla"] = str(f)
     return out
+
+
+def _under(path, root):
+    """A path outside the Inductor cache directory root -> its last two parts (<dir>/<file>, as torch names its cache
+    entries) under root; a path inside root, or none, as it is."""
+    if not path:
+        return path
+    p, r = os.path.abspath(path), os.path.abspath(root)
+    if p == r or p.startswith(r + os.sep):
+        return path
+    return os.path.join(r, *Path(p).parts[-2:])
+
+
+def _move_autotune_cache(kernel, root):
+    """A loaded kernel's source path and autotune cache entry, both under root (_under)."""
+    if getattr(kernel, "filename", None):
+        kernel.filename = _under(kernel.filename, root)
+    cache = getattr(getattr(kernel, "save_cache_hook", None), "__self__", None)
+    local = getattr(cache, "local_cache", None)
+    if isinstance(local, tuple) and len(local) == 2 and isinstance(local[1], str):
+        cache.local_cache = (local[0], _under(local[1], root))
+
+
+def own_autotune_cache():
+    """The autotune results of loaded kernels in this start's own Inductor cache only. A kernel that torch launches
+    statically comes out of inductor.bin as a pickled CachingAutotuner that kept the paths of the machine that compiled
+    it: its source file (filename) and the autotune cache entry its save hook writes, both in the builder's cache
+    (/tmp/basal-prepare/.cache/basal/torchinductor/... for the shipped directories). Such a kernel looked for its
+    autotune result there and missed it (load_cache_artifacts writes the prepared results into this start's cache),
+    timed its configs again at its first launch, kept that pick there, and read another user's pick when one was
+    there. Where that directory belongs to someone else or is read-only, the write raised and the launch failed.
+    Before torch rechecks such a kernel's autotune cache, both paths now move under this start's cache, to the same
+    <dir>/<file> as the loaded results: the kernel takes the prepared pick, as every other loaded kernel does, and
+    nothing is written outside this cache. Installed once; a torch without these internals is left as it is ->
+    whether it is installed."""
+    try:
+        from torch._inductor.runtime.runtime_utils import cache_dir
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+    except ImportError:
+        return False
+    recheck = getattr(CachingAutotuner, "recheck_autotune_cache", None)
+    if recheck is None:
+        return False
+    if getattr(recheck, "basal_own_cache", False):
+        return True
+
+    @functools.wraps(recheck)
+    def own(self, *args, **kwargs):
+        _move_autotune_cache(self, cache_dir())
+        return recheck(self, *args, **kwargs)
+    own.basal_own_cache = True
+    CachingAutotuner.recheck_autotune_cache = own
+    return True
 
 
 def _count(info):

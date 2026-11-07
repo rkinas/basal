@@ -3,6 +3,7 @@ saving and loading write and read (torch's cache-artifact calls stubbed: the com
 a GPU)."""
 import argparse
 import json
+import os
 
 import pytest
 import torch
@@ -390,3 +391,73 @@ def test_only_trusted_publishers_kernels_load_from_the_hub(tmp_path, monkeypatch
     own.mkdir(parents=True)
     (own / "manifest.json").write_text(json.dumps(dict(fields=f, key=k, files=["manifest.json"])))
     assert prepared.startup(snap, f, "auto", "someone/x", "main")["dir"] == str(own)
+
+
+@pytest.fixture(autouse=True)
+def _restore_recheck(monkeypatch):
+    """load() wraps torch's CachingAutotuner.recheck_autotune_cache (own_autotune_cache): each test gets it back."""
+    try:
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+    except ImportError:
+        return
+    monkeypatch.setattr(CachingAutotuner, "recheck_autotune_cache", CachingAutotuner.recheck_autotune_cache)
+
+
+def test_under_moves_a_foreign_path_into_the_own_cache(tmp_path):
+    own = str(tmp_path / "own")
+    assert prepared._under("/tmp/basal-prepare/.cache/basal/torchinductor/ab/cab.py", own) == f"{own}/ab/cab.py"
+    assert prepared._under(f"{own}/ab/cab.py", own) == f"{own}/ab/cab.py"  # already its own: as it is
+    assert prepared._under(None, own) is None and prepared._under("", own) == ""
+    assert prepared._under(f"{own}-other/ab/x.best_config", own) == f"{own}/ab/x.best_config"  # a sibling is foreign
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root writes into a read-only directory")
+def test_a_loaded_kernel_reads_and_writes_its_autotune_result_in_the_own_cache(tmp_path, monkeypatch):
+    """A statically launched kernel loaded from a prepared directory keeps the builder's paths. Its autotune lookup
+    found nothing there (the prepared pick is in this start's cache), and its save raised in a builder's directory
+    this user cannot write. Now both go to this start's cache: the prepared pick is read, the builder's directory is
+    neither read nor written. (torch's recheck is stood in by what it does with the two paths.)"""
+    from types import SimpleNamespace
+
+    from torch._inductor.runtime.autotune_cache import AutotuneCache
+    from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+    builder, own = tmp_path / "builder" / "torchinductor", tmp_path / "own" / "torchinductor"
+    src = builder / "ab" / "cabcdef.py"
+    src.parent.mkdir(parents=True)
+    own.mkdir(parents=True)
+    monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", str(own))
+    cache = AutotuneCache.create({}, str(src), "h")  # (as torch pickled it at the builder's compile)
+    entry = os.path.basename(cache.local_cache[1])
+    pick = {"XBLOCK": 64, "num_warps": 4, "num_stages": 1, "configs_hash": "h"}
+    (own / "ab").mkdir()
+    (own / "ab" / entry).write_text(json.dumps(pick))  # as load_cache_artifacts populates it
+    for p in (src.parent, builder):
+        p.chmod(0o555)  # another user's, or read-only
+
+    def recheck(self):  # torch's: a lookup by the kernel's filename, a save through its pickled hook
+        found = AutotuneCache.create({}, self.filename, "h")
+        got = found.local_cache[0].get(found.local_cache[1])
+        hook = self.save_cache_hook.__self__
+        hook.local_cache[0].put(hook.local_cache[1], dict(pick, timed=True))
+        return got
+    monkeypatch.setattr(CachingAutotuner, "recheck_autotune_cache", recheck)
+    try:
+        with pytest.raises(PermissionError):  # before: the save into the builder's directory
+            CachingAutotuner.recheck_autotune_cache(SimpleNamespace(filename=str(src), save_cache_hook=cache.save))
+        assert prepared.own_autotune_cache() and prepared.own_autotune_cache()  # (installed once)
+        kernel = SimpleNamespace(filename=str(src), save_cache_hook=cache.save)
+        assert CachingAutotuner.recheck_autotune_cache(kernel) == pick  # the prepared pick, from the own cache
+        assert kernel.filename == str(own / "ab" / "cabcdef.py") and cache.local_cache[1] == str(own / "ab" / entry)
+        assert sorted(p.name for p in builder.rglob("*")) == ["ab"]  # nothing written at the builder's
+        assert json.loads((own / "ab" / entry).read_text())["timed"]  # its save: in the own cache
+    finally:
+        for p in (builder, src.parent):
+            p.chmod(0o755)
+
+
+def test_load_keeps_the_autotune_cache_of_loaded_kernels_its_own(tmp_path, monkeypatch):
+    from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+    monkeypatch.setattr(torch.compiler, "load_cache_artifacts", lambda b: None)
+    (tmp_path / "inductor.bin").write_bytes(b"kernels")
+    prepared.load(tmp_path)
+    assert getattr(CachingAutotuner.recheck_autotune_cache, "basal_own_cache", False)
