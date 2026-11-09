@@ -3,7 +3,9 @@
 A request goes to the replica its state is routed to, so the questions over one document meet the same replica's
 state sharing (SOAM) and state cache: consistent hashing of the state's text over a ring of the ready replicas, with
 bounded load (a replica already holding more than LOAD_FACTOR x the mean in-flight requests passes the request on
-along the ring). Requests without a state go to the less loaded of two random replicas. Replicas are polled at
+along the ring). With --prefix-affinity (on by default) a state that begins with one routed before (the next step of
+an agent trace) goes to the replica that got that beginning instead, while its load allows: its state cache computes
+only the new tokens. Requests without a state go to the less loaded of two random replicas. Replicas are polled at
 /health; one answering 503 (starting) or not answering gets no requests until it is ready again. With --gpus, the
 router exits (status 1) when every replica it started has exited, and the replicas it started end with it: each runs
 in its own process group, which the router ends when it stops (SIGTERM, SIGINT, SIGHUP, an error) and, on Linux, which
@@ -69,7 +71,7 @@ gate it now passes is asked of the first replica and goes through the same level
                --blend-weights 0.6 0.2 0.2   (ultra first: answers that are not blended are its own)
 GET /health: 200 when a replica of --replicas / --gpus (the pool of ordinary requests) is ready, else 503 (the ready
 replicas of every pool in its "pools"); /metrics: per replica in flight, requests routed by
-state / by load, failures, readiness, answers per cascade level, blended answers, fallback calls by result
+state / by prefix / by load, failures, readiness, answers per cascade level, blended answers, fallback calls by result
 (Prometheus); /v1/models: the first ready replica's of that pool. --ui on: GET /ui, one live page of the router and every replica
 (each replica's own panels when it runs with --ui on); GET /ui/state, its JSON.
 
@@ -109,16 +111,35 @@ VNODES = 64
 POLL_S = 2.0
 CONNECT_S = 10.0  # connecting to a replica (TCP): an unreachable host fails the call (502) instead of waiting forever
 SERVE = [sys.executable, "-m", "basal.server"]  # what --gpus starts per GPU (spawn)
+# --prefix-affinity: a state that begins with one routed before goes to the replica that got it (its state cache holds
+# that beginning: a growing agent trace computes only its new tokens there), found through chained hashes of
+# BLOCK-character blocks of the routing key, at most MAX_BLOCKS per pool (the least recently routed dropped first),
+# while that replica's load stays within PREFIX_FACTOR x --load-factor of the mean
+BLOCK = 256
+MAX_BLOCKS = 1 << 18
+PREFIX_FACTOR = 2.0
 
 
 def state_key(body):
     """The routing key of a request (its body, or the body as parse_body read it): its state (a /v1/decisions request:
-    its input) with whitespace normalised (None without one, or for a body that is not a JSON object)."""
+    its input) with whitespace normalised (None without one, or for a body that is not a JSON object); a state given
+    as a list or an object (chat messages, items) by its JSON text, an empty one too."""
     d = parse_body(body) if isinstance(body, (bytes, str)) else body
     state = d.get("state", d.get("input")) if isinstance(d, dict) else None
+    if isinstance(state, (list, dict)):
+        state = json.dumps(state, ensure_ascii=False)
     if not isinstance(state, str) or not state.strip():
         return None
     return re.sub(r"\s+", " ", state.strip())
+
+
+def key_blocks(key):
+    """Chained hashes of the full BLOCK-character blocks of a routing key: the i-th stands for key[: BLOCK * (i + 1)]."""
+    out, h = [], b""
+    for i in range(BLOCK, len(key) + 1, BLOCK):
+        h = hashlib.blake2b(h + key[i - BLOCK: i].encode("utf-8"), digest_size=8).digest()
+        out.append(h)
+    return out
 
 
 SCRIPTS = ("latin", "cyrillic", "greek", "arabic", "hebrew", "cjk")
@@ -385,11 +406,11 @@ class Ring:
 
 class Router:
     def __init__(self, replicas, transport=None, factor=LOAD_FACTOR, seed=0, escalate=(), below=0.0, routes=None,
-                 levels=None, blend=None, blend_weight=1.0, fallback=None, timeout=None):
+                 levels=None, blend=None, blend_weight=1.0, fallback=None, timeout=None, affinity=True):
         """escalate, below: one cascade level; levels: [(URLs, threshold), ...] for levels 2, 3, ... instead;
         blend: [(URLs, weight), ...] asked beside the replicas (weight blend_weight); fallback: {url, model, below,
         timeout, extra} of the LLM after the last level; timeout: seconds of a replica call (--replica-timeout,
-        None: no deadline)."""
+        None: no deadline); affinity: --prefix-affinity on."""
         import httpx
         levels = [(list(u), b) for u, b in (levels if levels is not None else [(escalate, below)]) if u]
         self.levels = [(f"level:{k}", b) for k, (_, b) in enumerate(levels, start=2)]  # (level k's pool, k - 1's threshold)
@@ -410,7 +431,9 @@ class Router:
         self.scripts = {}
         self.ready = set()
         self.load = {r: 0 for r in self.replicas}
-        self.routed = {(r, how): 0 for r in self.replicas for how in ("state", "load")}
+        self.routed = {(r, how): 0 for r in self.replicas for how in ("state", "prefix", "load")}
+        self.affinity = affinity
+        self.index = {}  # pool -> OrderedDict(block hash -> the replica the state with that beginning went to)
         self.failed = {r: 0 for r in self.replicas}
         self.factor = factor
         self.rng = random.Random(seed)
@@ -420,16 +443,48 @@ class Router:
             timeout=httpx.Timeout(timeout, connect=CONNECT_S if timeout is None else min(CONNECT_S, timeout)),
             transport=transport, limits=httpx.Limits(max_connections=None, max_keepalive_connections=256))
 
-    def choose(self, key, pool="main"):
-        """(replica, how) for a request with routing key key (None: by load), among the replicas of pool."""
+    def choose(self, key, pool="main", hs=None):
+        """(replica, how) for a request with routing key key (None: by load), among the replicas of pool: with
+        --prefix-affinity the replica a state with the same beginning went to ("prefix", _prefix), else the ring's.
+        hs: key_blocks(key), when the caller has them (_send records them after the replica answers, _remember)."""
         if key is not None:
-            r = self.rings[pool].pick(key, self.load, self.ready, self.factor)
-            return r, "state"
+            if hs is None:
+                hs = key_blocks(key) if self.affinity else ()
+            r, how = self._prefix(hs, pool, len(key)), "prefix"
+            if r is None:
+                r, how = self.rings[pool].pick(key, self.load, self.ready, self.factor), "state"
+            return r, how
         ready = sorted(self.ready & set(self.pools[pool]))
         if not ready:
             return None, "load"
         a, b = self.rng.choice(ready), self.rng.choice(ready)
         return (a if self.load[a] <= self.load[b] else b), "load"
+
+    def _remember(self, hs, pool, r):
+        """--prefix-affinity: the blocks of a key replica r answered (200: it read, and may cache, that state) go to r;
+        a request it refused or failed records nothing."""
+        idx = self.index.setdefault(pool, collections.OrderedDict())
+        for h in hs:
+            idx[h] = r
+            idx.move_to_end(h)
+        while len(idx) > MAX_BLOCKS:
+            idx.popitem(last=False)
+
+    def _prefix(self, hs, pool, n):
+        """The replica whose earlier state shares the longest beginning (whole blocks) with a key of n characters,
+        when that beginning is at least as long as the rest (a shared letterhead does not pin unrelated documents)
+        and the replica is ready, with its load within PREFIX_FACTOR x --load-factor of the mean; else None."""
+        idx = self.index.get(pool)
+        hit, m = None, 0
+        for i, h in enumerate(hs if idx else ()):  # the deepest recorded block: the hashes are chained, so a block
+            r = idx.get(h)                        # stands for the whole beginning up to it (one evicted before it
+            if r is not None:                     # does not end the match)
+                hit, m = r, (i + 1) * BLOCK
+        if hit is None or hit not in self.ready or m < n - m:
+            return None
+        names = [x for x in self.pools[pool] if x in self.ready]
+        cap = math.ceil(PREFIX_FACTOR * self.factor * (sum(self.load.get(x, 0) for x in names) + 1) / len(names))
+        return hit if self.load.get(hit, 0) + 1 <= cap else None
 
     async def poll(self):
         """Readiness of every replica (GET /health: 200 = ready)."""
@@ -681,7 +736,8 @@ class Router:
 
     async def _send(self, pool, path, body, headers, key=None):
         """One call of a replica of the pool, chosen by key (state_key of the request: None, by load)."""
-        r, how = self.choose(key, pool)
+        hs = key_blocks(key) if self.affinity and key is not None else ()
+        r, how = self.choose(key, pool, hs)
         if r is None:
             return 503, b'{"error": "no basal replica is ready"}', "application/json"
         self.load[r] += 1
@@ -692,6 +748,8 @@ class Router:
             resp = await asyncio.wait_for(self.client.post(r + path, content=body, headers=headers), self.timeout)
             if resp.status_code >= 500:
                 self.failed[r] += 1
+            if hs and resp.status_code == 200:
+                self._remember(hs, pool, r)
             return resp.status_code, resp.content, resp.headers.get("content-type", "application/json")
         except (asyncio.TimeoutError, httpx.TimeoutException) as e:
             self.failed[r] += 1
@@ -712,7 +770,8 @@ class Router:
              [({"replica": r}, int(r in self.ready)) for r in self.replicas]),
             ("basal_router_in_flight", "requests the router has in flight at the replica", "gauge",
              [({"replica": r}, self.load[r]) for r in self.replicas]),
-            ("basal_router_routed_total", "requests routed, by the state's hash or by load", "counter",
+            ("basal_router_routed_total", "requests routed, by the state's hash, by its beginning (--prefix-affinity) "
+             "or by load", "counter",
              [({"replica": r, "by": how}, n) for (r, how), n in self.routed.items()]),
             ("basal_router_failed_total", "requests the replica answered with 5xx or not at all", "counter",
              [({"replica": r}, n) for r, n in self.failed.items()])]
@@ -991,6 +1050,10 @@ def main(argv=None):
                          "checked by default when bound to a loopback --host (DNS rebinding); \"*\": never checked")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--load-factor", dest="load_factor", type=float, default=LOAD_FACTOR)
+    ap.add_argument("--prefix-affinity", dest="prefix_affinity", choices=["on", "off"], default="on",
+                    help="a state that begins with one routed before (a growing agent trace or chat, an edited "
+                         "document) goes to the replica that got it while its load allows (on); off: by the hash of "
+                         "the whole state alone")
     ap.add_argument("--escalate", nargs="*", action="append", default=[],
                     help="escalation replicas (a bigger model) for the cascade; repeat for further levels")
     ap.add_argument("--escalate-below", dest="escalate_below", type=float, action="append", default=[],
@@ -1052,7 +1115,7 @@ def main(argv=None):
             raise SystemExit(f"basal-router: --route {x!r}: SCRIPT=URL[,URL], SCRIPT one of {', '.join(SCRIPTS)}, other")
         routes[k] = v.split(",")
     router = Router(urls, factor=a.load_factor, levels=cascade, routes=routes, blend=blend, blend_weight=first,
-                    fallback=fallback, timeout=a.replica_timeout)
+                    fallback=fallback, timeout=a.replica_timeout, affinity=a.prefix_affinity == "on")
     ui = None
     if a.ui == "on":  # basal/router_ui.py: the page at /ui, its state at /ui/state
         from .router_ui import RouterUI
