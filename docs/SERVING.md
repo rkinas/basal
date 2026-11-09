@@ -299,7 +299,11 @@ benchmarking a GPU.
 
   - **Routing:** a request goes to the replica its state is hashed to, so the questions over one document keep
     sharing the state and its cache on one replica. The hash is consistent, so adding or removing a replica moves
-    few states.
+    few states. A state given as a list or an object (chat messages) is hashed by its JSON text.
+  - **Prefix affinity** (`--prefix-affinity on`, the default; `off`: the hash alone): a state that begins with one
+    routed before (the next step of an agent trace or a chat, an edited document) goes to the replica that got that
+    beginning, whose state cache computes only the new tokens (`--state-cache-gb`), while the shared beginning is at
+    least as long as the rest and that replica holds at most 2x the in-flight bound below.
   - **Bounded load:** a replica holding more than 1.25 times the mean in-flight requests passes new ones on along
     the ring (`--load-factor`).
   - **`POST /v1/decisions`** (OpenAI's Decisions API) goes to a replica routed by its `input`, and its response comes
@@ -492,9 +496,9 @@ state cache is read without waiting for its lock; while the engine holds it, the
 `basal_state_cache_snapshot_timestamp_seconds` gives their Unix time (0 before the first read; the cache values are
 left out until then). Counters start at 0 when the server starts. The endpoint is open to whoever can reach the HTTP API
 (with `--api-keys`, it needs a key like every route but `GET /health`). basal-router's own metrics are per replica:
-readiness, requests in flight, requests routed by state and by load, failures; with `--escalate`, answers by the first
-replica and escalated (with several levels also per level); with `--blend`, blended answers by the number of models;
-with `--fallback`, LLM calls by result; with `--route`, requests by script.
+readiness, requests in flight, requests routed by state, by prefix and by load, failures; with `--escalate`, answers
+by the first replica and escalated (with several levels also per level); with `--blend`, blended answers by the number
+of models; with `--fallback`, LLM calls by result; with `--route`, requests by script.
 
 ## Live web page (2.5)
 
@@ -557,8 +561,8 @@ its fields may change between versions.
 - **the router**: replicas ready, requests in flight, traffic through the router since start (requests, failures,
   requests per second, latency p50 / p95 / p99, per endpoint, status codes), the configuration as parsed (secrets
   redacted) and its last 200 requests' time, endpoint, status, latency and the replica that answered, never their text;
-- **routing**: per replica the requests routed by state and by load, its share, failures and latency through the
-  router; with `--escalate`, `--blend`, `--fallback` or `--route`, their counters;
+- **routing**: per replica the requests routed by state, by prefix and by load, its share, failures and latency
+  through the router; with `--escalate`, `--blend`, `--fallback` or `--route`, their counters;
 - **each replica**: a card with its model, mode, version, uptime, requests running and queued, throughput, latency,
   state cache and GPUs (utilisation, memory, power, temperature), read from that replica's own `GET /ui/state`; charts of
   throughput and GPU utilisation per replica and of latency through the router, drawn while the page is open.

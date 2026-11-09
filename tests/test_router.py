@@ -55,6 +55,75 @@ def replicas_transport(names, ready):
     return httpx.MockTransport(handler)
 
 
+def test_prefix_affinity_keeps_a_growing_state_on_its_replica():
+    """Through the router's send path (mock replicas): a state that grows (an agent trace, a chat given as a list of
+    messages) goes where its beginning went, step after step, where the hash of the whole state sends the steps all
+    over the ring; a state that shares only a short beginning with another (a letterhead) is routed by its own hash; a
+    beginning whose first block was evicted still matches (the hashes are chained); a replica over the bound gets
+    the ring's pick instead; off: the ring."""
+    names = [f"http://r{i}" for i in range(4)]
+
+    async def go(rt, states):
+        out = []
+        for s in states:
+            body = json.dumps({"state": s, "questions": {}}).encode()
+            before = dict(rt.routed)
+            st, content, _ = await rt._send("main", "/v1/basal", body, {}, R.state_key(body))
+            how = next(h for (r, h), n in rt.routed.items() if n > before[r, h])
+            out.append((json.loads(content).get("replica"), how))
+        return out
+    rt = R.Router(names, transport=replicas_transport(names, set(names)))
+    rt.ready = set(names)
+    base = "Case log.\n" + "".join(f"step {i}: the agent read file {i} and found nothing new. " for i in range(40))
+    steps = [base + "".join(f" tool call {j} returned {j * 7}." for j in range(k)) for k in range(1, 13)]
+    got = asyncio.run(go(rt, steps))
+    first = got[0][0]
+    assert got[0][1] == "state" and set(got[1:]) == {(first, "prefix")}
+    assert len({rt.rings["main"].pick(R.state_key({"state": s}), {}, rt.ready) for s in steps}) > 1  # (would scatter)
+    chat = [{"role": "user", "content": "Plan the migration of the billing database. " * 12}]
+    chats = [chat]
+    for k in range(6):
+        turn = [{"role": "assistant", "content": f"Step {k} done."}, {"role": "user", "content": "Next."}]
+        chats.append(chats[-1] + turn)
+    got = asyncio.run(go(rt, chats))
+    assert all(g == (got[0][0], "prefix") for g in got[1:])
+    letter = base[:300] + "An unrelated case. " * 200  # 300 characters shared, 3,800 its own
+    assert asyncio.run(go(rt, [letter]))[0][1] == "state"
+    longer = steps[-1] + " one more step."
+    del rt.index["main"][R.key_blocks(R.state_key({"state": longer}))[0]]  # its first block evicted
+    assert rt.choose(R.state_key({"state": longer})) == (first, "prefix")
+    rt.load = {n: 0 for n in names}
+    rt.load[first] = 20
+    key = R.state_key({"state": longer})
+    assert rt.choose(key) == (rt.rings["main"].pick(key, rt.load, rt.ready, rt.factor), "state")  # over the bound
+    off = R.Router(names, transport=replicas_transport(names, set(names)), affinity=False)
+    off.ready = set(names)
+    assert asyncio.run(go(off, steps)) == [
+        (off.rings["main"].pick(R.state_key({"state": s}), {}, off.ready, off.factor), "state") for s in steps]
+
+
+def test_prefix_affinity_records_only_answered_requests():
+    """A request the replica refuses (401 without the API key, 422, a 5xx) or never answers records nothing, so
+    unauthorised or failed states neither send later continuations to a replica that did not read them nor evict the
+    blocks of answered ones."""
+    names = ["http://r0", "http://r1"]
+    for status in (401, 422, 503):
+        rt = R.Router(names, transport=httpx.MockTransport(lambda req, s=status: httpx.Response(s, json={})))
+        rt.ready = set(names)
+        body = json.dumps({"state": "x" * 2000, "questions": {}}).encode()
+        assert asyncio.run(rt._send("main", "/v1/basal", body, {}, R.state_key(body)))[0] == status
+        assert not rt.index.get("main")
+
+
+def test_structured_states_get_a_key():
+    """A state given as a list or an object is keyed by its JSON text, an empty one too (2.8.0 gave it none), so its
+    requests keep one replica and a growing one its prefix affinity."""
+    assert R.state_key({"state": []}) == "[]" and R.state_key({"state": {}}) == "{}"
+    chat = [{"role": "user", "content": "Добрый   день"}]
+    assert R.state_key({"state": chat}) == '[{"role": "user", "content": "Добрый день"}]'
+    assert R.state_key({"input": chat}) == R.state_key({"state": chat})  # (a /v1/decisions request's input)
+
+
 def test_router_routes_by_state_and_reports():
     names = [f"http://r{i}" for i in range(3)]
     rt = R.Router(names, transport=replicas_transport(names, set(names[:2])))

@@ -437,7 +437,7 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
   <section class="panel section" id="routing">
     <div class="section-header"><h2><svg class="ic" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="2.3"/><circle cx="18.5" cy="5.5" r="2.3"/><circle cx="18.5" cy="18.5" r="2.3"/><path d="M7.7 11 16.3 6.6M7.7 13l8.6 4.4"/></svg>Routing</h2><span class="note" id="route-note">the router's counters · since start</span></div>
     <div class="table-scroll"><table>
-      <thead><tr><th>Replica</th><th>Pools</th><th>Ready</th><th class="num">In flight</th><th class="num">By state</th><th class="num">By load</th><th class="num">Share</th><th class="num">Failed</th><th class="num">p50 ms</th><th class="num">p95 ms</th></tr></thead>
+      <thead><tr><th>Replica</th><th>Pools</th><th>Ready</th><th class="num">In flight</th><th class="num">By state</th><th class="num">By prefix</th><th class="num">By load</th><th class="num">Share</th><th class="num">Failed</th><th class="num">p50 ms</th><th class="num">p95 ms</th></tr></thead>
       <tbody id="routes"></tbody>
     </table></div>
     <div class="features" id="features"></div>
@@ -521,7 +521,7 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
   const color = k => COLORS[k % COLORS.length];
   const host = u => String(u).replace(/^[a-z]+:\/\//, '');
   const pool = p => p === 'main' ? 'main' : p.replace(/^level:/, 'level ').replace(/^blend:/, 'blend ').replace(/^script:/, '');
-  const routed = x => x.routed.state + x.routed.load;
+  const routed = x => x.routed.state + x.routed.prefix + x.routed.load;
   const gpusOf = x => x.state && x.state.telemetry && x.state.telemetry.gpus || [];
   const mean = a => a.length ? a.reduce((p, v) => p + (v || 0), 0) / a.length : null;
 
@@ -751,7 +751,7 @@ pre.json{margin:0;padding:14px 16px;background:#0c121a;border:1px solid var(--li
       const r = sub(x, k, routed), fl = sub(x, k, y => y.failed);
       return `<tr><td class="ep"><span class="dot" style="background:${color(k)}"></span>${k + 1} · ${esc(host(x.url))}</td>` +
         `<td><div class="pools">${x.pools.map(p => `<span class="tag">${esc(pool(p))}</span>`).join('')}</div></td><td>${readyBadge(x)}</td>` +
-        `<td class="num">${int(x.in_flight)}</td><td class="num">${int(sub(x, k, y => y.routed.state))}</td><td class="num">${int(sub(x, k, y => y.routed.load))}</td>` +
+        `<td class="num">${int(x.in_flight)}</td><td class="num">${int(sub(x, k, y => y.routed.state))}</td><td class="num">${int(sub(x, k, y => y.routed.prefix))}</td><td class="num">${int(sub(x, k, y => y.routed.load))}</td>` +
         `<td class="num">${total ? (r / total * 100).toFixed(1) + '%' : '—'}</td><td class="num">${fl ? `<span class="badge err">${int(fl)}</span>` : '0'}</td>` +
         `<td class="num">${dec(x.p50)}</td><td class="num">${dec(x.p95)}</td></tr>`;
     }).join(''));
