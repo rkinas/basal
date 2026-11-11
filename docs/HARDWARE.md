@@ -918,18 +918,22 @@ For a batch of this size take the `-FP8` checkpoint in `fast-nocompile`; the who
 accuracy stays within 0.7 points of bf16. A second `--mode fp8` run gave bit-identical rows (4.5B: 458 s). The first
 `--mode fp8` run of mini in a new environment took 604 s; the two after it 201 and 204 s, rows bit-identical.
 
-Where the time goes: the same run on 40, 800 and 1,600 decisions of that panel.
+Where the time goes: the same run on 40, 800 and 1,600 decisions of that panel and on all 4,000.
 
-| model | mode | 40 | 800 | 1,600 |
-|---|---|---:|---:|---:|
-| basal-2.0-4.5B | `fast-nocompile` (bf16) | 332 s | 387 s | 457 s |
-| basal-2.0-4.5B | `fp8` (torchao) | 411 s | 450 s | 488 s |
-| basal-2.0-mini | `fast-nocompile` (bf16) | 115 s | 136 s | 164 s |
-| basal-2.0-mini | `fp8` (torchao) | 194 s | 201 s | 214 s |
+| model | mode | 40 | 800 | 1,600 | 4,000 |
+|---|---|---:|---:|---:|---:|
+| basal-2.0-4.5B | `fast-nocompile` (bf16) | 332 s | 387 s | 457 s | 648 s |
+| basal-2.0-4.5B | `fp8` (torchao) | 411 s | 450 s | 488 s | 602 s |
+| basal-2.0-4.5B-FP8 | `fast-nocompile` | **197 s** | **248 s** | **296 s** | **468 s** |
+| basal-2.0-mini | `fast-nocompile` (bf16) | 115 s | 136 s | 164 s | 241 s |
+| basal-2.0-mini | `fp8` (torchao) | 194 s | 201 s | 214 s | 247 s |
+| basal-2.0-mini-FP8 | `fast-nocompile` | **83 s** | **102 s** | **124 s** | **180 s** |
 
 Most of a batch of 800 is the start-up (332 of 387 s for the 4.5B in bf16). `--mode fp8` needs about 80 s more to
-start for both models and then answers faster: from 40 to 1,600 decisions it adds 77 s against 125 s (4.5B) and 20 s
-against 49 s (mini). Extrapolated from these runs, it overtakes bf16 at about 2,600 decisions (4.5B) and 4,300 (mini).
+start than bf16 for both models and then answers faster: it overtakes bf16 between 1,600 and 4,000 decisions for the
+4.5B (by these runs at about 2,600) and is 6 s behind at 4,000 for mini. The `-FP8` checkpoint starts fastest and is
+the fastest at every size measured. On the 4,000 decisions `--mode fp8` agrees with bf16 on 3,904 (4.5B) and 3,837
+(mini), the checkpoint on 3,888 and 3,828; accuracy stays within 0.5 points (bf16: 0.8277 and 0.7272).
 
 A server (`basal-serve`, PyTorch 2.11.0+cu130), two fresh starts per row, `basal-loadtest --synthetic 1500` (states of
 about 1,500 tokens): p50 of 20 sequential requests, then decisions/s with 1, 16 and 64 clients (mean of the two
