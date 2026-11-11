@@ -43,7 +43,7 @@ measurements):
 | Data-centre (B300, B200, H100, H200) | `fast` (bf16) | limited by kernel launches at batch 1: FP8 gains ≤ 10% on H100 and is slower on B300, bf16 keeps decisions unchanged |
 | Workstation / consumer (RTX PRO 6000, RTX 5090) | `fp8` | compute-bound; FP8 gives 1.3–1.4× at 97% agreement |
 | RTX 4090 | `fast` (bf16); for speed `fast` with `basal-2.0-mini-FP8` or `basal-2.0-4.5B-FP8` | those checkpoints give 1.29× (mini) and 1.40× (4.5B) the decisions/s of bf16 ([measured](#rtx-4090-basal-20-in-bf16-its-fp8-checkpoints-and-fp8-mode)); `basal-2.0-max-FP8` loads on 24 GB but ran out of memory on a long prompt (not recommended there); `--mode fp8` (torchao) starts in about 18 minutes, which looked like a stall, and is slower per request |
-| Desktop with unified memory (DGX Spark GB10) | `fp8` | memory-bandwidth-bound; FP8 halves latency |
+| Desktop with unified memory (DGX Spark GB10) | `fp8` for one request at a time; for a batch or many clients `fast` (`fast-nocompile` in a batch) with `basal-2.0-mini-FP8` or `basal-2.0-4.5B-FP8` | memory-bandwidth-bound; FP8 halves latency; with 64 clients the `-FP8` checkpoint gives 5.6 decisions/s against 3.8 for `--mode fp8`, and a batch of 800 decisions takes 0.64× of bf16's time with it ([measured](#dell-pro-max-with-gb10-fp8-with-basal-20)) |
 | Batched high-throughput serving with vLLM | `vllm` + the `-FP8` checkpoint on Hopper / Ada, the `-NVFP4` checkpoint on Blackwell (RTX 50xx, RTX PRO 6000, B200, DGX Spark); see [QUANTIZATION](QUANTIZATION.md#basal-15-the-modelopt-checkpoints) | basal-1.0 NVFP4: 3.2× throughput on the DGX Spark, but −3 accuracy points; the basal-1.5 checkpoints' agreement and speed: FP8 agrees with the bf16 model on 0.979–0.989 of decisions; NVFP4 on 0.979 for max and 0.937 for basal-1.5 (−2.8 points); no NVFP4 for mini |
 | A100 and other GPUs without FP8 (not measured) | `fast` | the bf16 path runs on any sm80+ GPU |
 | RTX 3090 (Ampere, sm_86; measured by @krzysztofkaminski, [#33](https://github.com/rkinas/basal/issues/33)) | `fast` (bf16); `--batches compact` for basal-2.0-mini | basal-2.0-mini 13.4 ms per decision (one option order), 161.6 decisions/s with compact rows at 32 clients; basal-2.0 (4.5B) `fast` fits 24 GB from v2.3.1 (peak 23.1 GB); no `fp8` (torchao needs sm 8.9 or newer; 2.3.2 says so before loading) |
@@ -882,7 +882,7 @@ Whole-batch throughput of the bf16 engine: `basal-calibrate --mode fast-nocompil
 | PyTorch 2.11.0+cu130 | 394 s | 1.02× | 800/800 |
 | PyTorch 2.11, `--mode fast` | 435 s | 1.12× | 799/800 |
 
-On the GB10 no flag saves more than 2% of the time, about the spread of two default runs (387 and 382 s); `fine`,
+On the GB10 no flag saves more than 8 s (2%), about the spread of two default runs (387 and 382 s); `fine`,
 `--prefix-cache on` and `fast` (its compile time included) are slower: keep the defaults. Accuracy stayed within one
 decision of the default's (0.8137) in every row. Against basal 2.5.2 (default 399 s on both PyTorch versions) the
 default is 3% faster, and `--concurrency 128`, which saved 5% there, no longer gains.
@@ -910,12 +910,26 @@ above, PyTorch 2.13.0+cu130, time includes the start-up) and a server under `bas
 | basal-2.0-4.5B-FP8 | `fast-nocompile` | **248 s** | 0.64× | 778/800 | 0.8113 |
 | basal-2.0-4.5B-FP8 | `fp8` | 448 s | 1.16× | 781/800 | 0.8100 |
 | basal-2.0-mini | `fast-nocompile` (bf16) | 136 s | – | reference | 0.7225 |
-| basal-2.0-mini | `fp8` (torchao) | 604 s | 4.44× | 762/800 | 0.7225 |
+| basal-2.0-mini | `fp8` (torchao) | 201 s | 1.48× | 762/800 | 0.7225 |
 | basal-2.0-mini-FP8 | `fast-nocompile` | **102 s** | 0.75× | 759/800 | 0.7175 |
 
-For a batch of this size take the `-FP8` checkpoint in `fast-nocompile`: `--mode fp8` spends more on its start-up than
-it saves on 800 decisions. FP8 changes the top answer of 2.4–2.8% of the decisions (4.5B) and 4.8–5.1% (mini);
-accuracy stays within 0.7 points of bf16. A second `--mode fp8` run gave bit-identical rows (458 s).
+For a batch of this size take the `-FP8` checkpoint in `fast-nocompile`; the whole batch takes longer with
+`--mode fp8` than with bf16. FP8 changes the top answer of 2.4–2.8% of the decisions (4.5B) and 4.8–5.1% (mini);
+accuracy stays within 0.7 points of bf16. A second `--mode fp8` run gave bit-identical rows (4.5B: 458 s). The first
+`--mode fp8` run of mini in a new environment took 604 s; the two after it 201 and 204 s, rows bit-identical.
+
+Where the time goes: the same run on 40, 800 and 1,600 decisions of that panel.
+
+| model | mode | 40 | 800 | 1,600 |
+|---|---|---:|---:|---:|
+| basal-2.0-4.5B | `fast-nocompile` (bf16) | 332 s | 387 s | 457 s |
+| basal-2.0-4.5B | `fp8` (torchao) | 411 s | 450 s | 488 s |
+| basal-2.0-mini | `fast-nocompile` (bf16) | 115 s | 136 s | 164 s |
+| basal-2.0-mini | `fp8` (torchao) | 194 s | 201 s | 214 s |
+
+Most of a batch of 800 is the start-up (332 of 387 s for the 4.5B in bf16). `--mode fp8` needs about 80 s more to
+start for both models and then answers faster: from 40 to 1,600 decisions it adds 77 s against 125 s (4.5B) and 20 s
+against 49 s (mini). Extrapolated from these runs, it overtakes bf16 at about 2,600 decisions (4.5B) and 4,300 (mini).
 
 A server (`basal-serve`, PyTorch 2.11.0+cu130), two fresh starts per row, `basal-loadtest --synthetic 1500` (states of
 about 1,500 tokens): p50 of 20 sequential requests, then decisions/s with 1, 16 and 64 clients (mean of the two
@@ -930,7 +944,7 @@ servers; no request failed):
 | basal-2.0-mini | `fp8` (torchao) | 669 / 385 s | 65 ms | **15.9** | 12.8 | 13.4 |
 | basal-2.0-mini-FP8 | `fast` | 218 / 133 s | 76 ms | 13.2 | **13.1** | **14.3** |
 
-One request at a time, FP8 is 3.1–3.4× faster than bf16 for the 4.5B and 2.5–2.9× for mini. Under 64 clients
+With one client FP8 gives 3.1–3.4× the decisions/s of bf16 for the 4.5B and 2.4–2.9× for mini. Under 64 clients
 `--mode fp8` falls to bf16's throughput for the 4.5B (3.8 against 3.7 decisions/s), while the `-FP8` checkpoint holds
 5.6; it also starts in about bf16's time, as on the
 [RTX 4090](#rtx-4090-basal-20-in-bf16-its-fp8-checkpoints-and-fp8-mode).
