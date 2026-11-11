@@ -865,44 +865,82 @@ speed on your own items: `basal-bench --modes eager-fp32 tpu --questions <file.j
 
 ## Dell Pro Max with GB10: batch flags with basal-2.0
 
-Whole-batch throughput of the bf16 engine (not `fp8`): `basal-calibrate --mode fast-nocompile` at the default
-concurrency (32) on 800 English decisions (every 5th line of a 4,000-decision public panel), basal-2.0 (4.5B) with
-basal 2.5.2, PyTorch 2.11.0+cu130 unless noted. Time includes the model load; agreement is argmax agreement with the
-default run.
+Whole-batch throughput of the bf16 engine: `basal-calibrate --mode fast-nocompile` at the default concurrency (32) on
+800 English decisions (every 5th line of a 4,000-decision public panel), basal-2.0 (4.5B) with basal 2.8.0, PyTorch
+2.13.0+cu130 unless noted. Time includes the model load; agreement is argmax agreement with the default run.
 
 | flags | time | vs default | agreement |
 |---|---:|---:|---|
-| default | 399 s | – | – (a repeat: 800/800) |
-| `--concurrency 64` | 399 s | 1.00× | 800/800 |
-| `--concurrency 128` | 378 s | 0.95× | 800/800 |
-| `--batches fine` | 477 s | 1.20× | 800/800 |
-| `--prefix-cache on` | 470 s | 1.18× | 799/800 |
-| `--mode fast` | 441 s | 1.11× | 799/800 (a repeat: the same) |
-| `--deterministic` (PyTorch 2.13) | 410 s | 1.03× | two runs bit-identical |
-| PyTorch 2.13.0+cu130 | 399 s | 1.00× | 800/800 |
-| PyTorch 2.13, `--batches compact` | 394 s | 0.99× | 798/800 |
+| default | 387 s | – | – (a repeat: 382 s, 800/800) |
+| `--concurrency 64` | 385 s | 0.99× | 800/800 |
+| `--concurrency 128` | 382 s | 0.99× | 800/800 |
+| `--batches compact` | 379 s | 0.98× | 797/800 |
+| `--batches fine` | 473 s | 1.22× | 800/800 |
+| `--prefix-cache on` | 454 s | 1.17× | 799/800 |
+| `--mode fast` | 416 s | 1.07× | 799/800 |
+| `--deterministic` | 402 s | 1.04× | 799/800; two runs bit-identical |
+| PyTorch 2.11.0+cu130 | 394 s | 1.02× | 800/800 |
+| PyTorch 2.11, `--mode fast` | 435 s | 1.12× | 799/800 |
 
-On the GB10 the fastest variant, `--concurrency 128`, saves about 5% of the time; `fine`, `--prefix-cache on` and
-`fast` (its compile time included) are slower: keep the defaults. Accuracy stayed within one decision of the default's
-(0.8137) in every row.
+On the GB10 no flag saves more than 2% of the time, about the spread of two default runs (387 and 382 s); `fine`,
+`--prefix-cache on` and `fast` (its compile time included) are slower: keep the defaults. Accuracy stayed within one
+decision of the default's (0.8137) in every row. Against basal 2.5.2 (default 399 s on both PyTorch versions) the
+default is 3% faster, and `--concurrency 128`, which saved 5% there, no longer gains.
 
 - **`--batches compact` needs PyTorch 2.13** here: 2.11's `varlen_attn` has no `enable_gqa`, and the engine refuses
   compact rows (`this torch's varlen_attn has no enable_gqa`). The format-1 cascade's second pass needs 2.13 as well
-  (`seqused_k`); with it, basal-1.5 (4.5B, format 1) took 471 s against 483 s on 2.11, 800/800 agreeing.
-- **basal-2.0-mini**: 136 s on 2.11, the same on 2.13 (answers identical); `--batches compact` 139 s.
-- **One request at a time** (`basal-bench`, 44 built-in decisions), 4.5B: `eager` 9.95 decisions/s (load 76 s),
-  `fast-nocompile` 8.70 (334 s), `fast` 9.09 (508 s); mini: 27.0, 27.0 and 28.4. Unchanged from basal 2.4.1 within
-  0.5%.
+  (`seqused_k`); with it, basal-1.5 (4.5B, format 1) took 471 s against 483 s on 2.11, 800/800 agreeing (basal 2.5.2).
+- **basal-2.0-mini**: 136 s; `--batches compact` 136 s, 798/800 agreeing.
+- **One request at a time** (`basal-bench`, 44 built-in decisions, basal 2.5.2), 4.5B: `eager` 9.95 decisions/s (load
+  76 s), `fast-nocompile` 8.70 (334 s), `fast` 9.09 (508 s); mini: 27.0, 27.0 and 28.4. Unchanged from basal 2.4.1
+  within 0.5%.
 - **PyTorch 2.11 and FlexAttention**: the Gemma 4 attention test at head dimension 512 (`tests/test_sdpa_stride.py`)
   fails to compile on the GB10 (`No valid triton configs ... Required: 165888 Hardware limit: 101376` bytes of shared
   memory); PyTorch 2.13 compiles it.
+
+## Dell Pro Max with GB10: fp8 with basal-2.0
+
+basal 2.8.0. Two measurements: a batch through `basal-calibrate` (the 800 decisions and the method of the table
+above, PyTorch 2.13.0+cu130, time includes the start-up) and a server under `basal-loadtest`.
+
+| model | mode | time | vs bf16 | agreement with bf16 | accuracy |
+|---|---|---:|---:|---|---:|
+| basal-2.0-4.5B | `fast-nocompile` (bf16) | 387 s | – | reference | 0.8137 |
+| basal-2.0-4.5B | `fp8` (torchao) | 450 s | 1.16× | 779/800 | 0.8200 |
+| basal-2.0-4.5B-FP8 | `fast-nocompile` | **248 s** | 0.64× | 778/800 | 0.8113 |
+| basal-2.0-4.5B-FP8 | `fp8` | 448 s | 1.16× | 781/800 | 0.8100 |
+| basal-2.0-mini | `fast-nocompile` (bf16) | 136 s | – | reference | 0.7225 |
+| basal-2.0-mini | `fp8` (torchao) | 604 s | 4.44× | 762/800 | 0.7225 |
+| basal-2.0-mini-FP8 | `fast-nocompile` | **102 s** | 0.75× | 759/800 | 0.7175 |
+
+For a batch of this size take the `-FP8` checkpoint in `fast-nocompile`: `--mode fp8` spends more on its start-up than
+it saves on 800 decisions. FP8 changes the top answer of 2.4–2.8% of the decisions (4.5B) and 4.8–5.1% (mini);
+accuracy stays within 0.7 points of bf16. A second `--mode fp8` run gave bit-identical rows (458 s).
+
+A server (`basal-serve`, PyTorch 2.11.0+cu130), two fresh starts per row, `basal-loadtest --synthetic 1500` (states of
+about 1,500 tokens): p50 of 20 sequential requests, then decisions/s with 1, 16 and 64 clients (mean of the two
+servers; no request failed):
+
+| model | mode | ready (1st / 2nd start) | p50 | 1 client | 16 | 64 |
+|---|---|---:|---:|---:|---:|---:|
+| basal-2.0-4.5B | `fast` (bf16) | 360 / 369 s | 570 ms | 1.8 | 2.9 | 3.7 |
+| basal-2.0-4.5B | `fp8` (torchao) | 1,043 / 577 s | 169 ms | **6.1** | 3.6 | 3.8 |
+| basal-2.0-4.5B-FP8 | `fast` | 442 / 286 s | 183 ms | 5.6 | **4.9** | **5.6** |
+| basal-2.0-mini | `fast` (bf16) | 202 / 143 s | 188 ms | 5.5 | 8.4 | 10.5 |
+| basal-2.0-mini | `fp8` (torchao) | 669 / 385 s | 65 ms | **15.9** | 12.8 | 13.4 |
+| basal-2.0-mini-FP8 | `fast` | 218 / 133 s | 76 ms | 13.2 | **13.1** | **14.3** |
+
+One request at a time, FP8 is 3.1–3.4× faster than bf16 for the 4.5B and 2.5–2.9× for mini. Under 64 clients
+`--mode fp8` falls to bf16's throughput for the 4.5B (3.8 against 3.7 decisions/s), while the `-FP8` checkpoint holds
+5.6; it also starts in about bf16's time, as on the
+[RTX 4090](#rtx-4090-basal-20-in-bf16-its-fp8-checkpoints-and-fp8-mode).
 
 ## Notes per platform
 
 - **DGX Spark (GB10, aarch64, CUDA 13).** In the README install steps use the CUDA 13 build of PyTorch
   (`uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130`) instead of cu128. The GPU shares LPDDR5X memory (about 273 GB/s) with the CPU; every forward pass reads
   all weights, which is why FP8 (half the bytes) halves latency. With PyTorch 2.13 (cu130), `--batches compact`
-  and the format-1 cascade also run; batch flags measured: [Dell Pro Max with GB10: batch flags](#dell-pro-max-with-gb10-batch-flags-with-basal-20).
+  and the format-1 cascade also run; batch flags measured: [Dell Pro Max with GB10: batch flags](#dell-pro-max-with-gb10-batch-flags-with-basal-20), fp8: [Dell Pro Max with GB10: fp8](#dell-pro-max-with-gb10-fp8-with-basal-20).
 - **B300 / B200 (sm_100/sm_103).** PyTorch cu130 wheels work. The `vllm` mode needs a CUDA toolkit (nvcc) of version
   12.9 or newer on the machine: vLLM's FlashInfer kernels are compiled on first use, and nvcc 12.8 (found in some
   container images) cannot target the B300 (`Unsupported gpu architecture 'compute_103a'`). Compilation of `nvfp4` takes long (about 50 minutes on
