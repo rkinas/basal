@@ -206,6 +206,24 @@ def test_rank_runs_a_bounded_number_of_its_requests_at_once(cap, most):
     assert len(out["answers"]["r"]["ranking"]) == 600 and out["answers"]["r"]["requests"] == 600
 
 
+def test_rank_questions_of_one_request_share_the_bound():
+    """Three rank questions of 200 requests each: PARALLEL in flight for the request, not for each question (three
+    times as many would fill --max-requests again)."""
+    srv = server(lambda t: 1.0)
+    seen = []
+    decide = srv.decide
+
+    async def spy(body):
+        if not any(rank.is_rank(q) for q in body["questions"].values()):
+            seen.append(srv.in_flight)
+        return await decide(body)
+    srv.decide = spy
+    q = {"type": "rank", "instructions": INSTR, "top": 0, "chunk": 1, "candidates": [f"c{i}" for i in range(200)]}
+    out = run(srv, {"state": "Q?", "questions": {"a": q, "b": q, "c": q}})
+    assert len(seen) == 600 and max(seen) == rank.PARALLEL and srv.in_flight == 0
+    assert all(len(out["answers"][k]["ranking"]) == 200 for k in "abc")
+
+
 def test_rank_chunk_zero_falls_back_to_requests_of_50_beyond_max_branches():
     """A list that fits the context and --max-prompt-mb but has more candidates (a question each) than --max-branches:
     answered in requests of 50, not sent as one request that the server then refuses."""

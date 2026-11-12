@@ -42,7 +42,7 @@ ORDERS = ("state_first", "candidates_first")
 LABEL = {"en": "Candidate", "pl": "Kandydat"}
 CHOICE = {"en": "Which {label} is the best match?", "pl": "Która pozycja najlepiej pasuje?"}
 MARGIN = 96  # tokens kept free for a question and its options when a whole list must fit one request (chunk 0)
-PARALLEL = 256  # requests of one rank question in flight at once (the default chunk's 200 for 10,000 candidates: all)
+PARALLEL = 256  # a rank request's own requests in flight at once (the default chunk's 200 for 10,000 candidates: all)
 
 
 def is_rank(q):
@@ -241,22 +241,23 @@ async def sub(srv, body):
 
 
 def parallel(srv):
-    """How many requests of one rank question run at once: PARALLEL, and at most half the server's --max-requests, so a
-    list in small chunks (10,000 requests at chunk 1) neither starts them all at once nor fills the cap other clients
-    are admitted under."""
+    """How many of a rank request's own requests (of all its rank questions together) run at once: PARALLEL, and at
+    most half the server's --max-requests, so a list in small chunks (10,000 requests at chunk 1) neither starts them
+    all at once nor fills the cap other clients are admitted under."""
     from .server import MAX_REQUESTS  # (basal.server imports this module)
     return max(1, min(PARALLEL, getattr(srv, "max_requests", MAX_REQUESTS) // 2))
 
 
-async def screen(srv, state, spec, fields):
-    """Every candidate's P(yes) -> (scores, the requests' bodies and lists, their responses)."""
+async def screen(srv, state, spec, fields, gate=None):
+    """Every candidate's P(yes) -> (scores, the requests' bodies and lists, their responses). gate: the semaphore the
+    request's rank questions share (parallel); none: one of this question's own."""
     size = spec["chunk"] or (len(spec["cands"]) if fits(srv, state, spec, fields) else CHUNK)
     parts, bodies = [], []
     for idx in chunks(spec["cands"], size):
         text, names = listing(spec["cands"], idx, spec["label"], spec["title"])
         bodies.append(dict(fields, state=compose(state, text, spec["order"]), questions=questions(spec, idx, names)))
         parts.append((idx, names))
-    gate = asyncio.Semaphore(parallel(srv))
+    gate = gate or asyncio.Semaphore(parallel(srv))
 
     async def one(body):
         async with gate:
@@ -269,9 +270,9 @@ async def screen(srv, state, spec, fields):
     return yes, bodies, parts, list(outs)
 
 
-async def rank_one(srv, state, spec, fields):
-    """One rank question -> (its answer, its sub-responses)."""
-    yes, bodies, parts, outs = await screen(srv, state, spec, fields)
+async def rank_one(srv, state, spec, fields, gate=None):
+    """One rank question -> (its answer, its sub-responses). gate: as screen's."""
+    yes, bodies, parts, outs = await screen(srv, state, spec, fields, gate)
     cands, prior = spec["cands"], spec["prior"]
     score = [y * prior.get(k, 1.0) for y, (k, _, _) in zip(yes, cands)]
     order = sorted(range(len(cands)), key=lambda i: -score[i])  # stable: ties keep the candidates' order
@@ -335,7 +336,8 @@ async def decide(srv, body):
     t0 = time.perf_counter()
     state, specs, others = admit(srv, body)
     fields = {k: v for k, v in body.items() if k not in ("state", "questions")}
-    jobs = [rank_one(srv, state, s, fields) for s in specs]
+    gate = asyncio.Semaphore(parallel(srv))  # (one for the request: its rank questions share the bound)
+    jobs = [rank_one(srv, state, s, fields, gate) for s in specs]
     if others:
         jobs.append(srv.decide(dict(body, questions=others)))
     res = await every(jobs)
