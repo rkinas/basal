@@ -12,8 +12,8 @@ text of several lines keeps them, each line after the first indented by two spac
 entry, and a group name is put on one line) and packed, in their order, into requests of `chunk` candidates (a group
 stays in one request when it fits). Each request's state is the request's own state and its list; every candidate in
 it is one yes / no question ("{candidate}" in the instructions names it), so the request reads its state once (SOAM)
-and judges its candidates side by side. All requests go through the server's queue together. A candidate's score is
-its calibrated P(yes), times its `prior` weight.
+and judges its candidates side by side. The requests go through the server's queue together, at most PARALLEL at
+once. A candidate's score is its calibrated P(yes), times its `prior` weight.
 
 Final choice (`top` >= 2): one choice question over the top `top` candidates by score, whose options are their names in
 the list; its probabilities reorder them, the others keep their score order. Its context is the screening request's
@@ -42,6 +42,7 @@ ORDERS = ("state_first", "candidates_first")
 LABEL = {"en": "Candidate", "pl": "Kandydat"}
 CHOICE = {"en": "Which {label} is the best match?", "pl": "Która pozycja najlepiej pasuje?"}
 MARGIN = 96  # tokens kept free for a question and its options when a whole list must fit one request (chunk 0)
+PARALLEL = 256  # requests of one rank question in flight at once (the default chunk's 200 for 10,000 candidates: all)
 
 
 def is_rank(q):
@@ -184,9 +185,13 @@ def questions(spec, idx, names):
 
 
 def fits(srv, state, spec, fields=None):
-    """Whether the whole list fits one request (chunk 0): its tokens within the server's context, and its prompts'
-    text within its --max-prompt-mb, counted as Server.check_prompts counts it (every prompt holds the shared state, so
-    a long list in one context can pass the context and not the text limit); True for a limit that is unknown."""
+    """Whether the whole list fits one request (chunk 0): its candidates (a question each) within the server's
+    --max-branches, its tokens within the server's context, and its prompts' text within its --max-prompt-mb, counted
+    as Server.check_prompts counts it (every prompt holds the shared state, so a long list in one context can pass the
+    context and not the text limit); True for a limit that is unknown."""
+    from .server import MAX_BRANCHES, to_items  # (basal.server imports this module)
+    if len(spec["cands"]) > getattr(srv, "max_branches", MAX_BRANCHES):
+        return False
     idx = range(len(spec["cands"]))
     text, names = listing(spec["cands"], idx, spec["label"], spec["title"])
     whole = compose(state, text, spec["order"])
@@ -198,7 +203,6 @@ def fits(srv, state, spec, fields=None):
     check = getattr(srv, "check_prompts", None)
     if check is None:
         return True
-    from .server import to_items  # (basal.server imports this module)
     qs = to_items(whole, questions(spec, idx, names), getattr(srv, "max_options", MAX_OPTIONS),
                   force_lang=(fields or {}).get("lang"))
     try:
@@ -236,6 +240,14 @@ async def sub(srv, body):
     return out
 
 
+def parallel(srv):
+    """How many requests of one rank question run at once: PARALLEL, and at most half the server's --max-requests, so a
+    list in small chunks (10,000 requests at chunk 1) neither starts them all at once nor fills the cap other clients
+    are admitted under."""
+    from .server import MAX_REQUESTS  # (basal.server imports this module)
+    return max(1, min(PARALLEL, getattr(srv, "max_requests", MAX_REQUESTS) // 2))
+
+
 async def screen(srv, state, spec, fields):
     """Every candidate's P(yes) -> (scores, the requests' bodies and lists, their responses)."""
     size = spec["chunk"] or (len(spec["cands"]) if fits(srv, state, spec, fields) else CHUNK)
@@ -244,7 +256,12 @@ async def screen(srv, state, spec, fields):
         text, names = listing(spec["cands"], idx, spec["label"], spec["title"])
         bodies.append(dict(fields, state=compose(state, text, spec["order"]), questions=questions(spec, idx, names)))
         parts.append((idx, names))
-    outs = await every(sub(srv, b) for b in bodies)
+    gate = asyncio.Semaphore(parallel(srv))
+
+    async def one(body):
+        async with gate:
+            return await sub(srv, body)
+    outs = await every(one(b) for b in bodies)
     yes = [0.0] * len(spec["cands"])
     for (idx, _), out in zip(parts, outs):
         for n, i in enumerate(idx):
