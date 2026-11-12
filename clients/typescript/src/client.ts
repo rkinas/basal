@@ -156,9 +156,14 @@ export class Basal {
   ): Promise<DecisionResponse<AnswersFor<Q>>> {
     const { signal, ...fields } = options;
     const body = { state, questions, ...this.defaults, ...fields };
-    const res = (await this.call("POST", "/v1/systemone", body, signal)) as DecisionResponse;
-    const answers = Object.fromEntries(Object.entries(res.answers ?? {}).map(([k, a]) => [k, complete(a)]));
-    return { ...res, answers } as DecisionResponse<AnswersFor<Q>>;
+    const res = await this.call("POST", "/v1/systemone", body, signal);
+    const found = res !== null && typeof res === "object" ? (res as { answers?: unknown }).answers : undefined;
+    // (a 200 of a proxy or gateway with its own JSON: an error as basal/client.py's, not a result without answers)
+    if (found === null || typeof found !== "object" || Array.isArray(found))
+      throw new BasalError("server", "the response has no answers", { status: 200, body: JSON.stringify(res) });
+    const answers = Object.fromEntries(
+      Object.entries(found as DecisionResponse["answers"]).map(([k, a]) => [k, complete(a)]));
+    return { ...(res as DecisionResponse), answers } as DecisionResponse<AnswersFor<Q>>;
   }
 
   /** The answers to named questions about `state` (text or JSON). A question skipped by ask_if has the answer null. */
