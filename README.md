@@ -56,18 +56,12 @@ the CLIs, the MCP bridge and the GGUF export handle inputs they failed on.
 basal-router too; files saved on Windows (BOM, UTF-16) are read; and every start answers the same: basal-2.0 in
 `--mode fast`, and basal-omni-pico on the RTX PRO 6000 Blackwell and in `--mode eager`. Some answers change, each to
 fix a bug: images, amounts written with special spaces, a typeset minus and a truncated Polish state are read as
-meant. 2.8.0 (8 November 2026): the 3.0 groundwork with answers unchanged. One calibration core, requests bounded before any[WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-260).
+meant. [WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-260).
 
-
-work, the long lane on by default (short requests no longer wait behind long documents), basal-run resumes an[WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-260).
-
-
-interrupted run and stops when the server goes away, and your own calibration survives a model-card update. Fixes[WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-260).
-
-
-from a second bug hunt; contributions from Dariusz Koryto, Rafal Wiktorowicz, Miłosz Kucharski and Marcin Brzeżański.[WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-260).
-
-
+2.8.0 (8 November 2026): the 3.0 groundwork with answers unchanged. One calibration core, requests bounded before any
+work, the long lane on by default (short requests no longer wait behind long documents), basal-run resumes an
+interrupted run and stops when the server goes away, and your own calibration survives a model-card update. Fixes
+from a second bug hunt; contributions from Dariusz Koryto, Rafal Wiktorowicz, Miłosz Kucharski and Marcin Brzeżański.
 [WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-280).
 
 - **Changes on the default path**: in a request with task questions, a question named `<task>::<part>` is refused (HTTP
