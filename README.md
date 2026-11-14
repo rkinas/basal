@@ -8,6 +8,7 @@
 
 Inference engine and models for **basal-2.0** and **basal-omni-1.0**: small, fast, calibrated *typed-decision* models
 for Polish and English. The basal-omni models also take **images and audio** in a request (experimental).
+**basal-omni-2.0-mini (preview)** is now available ([Models](#models)).
 
 **What it is.** basal is inspired by *System 1* (fast, intuitive) decision models such as Jev: instead of a chatbot
 that writes an answer, the model reads a **state** (a message, a document, a case file, retrieved passages, an agent
@@ -104,6 +105,7 @@ from a second bug hunt; contributions from Dariusz Koryto, Rafal Wiktorowicz, Mi
 |---|---|---|---|
 | **basal-omni-pico** | 0.8B (Qwen3.5-0.8B) | the smallest basal model: text decisions on a CPU or a small GPU (Werdykt 0.660); `--mode fast` on CUDA from basal 2.4 (with flash-linear-attention; 2.3.2-2.3.x: `--mode eager`), `--mode gguf` on the CPU | [`Remek/basal-omni-pico`](https://huggingface.co/Remek/basal-omni-pico) · [`-GGUF`](https://huggingface.co/Remek/basal-omni-pico-GGUF) |
 | **basal-omni-1.0-mini** | 4B (Gemma 4 E4B) | decisions about text, images and audio; about 16 GB of GPU memory | [`Remek/basal-omni-1.0-mini`](https://huggingface.co/Remek/basal-omni-1.0-mini) · [`-FP8`](https://huggingface.co/Remek/basal-omni-1.0-mini-FP8) · [`-GGUF`](https://huggingface.co/Remek/basal-omni-1.0-mini-GGUF) · [`-MLX`](https://huggingface.co/Remek/basal-omni-1.0-mini-MLX) |
+| **basal-omni-2.0-mini (preview)** | 4B (Gemma 4 E4B) | typed decisions about text, read two-way; preview of the 2.0 mini (the final 2.0 family nano / mini / max / ultra comes later); about 21 GB of GPU memory (`--mode fast`, H100) | [`Remek/basal-omni-2.0-mini-preview`](https://huggingface.co/Remek/basal-omni-2.0-mini-preview) |
 | **basal-omni-1.0-max** | 12B | the default 12B model (Werdykt 0.823); text, images and audio; about 24 GB of GPU memory | [`Remek/basal-omni-1.0-max`](https://huggingface.co/Remek/basal-omni-1.0-max) · [`-FP8`](https://huggingface.co/Remek/basal-omni-1.0-max-FP8) · [`-GGUF`](https://huggingface.co/Remek/basal-omni-1.0-max-GGUF) · [`-MLX`](https://huggingface.co/Remek/basal-omni-1.0-max-MLX) |
 | **basal-omni-1.1-max** | 12B | *experimental task model*: better on `classify`, `verify`, `compress` and `extract`, slightly behind 1.0-max on general decisions (Werdykt 0.821) | [`Remek/basal-omni-1.1-max`](https://huggingface.co/Remek/basal-omni-1.1-max) · [`-MLX`](https://huggingface.co/Remek/basal-omni-1.1-max-MLX) |
 | **basal-omni-1.0-ultra** | 31B (Gemma 4 31B) | highest Werdykt score of the basal models (0.879); text and images (no audio); 59 GB of bf16 weights | [`Remek/basal-omni-1.0-ultra`](https://huggingface.co/Remek/basal-omni-1.0-ultra) · [`-FP8`](https://huggingface.co/Remek/basal-omni-1.0-ultra-FP8) · [`-GGUF`](https://huggingface.co/Remek/basal-omni-1.0-ultra-GGUF) |
