@@ -1,4 +1,4 @@
-# basal 2.5
+# basal 2.8.1
 
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-basal--2.0%20models-yellow)](https://huggingface.co/collections/Remek/basal-20-6acd1712a8e443c86cd576fc)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-basal--omni--1.0%20models-yellow)](https://huggingface.co/collections/Remek/basal-omni-10-6acea28e8b5baed2db475c1f)
@@ -25,11 +25,24 @@ answers, and triage with a confidence threshold that sends uncertain cases to a 
 
 ## Contents
 
-- [What is new in basal 2.5](#what-is-new-in-basal-25) · [Models](#models) · [Results](#results) · [Quick start](#quick-start) · [API](#api)
+- [What is new in basal 2.8](#what-is-new-in-basal-28) · [Models](#models) · [Results](#results) · [Quick start](#quick-start) · [API](#api)
 - [Images and audio: basal-omni](#images-and-audio-basal-omni-experimental) · [MCP for agents](#mcp-basal-as-a-tool-for-agents) · [Documentation](#documentation)
 - [Limitations](#limitations) · [Previous releases](#previous-releases) · [Citation](#citation) · [Contributors](#contributors) · [License](#license)
 
-## What is new in basal 2.5
+## What is new in basal 2.8
+
+2.8.1 (15 November 2026): a fix for the `-FP8` checkpoints. The modes that cannot read their scales (`--mode eager`
+and `mps`, and the default mode on many GPUs) loaded them without the scales and served wrong answers with no error;
+they now refuse them before any download and name `--mode fast` or `--mode vllm`. Every other start answers as in
+2.8.0. [WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-281).
+
+2.8.0 (8 November 2026): the 3.0 groundwork with answers unchanged. One calibration core, requests bounded before any
+work, the long lane on by default (short requests no longer wait behind long documents), basal-run resumes an
+interrupted run and stops when the server goes away, and your own calibration survives a model-card update. Fixes
+from a second bug hunt; contributions from Dariusz Koryto, Rafal Wiktorowicz, Miłosz Kucharski and Marcin Brzeżański.
+[WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-280).
+
+### Earlier: basal 2.5 and 2.6
 
 Released 2 November 2026. Default answers to decision requests are byte-identical to 2.4.1; what is new is opt-in
 unless a line says otherwise. All changes and the known limits: [WHATS_NEW](docs/WHATS_NEW.md).
@@ -57,12 +70,6 @@ basal-router too; files saved on Windows (BOM, UTF-16) are read; and every start
 `--mode fast`, and basal-omni-pico on the RTX PRO 6000 Blackwell and in `--mode eager`. Some answers change, each to
 fix a bug: images, amounts written with special spaces, a typeset minus and a truncated Polish state are read as
 meant. [WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-260).
-
-2.8.0 (8 November 2026): the 3.0 groundwork with answers unchanged. One calibration core, requests bounded before any
-work, the long lane on by default (short requests no longer wait behind long documents), basal-run resumes an
-interrupted run and stops when the server goes away, and your own calibration survives a model-card update. Fixes
-from a second bug hunt; contributions from Dariusz Koryto, Rafal Wiktorowicz, Miłosz Kucharski and Marcin Brzeżański.
-[WHATS_NEW](docs/WHATS_NEW.md#what-is-new-in-basal-280).
 
 - **Changes on the default path**: in a request with task questions, a question named `<task>::<part>` is refused (HTTP
   422, #59); error bodies gain `code` (#62); `GET /v1/models` lists the certified thresholds and the context (#64);
@@ -134,7 +141,7 @@ NVIDIA GPU, with [uv](https://docs.astral.sh/uv/) in a fresh environment:
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.0.tar.gz"
+uv pip install "basal[fp8] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.1.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --port 8000
 ```
 
@@ -148,7 +155,7 @@ Apple Silicon, with the native arm64 Python (`--python 3.12` can take an x86_64 
 ```bash
 uv python install cpython-3.12-macos-aarch64-none
 uv venv --python cpython-3.12-macos-aarch64-none --allow-existing ~/basal-env && source ~/basal-env/bin/activate
-uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.0.tar.gz"
+uv pip install "basal[mlx] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.1.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B-MLX-8bit --mode mlx --port 8000
 ```
 
@@ -201,7 +208,7 @@ The basal-omni models answer the same questions; with `--media on` a request may
 ```bash
 uv venv --python 3.12 --allow-existing ~/basal-env && source ~/basal-env/bin/activate
 uv pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.0.tar.gz"
+uv pip install "basal[media] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.1.tar.gz"
 basal-serve --model Remek/basal-omni-1.0-mini --mode eager --media on --port 8000   # or Remek/basal-omni-1.0-max
 ```
 
@@ -217,7 +224,7 @@ a stdio bridge for hosts that start local processes. Protect HTTP and MCP reques
 `127.0.0.1` ([SERVING](docs/SERVING.md#api-access), [MCP](docs/MCP.md)).
 
 ```bash
-uv pip install "basal[fp8,mcp] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.0.tar.gz"
+uv pip install "basal[fp8,mcp] @ https://github.com/rkinas/basal/archive/refs/tags/v2.8.1.tar.gz"
 basal-serve --model Remek/basal-2.0-4.5B --mode fast --template-prefix off --host 127.0.0.1 --port 8000 --mcp on
 claude mcp add --transport http basal http://127.0.0.1:8000/mcp     # Claude Code; other hosts take the same URL
 ```
