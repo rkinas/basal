@@ -46,7 +46,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from . import adapter as adapter_module
 from .blockquant import fuse
 from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, _varlen_attention, compact_refused,
-                     graph_memory_bytes, persist_compile_cache, set_attention, torch_varlen_available)
+                     graph_memory_bytes, modelopt_refused, persist_compile_cache, set_attention,
+                     torch_varlen_available)
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -760,6 +761,9 @@ class GDNGraphBackend(GraphBackend):
         if compile == "layer":
             raise ValueError(f"{model_dir}: --compile-scope layer: the bf16 Llama forward only (Qwen3.5's compiled "
                              "code is per layer kind already)")
+        why = modelopt_refused(model_dir, "graph", gdn=True)  # (it loads with transformers, never load_modelopt_fp8)
+        if why:
+            raise ValueError(f"{model_dir}: {why}")
         if compile:
             persist_compile_cache()  # before anything compiles (GraphBackend.__init__)
         why = refused(quant, state_cache_gb, prefix, batches, lean, tree, readout_layer, template,

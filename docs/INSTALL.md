@@ -168,7 +168,9 @@ starting or a router with no replica ready, retried the same way), `AuthError` (
 ### FP8 checkpoints (basal engine)
 
 The `-FP8` repositories are NVIDIA ModelOpt FP8 checkpoints that the basal engine loads natively (the same install as
-above; GPU with FP8, sm89+):
+above; GPU with FP8, sm89+). The CUDA graph engine (`fast`, `fp8`) and `--mode vllm` read them; `eager`, `mps`, `mlx`,
+`strix` and `tpu` refuse them at start-up, since they cannot read the checkpoints' scales (serve the bf16 repository
+there):
 
 ```bash
 basal-serve --model Remek/basal-2.0-mini-FP8 --mode fp8 --port 8000

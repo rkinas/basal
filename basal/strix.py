@@ -31,7 +31,7 @@ import triton.language as tl
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from . import adapter as adapter_module
-from .engine import GraphBackend
+from .engine import GraphBackend, modelopt_refused
 from .prompt import PREFILL
 
 
@@ -251,6 +251,9 @@ class StrixHaloFastBackend(GraphBackend):
         if not torch.version.hip:
             raise ValueError("--mode strix needs PyTorch built for ROCm (its kernels and tile configs are for AMD "
                              "Strix Halo)")
+        why = modelopt_refused(model_dir, "strix")  # (transformers' loader: no ModelOpt scales)
+        if why:
+            raise ValueError(f"{model_dir}: {why}")
         self.tok = AutoTokenizer.from_pretrained(model_dir)
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.bfloat16)

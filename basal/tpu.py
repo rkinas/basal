@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from transformers import AutoTokenizer
 
-from .engine import GraphBackend
+from .engine import GraphBackend, modelopt_refused
 from .prompt import PREFILL
 
 _ST_DTYPES = {"F32": np.float32, "F16": np.float16, "I64": np.int64, "I32": np.int32}
@@ -211,6 +211,9 @@ class TPUBackend(GraphBackend):
         self.jax = jax
         if dtype not in DTYPES:
             raise ValueError(f"--mode tpu supports --dtype {' / '.join(DTYPES)}, got {dtype!r}")
+        why = modelopt_refused(model_dir, "tpu")  # (load_params reads the weights alone, no ModelOpt scales)
+        if why:
+            raise ValueError(f"{model_dir}: {why}")
         try:
             self.device = jax.devices(platform)[0]
         except RuntimeError as e:

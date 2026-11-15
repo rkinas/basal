@@ -52,7 +52,8 @@ from .signals import exit_on_sigterm
 from .disconnect import CLIENT_GONE, until_disconnect  # (torch-free: basal-router uses it too)
 from .engine import (ATTN, EAGER_FORWARDS, EagerBackend, ExitGraphBackend, GGUFBackend, GraphBackend, LlamaCppBackend,
                      FP8_BF16_LAYERS, MLXBackend, MPSBackend, OllamaBackend, SGLangBackend,
-                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, graph_options, recurrent_layers,
+                     VLLM_PRESETS, VLLMBackend, fp8_refused, gemma_fast_kernels, graph_options, modelopt_algo,
+                     modelopt_message, modelopt_refused, recurrent_layers,
                      recurrent_refused, resolve, set_fp8_fast_accum)
 from .evidence import Evidence
 from .metrics import prometheus  # noqa: F401  (GET /metrics; torch-free, so basal-router imports it alone)
@@ -136,7 +137,23 @@ def default_mode(model=None, revision=None):
     stopped at "'Gemma4Model' object has no attribute 'layers'"). A model with recurrent-state layers gets eager on CUDA
     and Apple Silicon (mps refuses it; mlx serves Qwen3.5 only when asked, --mode mlx), except a Qwen3.5 model (Gated
     DeltaNet), which gets fast on the capabilities allowed by gdn_graph.default_fast with importable fla:
-    sm90 (checked on H100) and sm120 (checked on RTX 5060 Ti)."""
+    sm90 (checked on H100) and sm120 (checked on RTX 5060 Ti).
+
+    A ModelOpt checkpoint (the -FP8 / -NVFP4 repositories) is never given an engine that cannot read it
+    (engine.MODELOPT_READERS): where the pick above is eager, mps, mlx or tpu, SystemExit names the modes that serve it
+    (basal-omni-1.0-mini-FP8 on a GPU where basal-omni's fast configuration has not passed its gate was served by eager
+    with its FP8 weights unscaled, every answer wrong). Where it is fast, the CUDA graph engine reads its FP8 layers
+    (and refuses what it cannot read at start-up)."""
+    mode = _default_mode(model, revision)
+    if model is not None and MODES[mode][0] not in ("graph", "exit"):
+        algo = _modelopt(model, revision)
+        if algo:
+            raise SystemExit(f"{model}: {modelopt_message(algo, MODES[mode][0], mode, default=True)}")
+    return mode
+
+
+def _default_mode(model=None, revision=None):
+    """default_mode's pick from the hardware and the model's architecture."""
     if torch.cuda.is_available():
         if model is not None and _recurrent(model, revision):
             return "fast" if _gdn(model, revision) and gdn_default_fast() else "eager"
@@ -182,6 +199,16 @@ def _recurrent(model, revision=None):
         return recurrent_layers(resolve(model, revision, metadata_only=True), strict=True)
     except Exception as e:
         _config_unreadable("_recurrent", model, e)
+        return None
+
+
+def _modelopt(model, revision=None):
+    """The algorithm of a ModelOpt checkpoint (engine.modelopt_algo: "FP8", "NVFP4"), from its config.json; None for
+    any other model or when that cannot be read (the model load reports it)."""
+    try:
+        return modelopt_algo(resolve(model, revision, metadata_only=True))
+    except Exception as e:
+        _config_unreadable("_modelopt", model, e)
         return None
 
 
@@ -1675,6 +1702,11 @@ class Server:
         if kind == "graph" and not (what and gdn):  # GraphBackend's own option checks (engine.graph_options), on the
             # model's metadata (config, basal.json, quantisation configs): refused before its weights are downloaded
             refuse_graph_options(a, quant, comp, attn, resolve(a.model, a.revision, metadata_only=True))
+        # a ModelOpt checkpoint in an engine that would load its quantised weights without their scales (eager, mps,
+        # mlx, strix, tpu; the graph engine for Qwen3.5 or another algorithm than FP8): refused before any weights load
+        why = modelopt_refused(resolve(a.model, a.revision, metadata_only=True), kind, a.mode, gdn=bool(what and gdn))
+        if why:
+            raise SystemExit(f"{a.model}: {why}")
         # GGUF modes: the engine serves the GGUF weights, so only tokenizer, template and calibration are downloaded
         md = resolve(a.model, a.revision, metadata_only=kind in WEIGHTS_ELSEWHERE)
         self.fmt = model_format(md)  # prompt format of the model (basal.json "prompt"; 1 when absent)

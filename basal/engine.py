@@ -182,6 +182,9 @@ class EagerBackend(Capable):
 
     def __init__(self, model_dir, dtype="bfloat16", device=None, media=False, forward=None, ple_offload=False,
                  attn="math", adapter=None):
+        why = modelopt_refused(model_dir, self.KIND)  # (eager, and mps through MPSBackend: transformers' loader)
+        if why:
+            raise ValueError(f"{model_dir}: {why}")
         two_way = model_two_way(model_dir)  # basal.json "two_way": read as the model was trained (Gemma 4 only)
         iso = model_option_isolation(model_dir)  # basal.json "option_isolation": isolated option blocks (Gemma 4 only)
         self.tok = AutoTokenizer.from_pretrained(model_dir)
@@ -3807,6 +3810,9 @@ class MLXBackend(Capable):
         forward: "mlx-lm" or "basal" (basal/mlx_forward.py where the architecture allows). adapter: a LoRA adapter
         merged into the loaded weights (bf16, or dequantised and re-quantised for an export), before q8."""
         from .gdn_graph import is_gdn
+        why = modelopt_refused(md, "mlx")  # (mlx-lm's loader: no ModelOpt scales)
+        if why:
+            raise ValueError(f"{md}: {why}")
         what = recurrent_layers(md)
         if what and not is_gdn(md):  # before mlx is imported or any weights are read
             raise ValueError(f"{md}: {what}: --mode mlx carries the recurrent states of Qwen3.5 (Gated DeltaNet) "
@@ -4667,6 +4673,55 @@ def modelopt_fp8(model_dir):
     p = Path(model_dir) / "config.json"
     q = (json.loads(p.read_text(encoding="utf-8")).get("quantization_config") or {}) if p.exists() else {}
     return q.get("quant_method") == "modelopt" and q.get("quant_algo") == "FP8"
+
+
+def modelopt_algo(model_dir):
+    """The algorithm of a ModelOpt checkpoint ("FP8" for the -FP8 repositories, "NVFP4" for -NVFP4), from config.json's
+    "quantization_config" as modelopt_fp8 reads it (quant_method "modelopt"); None for any other model, or when
+    config.json cannot be read (the model load then reports it)."""
+    try:
+        cfg = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    q = (cfg.get("quantization_config") or {}) if isinstance(cfg, dict) else {}
+    return str(q.get("quant_algo") or "unknown") if q.get("quant_method") == "modelopt" else None
+
+
+# the engines that read a ModelOpt checkpoint's quantised layers, with the algorithms they read (None: every one): the
+# CUDA graph engine its FP8 layers (load_modelopt_fp8; not for Qwen3.5, whose engine loads with transformers), vLLM
+# and SGLang theirs; gguf, ollama and llamacpp serve a GGUF file and read only the folder's tokenizer and calibration.
+# The other engines (eager, mps, mlx, strix, tpu) load the weights with transformers or their own readers, which have no
+# ModelOpt loader: transformers 5.17 warns "Unknown quantization type, got modelopt ... we will skip the quantization"
+# and takes the FP8 weights without their scales, so every answer is wrong (basal-omni-1.0-mini-FP8 in --mode eager,
+# RTX PRO 6000, 15 Nov: a sign bf16 read as "stop" at 0.36 became "zakaz" at 0.98). They refuse it before any weights
+# load
+MODELOPT_READERS = {"graph": ("FP8",), "exit": ("FP8",), "vllm": None, "sglang": None, "gguf": None, "ollama": None,
+                    "llamacpp": None}
+
+
+def modelopt_message(algo, kind, mode=None, gdn=False, default=False):
+    """Why the engine `kind` (--mode `mode`) refuses a ModelOpt checkpoint of `algo`; default: the mode basal-serve
+    picks without --mode (default_mode)."""
+    fast = algo == "FP8" and not gdn
+    serve = ("--mode fast (the CUDA graph engine reads its FP8 layers) or --mode vllm" if fast else "--mode vllm")
+    what = (f"without --mode this machine serves it with --mode {mode or kind}, which cannot read a ModelOpt {algo} "
+            "checkpoint" if default else f"--mode {mode or kind} cannot read a ModelOpt {algo} checkpoint")
+    return (f"{what} (config.json \"quantization_config\"{', a Qwen3.5 model' if gdn else ''}): it would load the "
+            f"{algo} weights without their scales, and every answer would be wrong. Serve it with {serve} on a CUDA "
+            f"GPU, or serve its bf16 model{'' if default else ' with this mode'}")
+
+
+def modelopt_refused(model_dir, kind, mode=None, gdn=False):
+    """Why the engine `kind` (--mode `mode`; gdn: a Qwen3.5 model) cannot serve the model at model_dir as a ModelOpt
+    checkpoint (MODELOPT_READERS), from its config.json before any weights load; None for any other model, or an
+    engine that reads it."""
+    algo = modelopt_algo(model_dir)
+    if algo is None:
+        return None
+    reads = MODELOPT_READERS.get(kind, ())
+    if reads is None or (algo in reads and not gdn):
+        return None
+    return modelopt_message(algo, kind, mode, gdn)
 
 
 def _fp8_cast_ops(x, scale):
