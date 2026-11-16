@@ -29,7 +29,9 @@ on these prompts. Check the quality on your own data.
    when it fits). Each request's state is your state plus its list, and every candidate in it is one yes / no
    question, `{candidate}` in the instructions naming it. A request reads its state once and judges its candidates
    side by side, which makes their probabilities comparable; the paper found this gain levels off at about 50
-   candidates per request. All requests go through the server's queue together, so they are batched.
+   candidates per request. The requests go through the server's queue together, so they are batched: up to 256 of
+   a request at once (the 200 of 10,000 candidates at the default `chunk` all together), and at most half of
+   `--max-requests`.
 2. **Final choice** (`top` >= 2, default 20): one choice question over the top candidates by P(yes), its options their
    names in the list. Its probabilities reorder them; the others keep their order. When one request held every
    candidate, the choice reads that request's state again: with `basal-serve --state-cache-gb N` the state is a cache
@@ -40,7 +42,7 @@ on these prompts. Check the quality on your own data.
 | `instructions` | (required) | the yes / no question; `{candidate}` names the candidate (`Passage 7`) |
 | `candidates` | (required) | `{key: text}`, `[text, ...]` (keys `"0"`, `"1"`, ...) or `[{"key", "text", "group"}]`; at most 10,000 per request, all its rank questions together (`basal-serve --rank-max-candidates N`) |
 | `label`, `list_title` | `Candidate`, none | how the list names its entries, and its heading line |
-| `chunk` | 50 | candidates per request; 0 = all in one request when it fits the model's context, else 50 |
+| `chunk` | 50 | candidates per request; 0 = all in one request when it fits the model's context and the server's `--max-branches`, else 50 |
 | `top` | 20 | the final choice's shortlist, at most the model's options per question; 0 = no choice |
 | `choice_instructions` | `Which candidate is the best match?` | the final choice's question |
 | `choice_context` | `auto` | `screen` (the screening state; needs one request), `shortlist`, or `auto` (screen when it can) |
