@@ -208,6 +208,16 @@ describe("errors through the whole response (a fetch of the test's own)", () => 
         (e) => e.status === status && e.kind === kind && e.retryable === retryable && e.detail === "x");
   });
 
+  test("a 200 response without an answers object is a server error, not an empty result", async () => {
+    const q = { q: { type: "noul", instructions: "ok?" } };
+    for (const body of ["null", "{}", '{"answers": []}', '{"answers": null}', "[]", '"x"', '{"answers": "x"}'])
+      await assert.rejects(new Basal({ fetch: respond(body) }).decide("s", q),
+        (e) => e instanceof BasalError && e.kind === "server" && e.status === 200 && !e.retryable &&
+          e.detail === "the response has no answers" && e.body === JSON.stringify(JSON.parse(body)), body);
+    const ok = '{"model": "m", "answers": {}, "usage": {}}';  // (no question answered: still a response)
+    assert.deepEqual(await new Basal({ fetch: respond(ok) }).decide("s", q), {});
+  });
+
   test("a timeout that is not a number of seconds > 0 is refused; a fraction of a millisecond is rounded", async () => {
     for (const timeout of [0, -1, NaN, Infinity, "5", 5e9]) assert.throws(() => new Basal({ timeout }), RangeError, String(timeout));
     const ok = respond('{"status": "ok", "running": 0, "queued": 0}');
