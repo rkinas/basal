@@ -131,6 +131,23 @@ def test_page_and_state_show_every_replica():
         assert [x["ui"] for x in d2["replicas"]] == ["on", "off", "on"]
 
 
+def test_state_counts_requests_routed_by_prefix():
+    """--prefix-affinity: the steps of a growing state after its first go by prefix; the page counts them with the
+    replica's other requests, its share and the recent rows included."""
+    rt, ui = ui_router()
+    base = "Case log. " + "The agent read a file and found nothing new. " * 30
+    with TestClient(R.app(rt, poll_s=3600, ui=ui)) as c:
+        asyncio.run(rt.poll())
+        got = [c.post("/v1/systemone", json={"state": base + " step." * k, "questions": {}}).json()["replica"]
+               for k in range(1, 6)]
+        d = c.get("/ui/state").json()
+    assert len(set(got)) == 1
+    reps = d["replicas"]
+    assert next(x for x in reps if x["url"] == got[0])["routed"] == {"state": 1, "prefix": 4, "load": 0}
+    assert sum(x["requests"] for x in reps) == 5 == sum(sum(x["routed"].values()) for x in reps)
+    assert sorted(r[5] for r in d["recent"]) == ["prefix"] * 4 + ["state"]
+
+
 def test_state_is_read_at_most_once_a_second_per_key_and_never_shared_across_keys():
     asked = {}
     rt, ui = ui_router(ui={n: "key" for n in NAMES}, asked=asked)

@@ -85,8 +85,8 @@ class RouterUI:
         the first choice made for it (the replica its pool and state give; cascade / blend calls come after)."""
         choose = self.router.choose
 
-        def chosen(key, pool="main"):
-            out = choose(key, pool)
+        def chosen(key, pool="main", hs=None):
+            out = choose(key, pool, hs)
             box = PICK.get()
             if box is not None and not box:
                 box.extend(out)
@@ -221,7 +221,8 @@ class RouterUI:
             p50, p95 = e["hist"].quantiles((0.5, 0.95)) if e else (None, None)
             replicas.append({
                 "index": k, "url": redact("url", url), "pools": self.pools.get(url, []), "ready": url in rt.ready,
-                "in_flight": rt.load.get(url, 0), "routed": {h: rt.routed.get((url, h), 0) for h in ("state", "load")},
+                "in_flight": rt.load.get(url, 0),
+                "routed": {h: rt.routed.get((url, h), 0) for h in ("state", "prefix", "load")},
                 "failed": rt.failed.get(url, 0), "requests": e["requests"] if e else 0, "p50": p50, "p95": p95,
                 "ui": ui, "detail": detail, "state": state})
         features = {}
