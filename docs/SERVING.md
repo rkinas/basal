@@ -400,7 +400,8 @@ basal-router --replicas http://127.0.0.1:8001 --route cyrillic=http://127.0.0.1:
   `--fallback-max-tokens`, default 8,192, so a model can think first). The answer replaces the basal one and says
   `"answered_by": "fallback"`, the `"model"`, `"calibrated": false`, the option probabilities from the endpoint's
   logprobs renormalised over the options (`null` when it returns none) and the basal answer it replaced
-  (`"basal": {choice, confidence, model}`); the response lists `"fallback": {below, asked, answered}`.
+  (`"basal": {choice, confidence, model}`), including the model reported by the answering cascade level (or `null` if
+  it did not report one); the response lists `"fallback": {below, asked, answered}`.
   - The basal answer stays when the endpoint is down, answers an error, takes longer than `--fallback-timeout`
     (default 60 s), or returns anything but exactly `{"answer": "<one of the letters>"}`; the request does not fail.
     A connection the endpoint closed just as it was reused (its keep-alive) is tried once more. `/metrics` counts the

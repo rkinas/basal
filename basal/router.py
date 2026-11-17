@@ -464,13 +464,13 @@ class Router:
     async def _stages(self, path, req, content, headers, key):
         """The first replica's response (content) to the request req (parse_body) through the cascade, the blend and
         the fallback."""
-        level = {}
+        level, origin = {}, {}
         if self.levels:
-            content = await self._cascade(path, req, content, headers, key, level)
+            content = await self._cascade(path, req, content, headers, key, level, origin)
         if self.blends:
             content = await self._blend(path, req, content, headers, key)
         if self.fallback:
-            content = await self._fallback(req, content, level if self.levels else None)
+            content = await self._fallback(req, content, level if self.levels else None, origin)
         return content
 
     async def _gates(self, pool, path, req, content, headers, key, ctype="application/json"):
@@ -528,7 +528,7 @@ class Router:
                 usage.pop("skipped", None)
         return 200, json.dumps(resp, ensure_ascii=False).encode(), ctype
 
-    async def _fallback(self, req, content, level=None):
+    async def _fallback(self, req, content, level=None, origin=None):
         """The answers of the last level (level: the cascade's level of each question; None: one model) whose top
         probability is under --fallback-below asked of the LLM, concurrently; its answer replaces the basal one."""
         try:
@@ -559,7 +559,7 @@ class Router:
                           "confidence": None if p is None else max(p.values()), "answered_by": "fallback",
                           "model": model, "calibrated": False,
                           "basal": {"choice": a.get("choice"), "confidence": top_probability(a),
-                                    "model": a.get("model", resp.get("model"))}}
+                                    "model": origin.get(q) if level is not None else a.get("model", resp.get("model"))}}
             answered.append(q)
         resp["fallback"] = {"below": self.fallback["below"], "asked": [q for q, _, _ in go], "answered": answered}
         return json.dumps(resp, ensure_ascii=False).encode()
@@ -634,7 +634,7 @@ class Router:
             self.blended[len(members)] = self.blended.get(len(members), 0) + 1
         return json.dumps(resp, ensure_ascii=False).encode()
 
-    async def _cascade(self, path, req, content, headers, key, level_out=None):
+    async def _cascade(self, path, req, content, headers, key, level_out=None, origin=None):
         """The answers of the first replica (level 1), with those under level k's threshold asked again of level k + 1,
         level by level. A level that is down or does not answer 200 leaves the previous answers (and ends the chain).
         With one level the response is as before; with more, every answer also gives its level and model."""
@@ -645,12 +645,14 @@ class Router:
             return content
         named = len(self.levels) > 1
         level = {} if level_out is None else level_out
+        origin = {} if origin is None else origin
         for q, a in answers.items():
             if isinstance(a, dict):
                 a["answered_by"] = "first"
                 if named:
                     a["level"], a["model"] = 1, resp.get("model")
                 level[q] = 1
+                origin[q] = a.get("model", resp.get("model"))
         done = []
         for k, (pool, below) in enumerate(self.levels, start=1):
             low = [q for q, a in answers.items() if q in (req.get("questions") or {}) and level.get(q) == k
@@ -669,6 +671,7 @@ class Router:
                         a["level"], a["model"] = k + 1, r2.get("model")
                     answers[q] = a
                     level[q] = k + 1
+                    origin[q] = a.get("model", r2.get("model"))
                     if k == 1:
                         done.append(q)
         self.answered["escalated"] += len(done)
