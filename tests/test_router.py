@@ -973,6 +973,26 @@ def test_fallback_never_takes_multi_tasks_limits_evidence_media_or_other_types()
     assert len(asked["llm"]) == 1
 
 
+@pytest.mark.parametrize("reported", [True, False])
+def test_fallback_after_one_escalation_keeps_the_last_answer_origin(reported):
+    conf = {SMALL: {"q": _ch(0.55)}, MID: {"q": _ch(0.6)}}
+    transport = fallback_transport(conf, {}, lambda b: llm_reply("B", model="fallback-synthetic"))
+
+    def handler(req):
+        response = transport.handle_request(req)
+        if not reported and req.url.host == "mid" and req.url.path != "/health":
+            body = response.json()
+            del body["model"]
+            return httpx.Response(200, json=body)
+        return response
+
+    rt = R.Router([SMALL], transport=httpx.MockTransport(handler),
+                  escalate=[MID], below=0.8, fallback=dict(FB, below=0.7))
+    answer = _ask(rt, {"state": "s", "questions": {"q": {"criteria": OPTS}}})[0].json()["answers"]["q"]
+    assert answer["basal"] == {"choice": "a", "confidence": 0.6, "model": "model-mid" if reported else None}
+    assert answer["choice"] == "b" and answer["model"] == "fallback-synthetic" and answer["calibrated"] is False
+
+
 def test_fallback_after_a_cascade_takes_only_the_last_level():
     asked = {}
     conf = {SMALL: {"q1": _ch(0.85), "q2": _ch(0.5)}, MID: {"q2": _ch(0.6)}, BIG: {"q2": _ch(0.7)}}
