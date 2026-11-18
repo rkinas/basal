@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 from . import __version__, derive
 from .calibrate import InputError, load
-from .engine import default_device, resolve
+from .engine import default_device, mps_host_tables, resolve
 from .facts import inject as inject_facts
 from .jsonl import read_lines
 from .prompt import letter_ids, max_options, model_format, model_layout, render
@@ -237,7 +237,14 @@ def main(argv=None):
           + (f", skipped {skipped}" if skipped else "") + f"; {a.model} format {fmt} on {device} {str(dtype)[6:]}",
           file=sys.stderr)
 
-    model = AutoModelForCausalLM.from_pretrained(src, dtype=dtype).to(device)
+    model = AutoModelForCausalLM.from_pretrained(src, dtype=dtype)
+    # Gemma 4 E2B / E4B on MPS: their per-layer embedding table would be read in part as zeros, and cannot stay in host
+    # memory here (the merged checkpoint is written from the model)
+    try:
+        mps_host_tables(model, device, f"basal-finetune --device {device}", offload=False)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
+    model = model.to(device)
     cfg = model.config.get_text_config() if hasattr(model.config, "get_text_config") else model.config
     softcap = getattr(cfg, "final_logit_softcapping", None)
     model.eval()

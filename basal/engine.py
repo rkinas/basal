@@ -92,6 +92,47 @@ def eager_sdpa_kernels(device):
     return [k for k, enabled in on if enabled]
 
 
+# PyTorch MPS before 2.14.1 reads no row of an embedding table that starts at element 2**31 or beyond: F.embedding and
+# index_select return zeros for it, with no error (torch 2.13.0, M5 Max, 18 Nov: from id 199,729 of a 262,144 x 10,752
+# table on, fp32 and bf16 alike; a row that only ends past it is read whole; torch 2.14.1 and 2.15.0 read every row).
+# That table is Gemma 4 E4B's per-layer embedding table (E2B's, 262,144 x 8,960: from id 239,675 on), whose high ids
+# include ":", "," and the digits: basal-omni mini in --mode eager or mps on MPS was off by up to 0.16 in probability
+# from the CPU on the bundled questions. Every token embedding table of the basal models is smaller (Gemma 4 31B:
+# 262,144 x 5,376)
+MPS_ROW_LIMIT = 2 ** 31
+MPS_ROWS_READ = "2.14.1"  # the first torch measured to read them
+
+
+def mps_unreadable(model):
+    """The embedding tables (nn.Embedding) of model with a row MPS reads as zeros (MPS_ROW_LIMIT) -> their names; none
+    from torch MPS_ROWS_READ on."""
+    from torch.torch_version import TorchVersion
+    if TorchVersion(torch.__version__) >= MPS_ROWS_READ:
+        return []
+    return [n for n, m in model.named_modules()
+            if isinstance(m, torch.nn.Embedding) and (m.num_embeddings - 1) * m.embedding_dim >= MPS_ROW_LIMIT]
+
+
+def mps_host_tables(model, device, what, offload=True):
+    """Before model.to(device): on MPS, Gemma 4's per-layer embedding table stays in host memory as with --ple-offload
+    on (gemma4.offload_ple) where MPS would read rows of it as zeros (mps_unreadable); any other such table, or that
+    one without offload (a checkpoint written from the model) -> ValueError of `what`. -> bytes kept in host memory
+    (0 on every other device, from torch MPS_ROWS_READ on and for the tables MPS reads whole: nothing changes
+    there)."""
+    if torch.device(device).type != "mps":
+        return 0
+    names = mps_unreadable(model)
+    if not names:
+        return 0
+    from .gemma4 import is_gemma4, offload_ple, text_model
+    ple = getattr(text_model(model), "embed_tokens_per_layer", None) if is_gemma4(model) else None
+    if not offload or any(model.get_submodule(n) is not ple for n in names):
+        raise ValueError(f"{what}: PyTorch MPS (torch {torch.__version__}) reads the rows of {', '.join(names)} that "
+                         "start at element 2**31 or beyond as zeros, so the answers would be wrong; install torch "
+                         f"{MPS_ROWS_READ} or later, or run it on the CPU (--device cpu) or a CUDA GPU")
+    return offload_ple(model)
+
+
 def _memo_media(proc):
     """The processor prepares a request's images / audio once for all its prompts (questions and option orders): at
     1,120 soft tokens the image preprocessing took ~2.8 s a call against 0.65 s for the forward (measured
@@ -213,6 +254,10 @@ class EagerBackend(Capable):
             from .gemma4 import offload_ple
             if not offload_ple(self.model):
                 raise SystemExit("--ple-offload on: the model has no per-layer embeddings (Gemma 4 E2B / E4B)")
+        elif held := mps_host_tables(self.model, dev, f"{model_dir}: --mode {self.KIND} on MPS"):
+            # (Gemma 4 E2B / E4B on MPS: their per-layer embedding table, which MPS would read in part as zeros)
+            print(f"basal: the per-layer embedding table ({held / 2 ** 30:.1f} GiB) stays in host memory: MPS in torch "
+                  f"{torch.__version__} reads its rows from element 2**31 on as zeros", flush=True)
         self.model = self.model.to(dev).eval()
         if torch.device(dev).type == "cuda":
             # no cuDNN attention for any model (the graph engine never uses it either): it builds an execution plan for

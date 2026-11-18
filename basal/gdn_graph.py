@@ -46,8 +46,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from . import adapter as adapter_module
 from .blockquant import fuse
 from .engine import (GraphBackend, MPSBackend, PREFILL, StateCache, _copy_same, _varlen_attention, compact_refused,
-                     graph_memory_bytes, modelopt_refused, persist_compile_cache, set_attention,
-                     torch_varlen_available)
+                     graph_memory_bytes, modelopt_refused, mps_host_tables, persist_compile_cache,
+                     set_attention, torch_varlen_available)
 
 # the decoders this forward implements: Qwen3.5 text models (dense MLP) of these layer kinds
 GDN_MODEL_TYPES = ("qwen3_5_text", "qwen3_5")
@@ -802,6 +802,8 @@ class GDNGraphBackend(GraphBackend):
         self.tok.pad_token = self.tok.pad_token or self.tok.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=getattr(torch, dtype))
         self.adapter_modules = adapter_module.merge_torch(self.model, adapter) if adapter else 0  # --adapter
+        if not cuda:  # (no Qwen3.5 model has a table MPS reads in part as zeros: mps_host_tables refuses one)
+            mps_host_tables(self.model, device or "cpu", f"{model_dir}: --mode mps on MPS")
         self.model = self.model.to("cuda" if cuda else device or "cpu").eval()
         self.dev = next(self.model.parameters()).device
         self.prefill = PREFILL

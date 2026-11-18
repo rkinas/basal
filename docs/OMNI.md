@@ -66,7 +66,9 @@ basal-serve --model Remek/basal-omni-1.0-max --mode eager --media on --port 8000
   - **Per-layer embeddings off the GPU** (`--ple-offload on`, mini): mini looks up 256 extra numbers per layer for
     every token in a 5.6 GB table (a third of its weights). With the option the table stays in host memory and only the
     rows of each forward's tokens go to the GPU: 5.2 GB less GPU memory (peak 21.1 -> 15.9 GB) at about 4% fewer
-    decisions per second, the same answers (dev v2: 10,606 of 10,606). For mini on smaller GPUs.
+    decisions per second, the same answers (dev v2: 10,606 of 10,606). For mini on smaller GPUs. On Apple Silicon
+    with torch before 2.14.1 the table stays in host memory without the option, in `--mode eager` and `mps`: MPS there
+    reads its rows from element 2**31 on (token ids from 199,729) as zeros.
 
   Measured 2026-10-20 on one H100 against `--eager-forward hf` of the same engine (dev v2, 10,606 decisions, one
   option order; automated share at 1% on the calibration test split, each forward with its own calibration fit,
