@@ -213,6 +213,17 @@ def main(argv=None):
     torch.manual_seed(a.seed)
     device = a.device or default_device()
     dtype = pick_dtype(a.dtype, device)
+    if device == "mps":
+        # Gemma 4 E2B / E4B on MPS: their per-layer embedding table would be read in part as zeros, and cannot stay in
+        # host memory here (the merged checkpoint is written from the model); refused before anything is written, from
+        # the tables of the model built without weights
+        from transformers import AutoConfig
+        with torch.device("meta"):
+            shapes = AutoModelForCausalLM.from_config(AutoConfig.from_pretrained(src))
+        try:
+            mps_host_tables(shapes, device, f"basal-finetune --device {device}", offload=False)
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
     tok = AutoTokenizer.from_pretrained(src)
 
     def build(pairs):
@@ -238,12 +249,6 @@ def main(argv=None):
           file=sys.stderr)
 
     model = AutoModelForCausalLM.from_pretrained(src, dtype=dtype)
-    # Gemma 4 E2B / E4B on MPS: their per-layer embedding table would be read in part as zeros, and cannot stay in host
-    # memory here (the merged checkpoint is written from the model)
-    try:
-        mps_host_tables(model, device, f"basal-finetune --device {device}", offload=False)
-    except ValueError as e:
-        raise SystemExit(str(e)) from None
     model = model.to(device)
     cfg = model.config.get_text_config() if hasattr(model.config, "get_text_config") else model.config
     softcap = getattr(cfg, "final_logit_softcapping", None)

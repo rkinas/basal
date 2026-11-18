@@ -3,13 +3,14 @@
 stays in host memory (as with --ple-offload on); any other such table is refused; on every other device, from torch
 2.14.1 on and for smaller tables, nothing changes. The limit is moved down for the tiny models here (a real table is
 5.6 GB in bf16), and every test but test_torch_that_reads_them runs as on a torch that does not read them."""
+import sys
 from types import SimpleNamespace
 
 import pytest
 import torch
 from transformers import Gemma4ForCausalLM
 
-from basal import engine
+from basal import engine, finetune
 from basal.engine import EagerBackend, mps_host_tables, mps_unreadable
 from basal.gemma4 import HostRows
 
@@ -130,3 +131,38 @@ def test_mps_engines_answer_as_the_cpu(tmp_path, monkeypatch, cls):
     for a, b in zip(be.run_shared(list(zip(groups, lids))), ref):
         for x, y in zip(a, b):
             assert max(abs(p - q) for p, q in zip(x, y)) < 1e-4
+
+
+def test_eager_ple_offload_on_still_refuses_another_table(tmp_path, monkeypatch):
+    """--ple-offload on moves the per-layer table, and every table left is checked as without it."""
+    tiny().save_pretrained(tmp_path)
+    stub_tokenizer(monkeypatch)
+    monkeypatch.setattr(engine, "MPS_ROW_LIMIT", 1000)  # the token embeddings too
+    with pytest.raises(ValueError, match=r"model\.embed_tokens .*--device cpu") as e:
+        EagerBackend(tmp_path, "float32", device="mps", ple_offload=True)
+    assert "embed_tokens_per_layer" not in str(e.value)  # on the host by then
+    monkeypatch.setattr(engine, "MPS_ROW_LIMIT", PLE_ONLY)  # only the per-layer table: offloaded, nothing to refuse
+    be = EagerBackend(tmp_path, "float32", device="mps", ple_offload=True)
+    assert isinstance(be.model.model.embed_tokens_per_layer, HostRows)
+
+
+def test_finetune_refuses_before_writing(tmp_path, monkeypatch, capsys):
+    """basal-finetune --device mps of a model with a table MPS reads in part as zeros stops before --out is created."""
+    src, out = tmp_path / "model", tmp_path / "out"
+    tiny().save_pretrained(src)
+    (src / "basal.json").write_text("{}")
+    monkeypatch.setattr(engine, "MPS_ROW_LIMIT", PLE_ONLY)
+    monkeypatch.setattr(finetune, "refused", lambda _src: None)
+    monkeypatch.setattr(finetune, "split", lambda *_a, **_k: (["t"], ["h"], {}))
+    monkeypatch.setattr(finetune, "model_format", lambda _src: "x")
+    monkeypatch.setattr(finetune, "model_layout", lambda _src: "x")
+    monkeypatch.setitem(sys.modules, "peft", SimpleNamespace(LoraConfig=None, get_peft_model=None))  # (not reached)
+    args = [str(tmp_path / "labelled.jsonl"), "--model", str(src), "--out", str(out), "--device", "mps"]
+    with pytest.raises(SystemExit, match="basal-finetune --device mps: .*model.embed_tokens_per_layer"):
+        finetune.main(args)
+    assert not out.exists()
+    out.mkdir()  # an existing heldout file of an earlier run survives --force too
+    (out / "heldout.jsonl").write_text("kept")
+    with pytest.raises(SystemExit, match="model.embed_tokens_per_layer"):
+        finetune.main(args + ["--force"])
+    assert (out / "heldout.jsonl").read_text() == "kept"

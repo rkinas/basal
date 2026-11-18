@@ -254,7 +254,9 @@ class EagerBackend(Capable):
             from .gemma4 import offload_ple
             if not offload_ple(self.model):
                 raise SystemExit("--ple-offload on: the model has no per-layer embeddings (Gemma 4 E2B / E4B)")
-        elif held := mps_host_tables(self.model, dev, f"{model_dir}: --mode {self.KIND} on MPS"):
+        # (the per-layer table of --ple-offload on is no nn.Embedding any more: any other table MPS would read in part
+        # as zeros is refused here too)
+        if held := mps_host_tables(self.model, dev, f"{model_dir}: --mode {self.KIND} on MPS"):
             # (Gemma 4 E2B / E4B on MPS: their per-layer embedding table, which MPS would read in part as zeros)
             print(f"basal: the per-layer embedding table ({held / 2 ** 30:.1f} GiB) stays in host memory: MPS in torch "
                   f"{torch.__version__} reads its rows from element 2**31 on as zeros", flush=True)
