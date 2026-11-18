@@ -141,9 +141,10 @@ def test_eager_ple_offload_on_still_refuses_another_table(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match=r"model\.embed_tokens .*--device cpu") as e:
         EagerBackend(tmp_path, "float32", device="mps", ple_offload=True)
     assert "embed_tokens_per_layer" not in str(e.value)  # on the host by then
-    monkeypatch.setattr(engine, "MPS_ROW_LIMIT", PLE_ONLY)  # only the per-layer table: offloaded, nothing to refuse
-    be = EagerBackend(tmp_path, "float32", device="mps", ple_offload=True)
-    assert isinstance(be.model.model.embed_tokens_per_layer, HostRows)
+    if MPS:  # (the model goes to the device from here on)
+        monkeypatch.setattr(engine, "MPS_ROW_LIMIT", PLE_ONLY)  # only the per-layer table: offloaded, nothing to refuse
+        be = EagerBackend(tmp_path, "float32", device="mps", ple_offload=True)
+        assert isinstance(be.model.model.embed_tokens_per_layer, HostRows)
 
 
 def test_finetune_refuses_before_writing(tmp_path, monkeypatch, capsys):
