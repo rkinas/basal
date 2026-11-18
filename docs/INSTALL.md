@@ -229,7 +229,9 @@ The request and response are the same as above. `-MLX-8bit` holds affine 8-bit d
 and the output head stay in bf16, because the decision is read from the output head. The state of a request is
 computed once into a KV cache shared by all its questions. With `basal[mlx]` installed, `mlx` is the default mode on a
 Mac; `--mode mlx` also loads a bf16 model directory, and `--mode mps` runs the PyTorch engine on the Mac's GPU
-instead ([HARDWARE.md](HARDWARE.md#apple-silicon)). How the ports work: [PORTS.md](PORTS.md).
+instead ([HARDWARE.md](HARDWARE.md#apple-silicon)). With torch before 2.14.1, `--mode mps` and `eager` keep basal-omni
+mini's per-layer embedding table in host memory: MPS there reads part of it as zeros
+([OMNI.md](OMNI.md)). How the ports work: [PORTS.md](PORTS.md).
 
 ### Ollama and llama.cpp (GGUF)
 

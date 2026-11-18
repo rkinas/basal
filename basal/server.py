@@ -2900,7 +2900,9 @@ def add_engine_args(ap):
                          "or sliding=K,full=K with K in sdpa, efficient, cudnn, fa3, fa4")
     ap.add_argument("--ple-offload", dest="ple_offload", choices=["off", "on"], default="off",
                     help="--mode eager with Gemma 4 E2B / E4B (basal-omni mini): keep the per-layer embedding table in "
-                         "host memory and copy only the rows of each forward's tokens (E4B: 5.6 GB less GPU memory)")
+                         "host memory and copy only the rows of each forward's tokens (E4B: 5.6 GB less GPU memory). "
+                         "On MPS with torch before 2.14.1 it stays there without it (--mode eager and mps): MPS there "
+                         "reads its rows from element 2**31 on as zeros")
     ap.add_argument("--mlx-packed", dest="mlx_packed", action="store_true",
                     help="--mode mlx, opt-in: a group of a Llama model (basal-1.x, 2.x; static RoPE) whose state and "
                          "option orders fit in 512 tokens runs as one packed forward (explicit positions, block mask) "
