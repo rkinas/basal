@@ -1185,15 +1185,18 @@ def reread_refused(threshold, fmt, image=None, media=False):
 def two_way_refused(kind, a):
     """Why a two-way model (basal.json "two_way") cannot be served with these options, or None. It reads the state
     with each question: nothing is shared between questions (SOAM) or cached before the question (the state and prefix
-    caches); the engine's own eager Gemma 4 forward and the CUDA graph engine (fast, fast-nocompile) read two-way."""
+    caches); the engine's own eager Gemma 4 forward, the CUDA graph engine (fast, fast-nocompile) and the MLX engine
+    (mlx, mlx-q8) read two-way."""
     if a.soam == "on":
         return "--soam on: a two-way model reads the state with each question, so the questions cannot share it"
     if getattr(a, "state_cache_gb", 0) or getattr(a, "prefix_cache", "off") == "on":
         return ("--state-cache-gb and --prefix-cache keep a state read before its question; a two-way model reads it "
                 "with the question")
-    if kind not in ("eager", "graph"):
-        return ("a two-way model (basal.json \"two_way\") is served with --mode eager, fast or fast-nocompile in this "
-                "version")
+    if kind not in ("eager", "graph", "mlx"):
+        return ("a two-way model (basal.json \"two_way\") is served with --mode eager, fast, fast-nocompile or mlx "
+                "(mlx-q8) in this version")
+    if kind == "mlx" and getattr(a, "mlx_packed", False):
+        return "--mlx-packed: not with a two-way model (each prompt is read whole, nothing shared before its question)"
     if kind == "graph" and getattr(a, "long_lane", "off") == "on":
         return "--long-lane: not with a two-way model (its long prompts are read one way, like the others)"
     if getattr(a, "eager_forward", None) == "hf":
@@ -2906,7 +2909,8 @@ def add_engine_args(ap):
                          "option orders fit in 512 tokens runs as one packed forward (explicit positions, block mask) "
                          "instead of a KV cache plus a continuation; faster on short prompts, exact in fp32, but in "
                          "bf16 / 8-bit the probabilities move slightly, so check it against CALIBRATION.mlx.json "
-                         "(fitted on the default path) before relying on the calibrated thresholds")
+                         "(fitted on the default path) before relying on the calibrated thresholds; not with a "
+                         "two-way model (basal.json \"two_way\")")
     ap.add_argument("--mlx-forward", dest="mlx_forward", choices=["mlx-lm", "basal"], default="mlx-lm",
                     help="--mode mlx: mlx-lm (default) = mlx-lm's forward; basal (opt-in, 2.5) = basal's own forward "
                          "over mlx-lm's layers for Llama and Gemma 4: the last layers at the readout rows only, merged "

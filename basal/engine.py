@@ -141,7 +141,7 @@ KIND_CAPS = {
                           two_way=True),
     "exit": Capabilities(state_cache=True, batches=True, attn=True),
     "mps": Capabilities(),
-    "mlx": Capabilities(state_cache=True, prefix_cache=True),
+    "mlx": Capabilities(state_cache=True, prefix_cache=True, two_way=True),
     "gguf": Capabilities(),
     "strix": Capabilities(),
     "tpu": Capabilities(streams=True),
@@ -3707,7 +3707,9 @@ def qwen35_norms(model_dir):
 
 class _PackedRow:
     """mlx-lm's cache interface for the packed rows of MLXBackend._packed: one position per token (offset [B, L], read
-    by the wrapped RoPE) and the block mask; nothing is stored (keys and values pass through)."""
+    by the wrapped RoPE) and the block mask; nothing is stored (keys and values pass through). Also the whole rows of a
+    two-way model (MLXBackend._forward_two_way): offset 0 and the mask of its layer's type (mlx-lm's Gemma 4 takes each
+    type's mask from the cache of its first layer of that type)."""
 
     def __init__(self, pos, mask):
         self.offset, self.mask = pos, mask
@@ -3750,7 +3752,12 @@ class MLXBackend(Capable):
     layer's convolution and recurrent states beside the attention layers' keys and values, and every suffix row
     continues them (as the CUDA graph engine carries the state into each branch); a right-padded row reads its last real
     token, which the padding after it cannot reach. No packed rows and no --mlx-forward basal for it (mlx-lm's forward). Other recurrent models (Mamba,
-    Qwen3-Next and hybrids) are refused: their states are not carried here."""
+    Qwen3-Next and hybrids) are refused: their states are not carried here.
+
+    A two-way model (basal.json "two_way", Gemma 4): each group is one request, and its prompts within the limits are
+    read whole, each a row of its own in right-padded batches, both ways in the global layers and causally within the
+    window in the sliding-window layers (_run_two_way, either forward); the others one way, as above. Nothing is shared
+    or cached before a question: no packed rows, state cache or prefix cache."""
     KIND = "mlx"
 
     MAX_ROWS = 16      # suffix rows per forward
@@ -3783,6 +3790,7 @@ class MLXBackend(Capable):
     KEY_CHECKS = (1, 37, 128, 512)
     state_cache = None  # StateCache: keys / values of request states (or template prefixes), reused across requests
     prefix = False
+    two_way = None  # basal.json "two_way" limits of a model trained with two-way reading (Gemma 4), or None
 
     FORWARDS = ("mlx-lm", "basal")
     COMPUTES = ("auto", "bf16")
@@ -3841,6 +3849,19 @@ class MLXBackend(Capable):
         if what and (quant or cfg.get("quantization")):
             raise ValueError(f"{md}: quantised MLX weights are not checked for Qwen3.5 (Gated DeltaNet) models; serve "
                              "its bf16 weights with --mode mlx")
+        # basal.json "two_way" (a Gemma 4 model trained with two-way reading): every prompt within its limits is read
+        # whole, both ways in the global layers (_run_two_way); nothing shared or cached before its question
+        self.two_way = model_two_way(md)
+        if self.two_way:
+            from .gemma4_graph import is_gemma4_dir
+            if not is_gemma4_dir(md):
+                raise ValueError(f"{md}: two-way reading (basal.json \"two_way\") runs for Gemma 4 models only")
+            if packed:
+                raise ValueError(f"{md}: --mlx-packed: not with a two-way model (each prompt is read whole, nothing "
+                                 "shared before its question)")
+            if self.state_cache is not None:
+                raise ValueError(f"{md}: --state-cache-gb and --prefix-cache keep a state read before its question; "
+                                 "a two-way model reads it with the question")
         # lazy for q8: the weights are materialised once, after quantisation (never the full bf16 copy)
         self.model, self.config = load_model(md, lazy=bool(quant), model_config=mlx_config_overrides(cfg))
         # --adapter: merged before q8 quantises the merged bf16 weights; merge_mlx evaluates only the adapter's layers,
@@ -4329,6 +4350,8 @@ class MLXBackend(Capable):
         return res
 
     def _run_shared(self, groups):
+        if self.two_way:
+            return self._run_two_way(groups)
         # a group the server cut for the state cache (its third element) runs through _group, single prompts too
         cut = self.state_cache is not None
         enc = [(self.encode(g[0]), g[1], g[2] if cut and len(g) > 2 else None) for g in groups]
@@ -4350,6 +4373,65 @@ class MLXBackend(Capable):
             if out[k] is None:
                 out[k] = self._group(t, x, c)
         return out
+
+    def _run_two_way(self, groups):
+        """A two-way model: each group is one request (the server's one queue entry for it). Its prompts within the
+        limits (two_way_rows: max_prompt tokens each, max_record for the request) are read whole, each a row of its own
+        (_two_way); the others are read one way, as for any model (_singles, _group)."""
+        enc = [(self.encode(g[0]), g[1]) for g in groups]
+        out = [[None] * len(t) for t, _ in enc]
+        both = [(k, j) for k, (t, _) in enumerate(enc) for j, ok in enumerate(two_way_rows(t, self.two_way)) if ok]
+        if both:
+            for (k, j), p in zip(both, self._two_way([enc[k][0][j] for k, j in both], [enc[k][1][j] for k, j in both])):
+                out[k][j] = p
+        rest = [(k, [j for j, p in enumerate(out[k]) if p is None]) for k in range(len(enc))]
+        single = [(k, js[0]) for k, js in rest if len(js) == 1]
+        if single:
+            for (k, j), p in zip(single, self._singles([enc[k][0][j] for k, j in single],
+                                                        [enc[k][1][j] for k, j in single])):
+                out[k][j] = p
+        for k, js in rest:
+            if len(js) > 1:
+                for j, p in zip(js, self._group([enc[k][0][j] for j in js], [enc[k][1][j] for j in js])):
+                    out[k][j] = p
+        return out
+
+    def _two_way(self, toks, lids):
+        """Prompts read two-way: right-padded batches of similar length (_chunks), no cache, nothing shared."""
+        res = [None] * len(toks)
+        for c in self._chunks([len(t) for t in toks]):
+            h = self._forward_two_way([toks[j] for j in c])
+            for j, p in zip(c, self._letters(h, [lids[j] for j in c])):
+                res[j] = p
+        return res
+
+    def _two_way_masks(self, lens, S):
+        """Boolean masks [B, 1, S, S] per layer type of whole rows right-padded to S tokens (lens: their real tokens)
+        read two-way, as gemma4.Gemma4Forward._mask: in the global layers a token sees every real token of its row, in
+        the sliding-window layers the real tokens up to its own within the window; a padding query sees itself (no
+        empty row)."""
+        mx = self.mx
+        i = mx.arange(S)
+        q, k = i[:, None], i[None]
+        valid = k < mx.array(lens)[:, None, None]  # [B, 1, S]
+        eye = q == k
+        window = self.lm.model.window_size
+        return {"sliding_attention": (((k <= q) & (q - k < window) & valid) | eye)[:, None],
+                "full_attention": (valid | eye)[:, None]}
+
+    def _forward_two_way(self, rows):
+        """Token rows (right-padded into one batch, positions from 0) read two-way -> hidden state at each row's last
+        token, with the masks of _two_way_masks per layer type (mlx-lm's forward: a _PackedRow per layer; basal's: the
+        masks by type); a KV-shared layer takes the mask of its own type."""
+        mx = self.mx
+        B, S = len(rows), max(map(len, rows))
+        pad = self.tok.pad_token_id
+        ids = mx.array([list(r) + [pad] * (S - len(r)) for r in rows])
+        masks = self._two_way_masks([len(r) for r in rows], S)
+        if self.fwd is not None:
+            return self.fwd.hidden(ids, mx.array([[len(r) - 1] for r in rows]), mask=masks)[:, 0]
+        h = self.lm.model(ids, cache=[_PackedRow(0, masks[layer.layer_type]) for layer in self.lm.model.layers])
+        return h[mx.arange(B), mx.array([len(r) - 1 for r in rows])]
 
     def run_shared(self, groups, policy=None):
         return self.pool.submit(self._run_shared, groups).result()

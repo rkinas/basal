@@ -154,11 +154,17 @@ def test_server_refusals():
     assert "--soam on" in two_way_refused("eager", ap.parse_args(["--soam", "on"]))
     assert "state" in two_way_refused("graph", ap.parse_args(["--state-cache-gb", "4"]))
     assert two_way_refused("graph", a) is None  # the graph engine reads two-way since 2.5
-    assert "--mode eager, fast" in two_way_refused("exit", a)
+    assert two_way_refused("mlx", a) is None  # the MLX engine reads two-way
+    assert "--mode eager, fast, fast-nocompile or mlx" in two_way_refused("exit", a)
     assert "--mode eager, fast" in two_way_refused("vllm", a)
+    assert "--mode eager, fast" in two_way_refused("mps", a)
+    assert "--mlx-packed" in two_way_refused("mlx", ap.parse_args(["--mlx-packed"]))
+    assert "state" in two_way_refused("mlx", ap.parse_args(["--state-cache-gb", "1"]))
+    assert "--prefix-cache" in two_way_refused("mlx", ap.parse_args(["--prefix-cache", "on"]))
+    assert "--soam on" in two_way_refused("mlx", ap.parse_args(["--soam", "on"]))
     assert "--long-lane" in two_way_refused("graph", ap.parse_args(["--long-lane", "on"]))
     assert "forward" in two_way_refused("eager", ap.parse_args(["--eager-forward", "hf"]))
-    for kind in ("eager", "graph"):
+    for kind in ("eager", "graph", "mlx"):
         assert "--reread" in two_way_refused(kind, ap.parse_args(["--reread", "0.7"]))
     entry = models_payload("m", "eager", {}, two_way=TWO_WAY)["models"][0]
     assert entry["two_way"] == TWO_WAY
@@ -292,3 +298,155 @@ def test_graph_engine_reads_two_way_dense_31b_layout():
     with torch.no_grad():  # the global layers read both ways: one way gives other answers
         one = m(input_ids=torch.tensor([prompts[-1]])).logits[0, -1, lids].float()
     assert not torch.allclose(torch.tensor(got[-1][0]), torch.softmax(one, -1), atol=1e-3)
+
+
+# -- the MLX engine (MLXBackend over mlx-lm's Gemma 4, or basal/mlx_forward.py) ---------------------------------------
+
+def mlx_two_way(path, layout="e4b", caps=CAPS):
+    """test_mlx's tiny random Gemma 4 (window 16; the E4B layout with KV-shared layers, or the dense 31B one), saved
+    with basal.json "two_way" (caps) unless caps is None. Its embeddings are scaled by 3 instead of 300: at 300 the
+    last token's embedding outweighs what attention adds and the softcapped code probabilities are 0 or 1, the same
+    read either way; here every prompt's two-way and one-way readouts differ by 1.6e-3 or more (8x the tolerance)."""
+    from test_mlx import GEMMA_31B, tiny_gemma4
+    m = tiny_gemma4(path, **(GEMMA_31B if layout == "31b" else {}))
+    with torch.no_grad():
+        m.model.embed_tokens.weight.div_(100.0)
+    m.save_pretrained(path)
+    if caps is not None:
+        (path / "basal.json").write_text(json.dumps({"prompt": 2, "two_way": caps}))
+    return m
+
+
+def mlx_reference(m, toks, lids, two_way):
+    """transformers' probabilities of each whole prompt (fp32), with the two-way masks (ref_masks) or causal."""
+    out = []
+    with torch.no_grad():
+        for t, ids in zip(toks, lids):
+            kw = {"attention_mask": ref_masks(m, len(t), True)} if two_way else {}
+            lp = torch.log_softmax(m(input_ids=torch.tensor([t]), **kw).logits[0, -1].float(), -1)
+            out.append(torch.softmax(lp[ids], -1).tolist())
+    return out
+
+
+def mlx_groups():
+    """Requests (prompts, code ids): three questions over one state (record 30 + 3 + 2 + 8 = 43: two-way), single
+    prompts shorter and longer than the window (two-way: right-padded batches of different lengths), a prompt over
+    max_prompt (one way) and a request over max_record whose prompts each fit max_prompt (one way, shared prefix)."""
+    g = torch.Generator().manual_seed(1)
+    r = lambda n: torch.randint(1, 64, (n,), generator=g).tolist()  # noqa: E731
+    state, long_state = r(30), r(36)
+    groups = [[state + [3, 4, 5], state + [3, 9], state + [7] * 7 + [1]]]
+    groups += [[r(n)] for n in (5, 15, 16, 17, 33, 40)]
+    groups += [[r(50)], [long_state + r(3) for _ in range(30)]]
+    lids = [[[10, 11], [12, 13, 14], [10, 15, 20, 21]][k % 3] for k in range(30)]
+    return [(t, lids[: len(t)]) for t in groups]
+
+
+def close_probs(a, b, tol=2e-4):
+    return max(abs(x - y) for x, y in zip(a, b)) < tol
+
+
+@pytest.mark.parametrize("forward", ["mlx-lm", "basal"])
+@pytest.mark.parametrize("layout", ["e4b", "31b"])
+def test_mlx_reads_two_way(tmp_path, forward, layout):
+    """--mode mlx on a two-way model: a prompt within the limits is read whole, both ways in the global layers (the
+    KV-shared ones too) and causally within the window in the sliding layers, in right-padded batches of prompts of
+    different lengths (the padding is no key); a prompt over max_prompt and every prompt of a request over max_record
+    are read one way. Each readout equals transformers' forward of the whole prompt with the same masks (fp32)."""
+    pytest.importorskip("mlx.core")
+    from basal.engine import two_way_rows
+    from test_mlx import mlx_stub
+    m = mlx_two_way(tmp_path, layout)
+    be = mlx_stub(tmp_path, forward=forward)  # max_rows 3
+    assert be.two_way == CAPS
+    groups = mlx_groups()
+    flags = [two_way_rows(t, CAPS) for t, _ in groups]
+    assert [all(f) for f in flags] == [True] * 7 + [False, False] and not any(flags[7] + flags[8])
+    batches = []
+    fwd = be._forward_two_way
+    be._forward_two_way = lambda rows: batches.append(sorted(map(len, rows))) or fwd(rows)
+    got = be.run_shared(groups)
+    assert sorted(map(len, batches)) == [3, 3, 3] and all(len(set(b)) > 1 for b in batches)  # right-padded
+    for (toks, lids), res, tw in zip(groups, got, flags):
+        assert len(res) == len(toks)
+        for t, ids, p, two in zip(toks, lids, res, tw):
+            assert close_probs(p, mlx_reference(m, [t], [ids], two)[0]), (layout, forward, len(t), two)
+            assert not close_probs(p, mlx_reference(m, [t], [ids], not two)[0]), (layout, forward, len(t), two)
+
+
+def test_mlx_two_way_reads_differently(tmp_path):
+    """The same prompts read two-way and one way give other probabilities (the global layers read both ways), and
+    reading the sliding layers both ways as well would give others again."""
+    pytest.importorskip("mlx.core")
+    from test_mlx import mlx_stub
+    m = mlx_two_way(tmp_path)
+    be = mlx_stub(tmp_path)
+    toks = [t for g, _ in mlx_groups()[:7] for t in g]
+    lids = [[10, 11, 12]] * len(toks)
+    two = be.run(toks, lids)
+    one = mlx_reference(m, toks, lids, False)
+    assert max(max(abs(x - y) for x, y in zip(a, b)) for a, b in zip(two, one)) > 1e-2
+    t = toks[0]
+    with torch.no_grad():
+        both = m(input_ids=torch.tensor([t]), attention_mask={
+            k: torch.ones(1, 1, len(t), len(t), dtype=torch.bool) for k in ("full_attention", "sliding_attention")})
+        p = torch.softmax(torch.log_softmax(both.logits[0, -1].float(), -1)[lids[0]], -1).tolist()
+    assert not close_probs(two[0], p, 1e-3)
+
+
+def test_mlx_two_way_limits_fall_back_to_one_way(tmp_path):
+    """Tighter limits: the same prompts are read one way where they are over max_prompt (per prompt) or their request
+    is over max_record (every prompt of it), and those answers are the one-way model's."""
+    pytest.importorskip("mlx.core")
+    from test_mlx import mlx_stub
+    caps = {"max_prompt": 20, "max_record": 40}
+    m = mlx_two_way(tmp_path, caps=caps)
+    be = mlx_stub(tmp_path)
+    groups = mlx_groups()[:7]  # the 43-token request (over 40) and single prompts of 5-40 tokens
+
+    def two(toks, t):
+        return len(toks) == 1 and len(t) <= 20
+    got = be.run_shared(groups)
+    for (toks, lids), res in zip(groups, got):
+        for t, ids, p in zip(toks, lids, res):
+            assert close_probs(p, mlx_reference(m, [t], [ids], two(toks, t))[0]), (len(t), two(toks, t))
+    (tmp_path / "basal.json").unlink()
+    plain = mlx_stub(tmp_path).run_shared(groups)  # the model without "two_way"
+    for (toks, _), res, ref in zip(groups, got, plain):
+        for t, p, q in zip(toks, res, ref):
+            if not two(toks, t):
+                assert close_probs(p, q, 1e-6)
+
+
+@pytest.mark.parametrize("forward", ["mlx-lm", "basal"])
+def test_mlx_one_way_model_unchanged(tmp_path, forward):
+    """A model without "two_way" never takes the two-way path; its readouts are the one-way ones."""
+    pytest.importorskip("mlx.core")
+    from test_mlx import mlx_stub
+    m = mlx_two_way(tmp_path, caps=None)
+    be = mlx_stub(tmp_path, forward=forward)
+    assert be.two_way is None
+    be._run_two_way = be._forward_two_way = lambda *_: pytest.fail("a one-way model read two-way")
+    groups = mlx_groups()
+    for (toks, lids), res in zip(groups, be.run_shared(groups)):
+        for t, ids, p in zip(toks, lids, res):
+            assert close_probs(p, mlx_reference(m, [t], [ids], False)[0])
+
+
+def test_mlx_two_way_refusals(tmp_path):
+    """The MLX engine refuses, before it loads the weights, a two-way model with --mlx-packed or a state / prefix
+    cache (each prompt is read whole) and a two-way model that is not Gemma 4."""
+    pytest.importorskip("mlx.core")
+    from basal.engine import MLXBackend, StateCache
+    from test_mlx import mlx_stub, tiny_llama
+    mlx_two_way(tmp_path)
+    with pytest.raises(ValueError, match="--mlx-packed: not with a two-way model"):
+        mlx_stub(tmp_path, packed=True)
+    be = MLXBackend.__new__(MLXBackend)
+    be.state_cache = StateCache(2 ** 20)
+    with pytest.raises(ValueError, match="--state-cache-gb and --prefix-cache keep a state read before its question"):
+        be._load(tmp_path)
+    tiny_llama(tmp_path / "llama")
+    (tmp_path / "llama" / "basal.json").write_text(json.dumps({"two_way": True}))
+    with pytest.raises(ValueError, match="Gemma 4 models only"):
+        mlx_stub(tmp_path / "llama")

@@ -284,6 +284,13 @@ prompts), so text front ends (Ollama, `llama-server` with text prompts) read the
 reads the decoder inside mlx-lm's multimodal wrapper, applies the softcap to the fp32 code logits and keeps the whole
 shared prefix in the KV cache (mlx-lm's rotating cache would keep only the last window); `--mode gguf` loads
 `CALIBRATION.gguf.json` and `--mode mlx` `CALIBRATION.mlx.json` when the model ships one, else `CALIBRATION.json`.
+A two-way model (basal.json `"two_way"`, such as basal-omni-2.0-mini-preview) is read two-way by `--mode mlx` as by
+`eager` and `fast` ([SERVING.md](SERVING.md#serving-modes)); llama.cpp reads a GGUF one way ([GGUF.md](GGUF.md)). The
+experimental `-MLX` port of basal-omni-2.0-mini-preview has no `"two_way"` in its basal.json and is read one way: its
+top answer agrees with the two-way reference (eager fp32, read two-way) on 73.4% of 1,348 readouts. With `"two_way"`
+added to its basal.json, `--mode mlx` agrees on 98.3% of them (`mlx-q8` from the bf16 weights: 98.6%; eager bf16:
+99.4%), and no top answer changes where the reference margin is 0.2 or more (Apple M5 Max, mlx 0.32.4). MLX in fp32
+agrees on all of them, so the rest is bf16 / 8-bit rounding.
 
 Measured 2026-10-17 against the eager bf16 engine, one option order, the shipped `CALIBRATION.json`, with the gate of
 the FP8 ports (agreement of the top answer on 2-10 options and at bf16 margin >= 0.2 above the tier's bars, accuracy
