@@ -8,7 +8,7 @@ log behave as in `--mode fast`. Not available in the ports: the evidence output 
 
 | mode | weights | engine | how the letters are read |
 |---|---|---|---|
-| `mlx` | `-MLX-8bit` (affine 8-bit), `-MLX-fp4` (`nvfp4`), or the bf16 repo | MLX / mlx-lm inside the server | output head at the readout positions; the state is computed once into a KV cache, every question and option order continues it in one batch |
+| `mlx` | `-MLX-8bit` (affine 8-bit), `-MLX-fp4` (`nvfp4`), or the bf16 repo | MLX / mlx-lm inside the server | output head at the readout positions; the state is computed once into a KV cache, every question and option order continues it in one batch (a two-way model, basal.json `"two_way"`: every prompt read whole, Gemma 4 models only, [SERVING.md](SERVING.md#serving-modes)) |
 | `ollama` | `-GGUF` (`Q8_0`, `Q4_K_M`) | Ollama 0.12.11 or newer (measured: 0.35.0) | `/api/generate`, `raw: true`, one token, `logprobs` + `top_logprobs` (20) |
 | `llamacpp` | `-GGUF` | llama.cpp `llama-server` (measured: 0.5.0, b11146) | `/completion` with the prompt as token ids, `n_probs` (20), log-probabilities of the raw logits |
 

@@ -191,8 +191,9 @@ class MLXForward:
     def hidden(self, ids, ro, past=None, pos=None, mask=None, full=False):
         """ids [B, L] right-padded rows -> final-norm hidden states [B, R, D] at the token indices ro [B, R] of each
         row. past: per own-key layer (keys, values) [1, H, P, D] of a prefix every row continues (positions from P).
-        pos / mask: packed rows (no past): positions [B, L] and the boolean block mask [B, 1, L, L]. full: every
-        layer at every position and the rows taken after the final norm, as mlx-lm's forward (for checks)."""
+        pos / mask: packed rows (no past): positions [B, L] and the boolean block mask [B, 1, L, L]; mask may also be
+        {layer type: mask} (the whole rows of a two-way model, positions from 0). full: every layer at every position
+        and the rows taken after the final norm, as mlx-lm's forward (for checks)."""
         return self._run(ids, ro, past, pos, mask, None, full)
 
     def _run(self, ids, ro, past, pos, mask, kv_out, full=False):
@@ -239,7 +240,7 @@ class MLXForward:
     def _mask(self, t, L, P, cached, mask):
         """The mask of a layer type for every position, as mlx-lm builds it (with or without a KV cache)."""
         if mask is not None:
-            return mask
+            return mask[t] if isinstance(mask, dict) else mask
         window = self.m.window_size if self.gemma and t == "sliding_attention" else None
         if window is not None and (cached or L > window):
             return create_causal_mask(L, P, window_size=window)
@@ -247,9 +248,10 @@ class MLXForward:
 
     def _row_mask(self, t, rows, n, mask, ro):
         """Boolean mask [B, 1, R, n] of the readout rows (absolute positions rows [B, R]) over n keys: the rows of the
-        packed block mask, else causal (within the window on a sliding-window layer)."""
+        packed block mask (or of this type's mask of a two-way row), else causal (within the window on a sliding-window
+        layer)."""
         if mask is not None:
-            return mx.take_along_axis(mask, ro[:, None, :, None], axis=2)
+            return mx.take_along_axis(mask[t] if isinstance(mask, dict) else mask, ro[:, None, :, None], axis=2)
         k, q = mx.arange(n)[None, None], rows[..., None]
         out = k <= q
         if self.gemma and t == "sliding_attention":

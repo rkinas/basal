@@ -138,10 +138,19 @@ benchmarking a GPU.
   A prompt over `max_prompt` tokens, or every prompt of a request over `max_record` tokens (its shared prefix once,
   then every prompt's own tokens), is read one way, as the model was trained. Nothing is shared between questions, so
   such a model is served with SOAM off (`--soam` defaults to off for it; `--soam on` is refused) and without
-  `--state-cache-gb` / `--prefix-cache`, by `--mode eager` (the engine's own Gemma 4 forward) or the CUDA graph
+  `--state-cache-gb` / `--prefix-cache`, by `--mode eager` (the engine's own Gemma 4 forward), the CUDA graph
   engine (`fast`, `fast-nocompile`: every prompt a plain row of its own, the math kernel in the global layers; not
-  with `--batches compact`, `--lean`, `--template-prefix` or `--long-lane`). `--reread` is refused too: it reads the
-  state twice (the state_twice layout), which a two-way model was not trained on. `/v1/models` reports the limits.
+  with `--batches compact`, `--lean`, `--template-prefix` or `--long-lane`) or `--mode mlx` / `mlx-q8` on Apple
+  Silicon (every prompt a row of its own in right-padded batches, the two masks per layer type; mlx-lm's forward or
+  `--mlx-forward basal`; not with `--mlx-packed`; Gemma 4 models only, `"two_way"` on any other family is refused).
+  `--reread` is refused too: it reads the state twice (the state_twice layout), which a two-way model was not trained
+  on. `/v1/models` reports the limits. The engine reads two-way only a model whose basal.json has `"two_way"`; a port
+  that leaves it out (such as the experimental `-MLX` port of basal-omni-2.0-mini-preview) is read one way. On MLX a
+  question read two-way takes 3-4x the time of the one-way read (8-bit basal-omni-2.0-mini-preview, 1k-4k-token
+  prompts, Apple M5 Max), and five questions over one state about 10x, since the state is read again with each question.
+  A `CALIBRATION.mlx.json` fitted on one-way reads does not fit two-way reads, and the engine does not detect the
+  mismatch: a port whose basal.json gains `"two_way"` needs its calibration refitted with `basal-calibrate` in
+  `--mode mlx`. `--mode mlx` loads `CALIBRATION.mlx.json` when the model ships one, else `CALIBRATION.json`.
 - **Isolated options** (basal.json `"option_isolation": true`, a Gemma 4 model trained so): each option is read in a
   block of its own, after the state and the question but not after the other options, and every block starts at the
   same position; the answer reads all the blocks. The options are then read as a set: apart from its code, an option's
@@ -281,8 +290,9 @@ benchmarking a GPU.
   `--adapter` answered bit for bit as the `basal-fuse-adapter` checkpoint and as PEFT's merge with rank-128 rsLoRA
   adapters of Gemma 4 models, E4B on an H100 in `fast`, `eager` and `vllm` (`--vllm-preset deterministic`) and on an
   Apple M4 Pro in `mlx`, 31B on an H100 in `fast`, `eager` and `fp8` (also with `--quant-load cpu`), two-way models
-  included, and with a `basal-finetune` adapter of basal-omni-pico in `fast`, `eager` and `mlx`. Send requests one at a
-  time (`basal-run --concurrency 1`) to compare servers: concurrent requests are batched differently from run to run,
+  included (in `fast` and `eager`, not in `mlx`), and with a `basal-finetune` adapter of basal-omni-pico in `fast`,
+  `eager` and `mlx`. Send requests one at a time (`basal-run --concurrency 1`) to compare servers: concurrent requests
+  are batched differently from run to run,
   which moves bf16 probabilities by ~1e-3 on any model. A calibration file in the adapter directory comes before the
   model's; the model's own file is then loaded for its temperatures only
   ([CALIBRATION.md](CALIBRATION.md#which-model-a-file-belongs-to)). The evidence head (`"evidence": true`) was trained
