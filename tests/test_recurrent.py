@@ -315,16 +315,16 @@ def test_state_cache_keeps_full_state_checkpoints(monkeypatch, tmp_path):
     first = be.run_shared(groups)
     assert max_dp(first, ref) < 1e-5
     st = be.state_cache.stats()
-    assert st["entries"] == 2 and be.counts.get("pass1 cached eager") is None
+    assert st["entries"] == 2 and be.counts.get("pass1 cached eager") == 1  # raw checkpoint reused within the call
     n_att, n_gdn = len(be.kv_shapes), be.net.n_gdn
     e = be.state_cache.get(be.state_cache.key(ROOT))
     assert len(e) == n_att + n_gdn and e[0][0].shape[1] == len(ROOT)  # keys / values of the 71 state tokens
     assert e[n_att][0].shape == be.net.state_shape and e[n_att][1].shape == be.net.tail_shape
     again = be.run_shared(groups[:2])
-    assert be.counts.get("pass1 cached eager") == 1  # both units of the call from the cache, no pass 1
+    assert be.counts.get("pass1 cached eager") == 2  # both units of the call from the cache, no pass 1
     assert max_dp(again, first[:2]) < 1e-6
     be.run_shared(groups[3:])  # its root is a prompt (read out in pass 1): computed again
-    assert be.counts.get("pass1 cached eager") == 1
+    assert be.counts.get("pass1 cached eager") == 2
 
 
 def test_state_cache_hit_needs_the_cached_state(monkeypatch, tmp_path):
@@ -378,7 +378,7 @@ def test_prefix_cache_continues_the_template_state(monkeypatch, tmp_path):
     many = [([TEMPLATE + [21, 22] + [30 + q, 31] for q in range(3)], [[40, 41]] * 3, len(TEMPLATE)),
             ([TEMPLATE + ROOT[:20] + [20, 21], TEMPLATE + ROOT[:20] + [21, 20]], [[40, 41], [41, 40]], len(TEMPLATE))]
     first = be.run_shared(single[:2])
-    assert be.state_cache.stats()["entries"] == 1 and be.counts.get("pass1 cached eager") is None
+    assert be.state_cache.stats()["entries"] == 1 and be.counts.get("pass1 cached eager") == 1
     loads = []
     load = be._load
     be._load = lambda kv, st, hits, P: loads.append(len(hits)) or load(kv, st, hits, P)
@@ -386,7 +386,7 @@ def test_prefix_cache_continues_the_template_state(monkeypatch, tmp_path):
     assert loads and all(n == 1 for n in loads)  # the template's checkpoint into one root row per forward
     want = plain.run_shared([g[:2] for g in single + many])
     assert max_dp(got, want) < 1e-5 and max_dp(first, want[:2]) < 1e-5
-    assert be.state_cache.stats()["entries"] == 1 and be.counts.get("pass1 cached eager") == 1  # one forward
+    assert be.state_cache.stats()["entries"] == 1 and be.counts.get("pass1 cached eager") == 2  # one more forward
 
 
 def test_server_cuts_single_prompts_only_for_a_row_per_leaf_engine():
