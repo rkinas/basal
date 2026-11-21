@@ -484,8 +484,12 @@ basal-serve exports:
   `basal_engine_call_running_seconds` (the oldest engine call running now; `--stall-s` makes `/health` answer 503
   above it) and `basal_queue_oldest_seconds` (the oldest request waiting now);
 - with `--state-cache-gb` or `--prefix-cache on`: `basal_state_cache_bytes`, `_budget_bytes`, `_entries`,
-  `_hits_total`, `_misses_total`, `_prefix_hits_total` and `_evictions_total` (all `basal_state_cache_...`). They
-  count cache lookups, not client requests.
+  `_hits_total`, `_misses_total`, `_prefix_hits_total` and `_evictions_total` (all `basal_state_cache_...`).
+  `_hits_total` and `_misses_total` count cache lookups, not client requests. `_prefix_hits_total` counts the states
+  whose cached prefix the engine reused, not every match the cache found: a match the engine cannot continue (one
+  ending inside a recurrent state, or a root with no tokens past the match), one whose rows do not have this
+  request's kernel bits (`--mode mlx`), and one of an entry an earlier unit of the same call cached (already counted
+  as a miss) are each found and not counted.
 
 The values are read when Prometheus scrapes: nothing is added to the request path, and nothing waits for the GPU. The
 state cache is read without waiting for its lock; while the engine holds it, the last values are reported again, and
@@ -503,8 +507,8 @@ with `--fallback`, LLM calls by result; with `--route`, requests by script.
 - **status**: the served model and its revision, mode, engine version, start and uptime, requests running and queued;
 - **traffic since start**: requests and failures, requests per second (last 10 s, last minute, since start), latency
   p50 / p95 / p99, per endpoint, status codes, and charts of throughput and latency that the page draws while it is open;
-- **state cache** (with `--state-cache-gb` or `--prefix-cache on`): entries, hits, misses, prefix hits, evictions and
-  memory;
+- **state cache** (with `--state-cache-gb` or `--prefix-cache on`): entries, hits, misses, prefix hits (prefixes
+  reused, not matches found), evictions and memory;
 - **telemetry**: per GPU utilisation, memory (and this server's part), temperature, power and SM clock (NVML, from
   `nvidia-ml-py`); host CPU and memory, this server's RSS and CPU (`psutil`). Neither package is required: without one,
   its panel says so;

@@ -359,7 +359,8 @@ def test_state_cache_continues_a_growing_state(monkeypatch, tmp_path, grow):
     assert be.state_cache.get(be.state_cache.key(longer))[0][0].shape[1] == len(longer)
     edited = ROOT[:40] + [19] + ROOT[41:] + [14]
     assert max_dp(be.run_shared([qs(edited)]), plain.run_shared([qs(edited)[:2]])) < 1e-5
-    assert be.state_cache.stats()["entries"] == 2
+    st = be.state_cache.stats()
+    assert st["entries"] == 2 and st["prefix_hits"] == 1
 
 
 TEMPLATE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 2, 3]  # 11 tokens: chat template, system prompt and the user header

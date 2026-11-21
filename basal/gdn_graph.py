@@ -1220,14 +1220,16 @@ class GDNGraphBackend(GraphBackend):
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
-            found = self.state_cache.longest(root)
+            reuses = lambda _key, match, total: (
+                match == total and total < len(root) and len(root) - total <= self.CONTINUE_MAX)
+            found = self.state_cache.longest(root, use=reuses)
             if found is None:
                 continue
             old, e, m, n = found
             if old == key:  # cached by an earlier unit of this call
                 hits[k] = e
                 continue
-            if m != n or n >= len(root) or len(root) - n > self.CONTINUE_MAX:
+            if not reuses(old, m, n):
                 continue
             T, dt, dev = len(root) - n, self._dtype, self.dev
             kv = [tuple(torch.empty((1, H, T, D), dtype=dt, device=dev) for _ in "kv") for H, D in self.kv_shapes]
