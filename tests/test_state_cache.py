@@ -134,10 +134,10 @@ def test_growing_and_edited_states_reuse_the_cached_prefix():
     s2 = s1 + [rnd.randrange(3, 50) for _ in range(9)]                  # the trace grows
     check(be, requests(rnd, s2, 2))
     st = be.state_cache.stats()
-    assert st["prefix_hits"] >= 1 and st["entries"] == 1               # s2 replaced s1
+    assert st["prefix_hits"] == 1 and st["entries"] == 1               # s2 replaced s1
     s3 = s2[:22] + [rnd.randrange(3, 50) for _ in range(15)]            # edited after token 22
     check(be, requests(rnd, s3, 1))
-    assert be.state_cache.stats()["prefix_hits"] >= 2 and be.state_cache.stats()["entries"] == 2
+    assert be.state_cache.stats()["prefix_hits"] == 2 and be.state_cache.stats()["entries"] == 2
 
 
 def test_block_fp8_serves_without_the_state_cache(capsys):
@@ -366,15 +366,47 @@ def test_longest_gives_an_8bit_entry_in_its_dtype_to_usable_and_the_caller():
 
 def test_longest_takes_usable_and_use_together():
     """#56's usable() and #50's use() in one lookup: usable() rejects a match the caller's keys / values cannot continue,
-    the next-longest one is returned, and a prefix hit is counted only when use(key) says the caller continues it."""
+    the next-longest one is returned, and a prefix hit is counted only when use(key, m, n) says the caller reuses
+    it."""
     c = StateCache(1 << 30)
     base = list(range(600))
     long_, short = base + list(range(1000, 1300)), base + list(range(2000, 2100))
     for toks in (long_, short):
         c.put(c.key(toks), [(torch.zeros(1, len(toks), 4), torch.zeros(1, len(toks), 4))], tokens=toks)
     query = long_[:700] + [7] * 50
-    found = c.longest(query, usable=lambda kv, m, n: n != len(long_), use=lambda key: False)
+    found = c.longest(query, usable=lambda kv, m, n: n != len(long_), use=lambda *_: False)
     assert found is not None and found[0] == c.key(short) and found[2] == 600 and c.prefix_hits == 0
-    found = c.longest(query, usable=lambda kv, m, n: True, use=lambda key: True)
+    found = c.longest(query, usable=lambda kv, m, n: True, use=lambda *_: True)
     assert found[0] == c.key(long_) and found[2] == 700 and c.prefix_hits == 1
     assert c.longest(query)[0] == c.key(long_) and c.prefix_hits == 2
+
+
+def test_use_receives_the_match_and_counts_only_a_reused_prefix():
+    c = StateCache(1 << 30)
+    long_ = list(range(700))
+    c.put(c.key(long_), [(torch.zeros(1, len(long_), 4), torch.zeros(1, len(long_), 4))], tokens=long_)
+    root = long_[:600]
+    seen = []
+    found = c.longest(root, use=lambda *a: seen.append(a) or False)
+    assert found is not None and found[0] == c.key(long_) and found[2] == 600 and found[3] == 700
+    assert seen == [(c.key(long_), 600, 700)]
+    assert c.prefix_hits == 0
+    assert c.longest(root, use=lambda *_: True) is not None and c.prefix_hits == 1
+    assert c.longest(root) is not None and c.prefix_hits == 2
+
+
+def test_a_match_the_graph_engine_does_not_continue_is_not_a_prefix_hit():
+    rnd = random.Random(3)
+    be = Stub(tiny())
+    be.state_cache = StateCache(1e9)
+    be.state_cache.BLOCK = 4
+    long_ = [1] + [rnd.randrange(3, 50) for _ in range(39)]
+    check(be, requests(rnd, long_, 1))
+    assert be.state_cache.stats()["prefix_hits"] == 0
+    found, longest = [], be.state_cache.longest
+    be.state_cache.longest = lambda *a, **k: found.append(longest(*a, **k)) or found[-1]
+    check(be, requests(rnd, long_[:20], 1))
+    # the engine's own lookup found the 40-token entry and matched the 20-token root whole, so there is nothing left
+    # to extend: it discards the match, and what it discards is not counted
+    assert [(m, n) for _, _, m, n in found] == [(20, 40)]
+    assert be.state_cache.stats()["prefix_hits"] == 0

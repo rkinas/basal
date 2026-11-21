@@ -202,6 +202,27 @@ def test_a_growing_state_is_continued_only_with_the_same_bits(tmp_path, forward,
             assert got == plain.run_shared([([s2 + x for x in q], lids)])[0]
 
 
+@FORWARDS
+def test_a_root_a_cached_state_holds_whole_is_not_a_prefix_hit(tmp_path, forward):
+    pytest.importorskip("mlx.core")
+    tiny_llama(tmp_path)
+    rnd = random.Random(5)
+    long_ = [rnd.randrange(1, 64) for _ in range(300)]
+    q, lids = [[5, 6, 10, 11], [5, 6, 11, 10]], [[10, 11], [10, 11]]
+    be = cached_stub(tmp_path, forward=forward, continuing=True)
+    be.run_shared([([long_ + x for x in q], lids, len(long_))])
+    assert be.state_cache.stats()["prefix_hits"] == 0
+    short = long_[:256]
+    found, longest = [], be.state_cache.longest
+    be.state_cache.longest = lambda *a, **k: found.append(longest(*a, **k)) or found[-1]
+    be.run_shared([([short + x for x in q], lids, len(short))])
+    # the backend's own lookup found the 300-token entry and matched the 256-token root whole, so continues() rejects
+    # it before same_bits() is reached, and the discarded match is not counted
+    assert [(m, n) for _, _, m, n in found] == [(256, 300)]
+    st = be.state_cache.stats()
+    assert st["entries"] == 2 and st["prefix_hits"] == 0
+
+
 def test_kernel_rows_finds_where_the_row_count_stops_mattering():
     """_kernel_rows bisects for the fewest rows from which a product gives each row the bits it has at PROBE_ROWS rows
     (a fake kernel that sums in another order below 100 rows), and gives None when no such boundary checks out."""
