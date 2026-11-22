@@ -203,9 +203,12 @@ def test_a_growing_state_is_continued_only_with_the_same_bits(tmp_path, forward,
 
 
 @FORWARDS
-def test_a_root_a_cached_state_holds_whole_is_not_a_prefix_hit(tmp_path, forward):
+def test_a_root_a_cached_state_holds_whole_is_reused_without_a_forward(tmp_path, forward):
+    """A root a longer cached entry holds whole is served from that entry's rows: _prefix returns them as they are,
+    no tokens of the root are forwarded, the readouts are the uncached engine's, and the longer entry is kept rather
+    than replaced by the shorter root."""
     pytest.importorskip("mlx.core")
-    tiny_llama(tmp_path)
+    m = tiny_llama(tmp_path)
     rnd = random.Random(5)
     long_ = [rnd.randrange(1, 64) for _ in range(300)]
     q, lids = [[5, 6, 10, 11], [5, 6, 11, 10]], [[10, 11], [10, 11]]
@@ -215,12 +218,14 @@ def test_a_root_a_cached_state_holds_whole_is_not_a_prefix_hit(tmp_path, forward
     short = long_[:256]
     found, longest = [], be.state_cache.longest
     be.state_cache.longest = lambda *a, **k: found.append(longest(*a, **k)) or found[-1]
-    be.run_shared([([short + x for x in q], lids, len(short))])
-    # the backend's own lookup found the 300-token entry and matched the 256-token root whole, so continues() rejects
-    # it before same_bits() is reached, and the discarded match is not counted
-    assert [(m, n) for _, _, m, n in found] == [(256, 300)]
+    seen = count_tokens(be)
+    got = be.run_shared([([short + x for x in q], lids, len(short))])[0]
+    # the backend's own lookup found the 300-token entry and matched the 256-token root whole
+    assert [(m_, n) for _, _, m_, n in found] == [(256, 300)]
+    assert sum(seen) < len(short)  # no forward of the root: only the questions below the cut
+    assert close(reference(m, [short + x for x in q], lids), got)
     st = be.state_cache.stats()
-    assert st["entries"] == 2 and st["prefix_hits"] == 0
+    assert st["entries"] == 2 and st["prefix_hits"] == 1
 
 
 def test_kernel_rows_finds_where_the_row_count_stops_mattering():

@@ -43,8 +43,9 @@ benchmarking a GPU.
   (`BASAL_FLA_PIN=0`: fla's own timing at every start). `--state-cache-gb` (2.5) keeps a request's
   state as a full-state checkpoint: the attention layers' keys and values and each Gated DeltaNet layer's recurrent
   state and convolution tail after the state; the same state again runs only its questions. A state that begins with
-  a whole cached one (a growing agent trace) continues it from there; one that differs inside the cached tokens runs
-  again (a recurrent state cannot be cut there). Since 2.5 they also run with `--prefix-cache on` and `--batches
+  a whole cached one (a growing agent trace) continues it from there; one that differs inside the cached tokens
+  continues the longest cached state it begins with whole instead, and runs again only where it begins with none (a
+  recurrent state cannot be cut inside an entry). Since 2.5 they also run with `--prefix-cache on` and `--batches
   compact` (opt-in; compact rows also with `--template-prefix on` and `--readout-layer on`), with answers as close to
   float32 as `--mode eager`'s; `--lean` and `--tree flex` change nothing for them. Not with them yet: `fp8` / `nvfp4`,
   `fast-exit`, `mps` and `--long-lane on` (each refused before loading; the default `--long-lane auto` gives them no
@@ -486,10 +487,13 @@ basal-serve exports:
 - with `--state-cache-gb` or `--prefix-cache on`: `basal_state_cache_bytes`, `_budget_bytes`, `_entries`,
   `_hits_total`, `_misses_total`, `_prefix_hits_total` and `_evictions_total` (all `basal_state_cache_...`).
   `_hits_total` and `_misses_total` count cache lookups, not client requests. `_prefix_hits_total` counts the states
-  whose cached prefix the engine reused, not every match the cache found: a match the engine cannot continue (one
-  ending inside a recurrent state, or a root with no tokens past the match), one whose rows do not have this
-  request's kernel bits (`--mode mlx`), and one of an entry an earlier unit of the same call cached (already counted
-  as a miss) are each found and not counted.
+  whose cached prefix the engine reused, not every match the cache found: a match whose rows do not have this
+  request's kernel bits (`--mode mlx`), and one more than 8,192 tokens behind a Qwen3.5 state, are found and not
+  counted. A match the engine cannot continue at all -- one ending inside a recurrent state, or a root a longer entry
+  holds whole where the state has sliding-window layers (Gemma 4) -- is rejected while the cache is still searching,
+  so the search carries on to a shorter entry that can be continued and counts that one instead. Elsewhere a root a
+  longer entry holds whole is reused, and counted: its keys and values are copied from that entry, with no forward of
+  its own.
 
 The values are read when Prometheus scrapes: nothing is added to the request path, and nothing waits for the GPU. The
 state cache is read without waiting for its lock; while the engine holds it, the last values are reported again, and
