@@ -26,8 +26,9 @@ nvfp4.
   the attention layers' keys and values of the state and, per Gated DeltaNet layer, the recurrent state and convolution
   tail after its last token. A later request with the same state copies them where pass 1 would have written them and
   runs pass 2 only. A state that begins with a whole cached one (a growing agent trace) continues it
-  (forward_continue) and replaces it; one that differs inside the cached tokens runs again (a recurrent state cannot
-  be cut there).
+  (forward_continue) and replaces it; one that differs inside the cached tokens continues the longest cached state it
+  begins with whole instead, and runs again only where it begins with none (a recurrent state cannot be cut inside an
+  entry).
 """
 import copy
 import functools
@@ -1210,8 +1211,9 @@ class GDNGraphBackend(GraphBackend):
         """A request state that begins with a whole cached one (a growing agent trace or chat history): its new tokens
         continue the cached checkpoint (Qwen35Graph.forward_continue: the attention layers over the cached keys and
         values, the Gated DeltaNet layers from the cached states and tails), and the extended checkpoint replaces the
-        old entry and serves as a hit. A state that differs inside the cached tokens runs again: a recurrent state
-        cannot be cut there."""
+        old entry and serves as a hit. A recurrent state cannot be cut inside an entry, so an entry this state
+        differs inside is skipped for the longest one it begins with whole; a state that begins with none runs
+        again."""
         if not keys or self.state_cache is None:
             return
         na = len(self.kv_shapes)
@@ -1220,14 +1222,26 @@ class GDNGraphBackend(GraphBackend):
                 continue
             pk = units[k][0]
             root = list(pk[0][: pk[2].index(1)])
-            found = self.state_cache.longest(root)
+            reuses = lambda _key, match, total: (
+                match == total and total < len(root) and len(root) - total <= self.CONTINUE_MAX)
+            passed_over = []
+
+            def ends_the_entry(_kv, match, total):
+                # rejected during the search rather than after it: the search goes on past an entry this state ends
+                # inside, down to the longest one it begins with whole, which it can continue
+                if match == total:
+                    return True
+                passed_over.append(total)  # that entry branches off the shorter one this state continues
+                return False
+
+            found = self.state_cache.longest(root, usable=ends_the_entry, use=reuses)
             if found is None:
                 continue
             old, e, m, n = found
             if old == key:  # cached by an earlier unit of this call
                 hits[k] = e
                 continue
-            if m != n or n >= len(root) or len(root) - n > self.CONTINUE_MAX:
+            if not reuses(old, m, n):
                 continue
             T, dt, dev = len(root) - n, self._dtype, self.dev
             kv = [tuple(torch.empty((1, H, T, D), dtype=dt, device=dev) for _ in "kv") for H, D in self.kv_shapes]
@@ -1239,7 +1253,9 @@ class GDNGraphBackend(GraphBackend):
                                           [(se[None], ce[None]) for se, ce in e[na:]], kv, st)
             new = ([(torch.cat([ke, kn[0]], 1), torch.cat([ve, vn[0]], 1)) for (ke, ve), (kn, vn) in zip(e[:na], kv)]
                    + [(s[0], c[0]) for s, c in st])
-            self.state_cache.put(key, new, tokens=root, replaces=old)
+            # the entry is superseded only where nothing was passed over: otherwise it is the branch point the
+            # entries this state ends inside continue from, and the next state to diverge there needs it
+            self.state_cache.put(key, new, tokens=root, replaces=None if passed_over else old)
             hits[k] = new
 
     @staticmethod

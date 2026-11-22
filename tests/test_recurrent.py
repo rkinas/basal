@@ -359,7 +359,44 @@ def test_state_cache_continues_a_growing_state(monkeypatch, tmp_path, grow):
     assert be.state_cache.get(be.state_cache.key(longer))[0][0].shape[1] == len(longer)
     edited = ROOT[:40] + [19] + ROOT[41:] + [14]
     assert max_dp(be.run_shared([qs(edited)]), plain.run_shared([qs(edited)[:2]])) < 1e-5
-    assert be.state_cache.stats()["entries"] == 2
+    st = be.state_cache.stats()
+    assert st["entries"] == 2 and st["prefix_hits"] == 1
+
+
+def test_a_match_ending_inside_its_entry_falls_back_to_a_shorter_whole_state(monkeypatch, tmp_path):
+    """Given a cached state this one diverges inside, and a shorter cached state it begins with whole, the lookup
+    skips the longer match during the search and continues the shorter entry instead of running the whole state
+    again: the answers equal an uncached engine's, and the reuse is counted once."""
+    tiny_qwen35(tmp_path / "tiny")
+    plain = gdn_backend(monkeypatch, tmp_path / "tiny")
+    be = gdn_backend(monkeypatch, tmp_path / "tiny", state_cache_gb=0.01)
+    be.state_cache.BLOCK = 16  # (256-token blocks in serving; the tiny model's states are short)
+    qs = lambda root: ([root + [20 + q, 30, 31] for q in range(3)], [[40, 41, 42]] * 3, len(root))  # noqa: E731
+    be.run_shared([qs(ROOT[:48] + [50] * 16)])  # a state ROOT diverges inside, at token 48
+    be.run_shared([qs(ROOT[:32])])              # a shorter state ROOT begins with whole
+    assert be.state_cache.stats()["prefix_hits"] == 0
+    got = be.run_shared([qs(ROOT)])
+    assert max_dp(got, plain.run_shared([qs(ROOT)[:2]])) < 1e-5
+    assert be.state_cache.stats()["prefix_hits"] == 1
+
+
+def test_a_second_state_diverging_at_the_same_token_continues_the_base_too(monkeypatch, tmp_path):
+    """The entry a state falls back to is the branch point of the entry passed over for it, so it is kept rather
+    than replaced: a second state diverging at the same token continues it as well. Replacing it served the first
+    branch and left the next one nothing to continue, although the fall-back is the common case here."""
+    tiny_qwen35(tmp_path / "tiny")
+    plain = gdn_backend(monkeypatch, tmp_path / "tiny")
+    be = gdn_backend(monkeypatch, tmp_path / "tiny", state_cache_gb=0.01)
+    be.state_cache.BLOCK = 16  # (256-token blocks in serving; the tiny model's states are short)
+    qs = lambda root: ([root + [20 + q, 30, 31] for q in range(3)], [[40, 41, 42]] * 3, len(root))  # noqa: E731
+    be.run_shared([qs(ROOT[:48] + [50] * 16)])  # a state ROOT diverges inside, at token 48
+    be.run_shared([qs(ROOT[:32])])              # the base both of the states below begin with whole
+    be.run_shared([qs(ROOT)])                   # the first branch: falls back to the base and continues it
+    assert be.state_cache.stats()["prefix_hits"] == 1
+    other = ROOT[:32] + [51] * 16               # a second branch off that same base
+    got = be.run_shared([qs(other)])
+    assert max_dp(got, plain.run_shared([qs(other)[:2]])) < 1e-5
+    assert be.state_cache.stats()["prefix_hits"] == 2
 
 
 TEMPLATE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 2, 3]  # 11 tokens: chat template, system prompt and the user header

@@ -3458,7 +3458,7 @@ def http_app(srv, mode, mcp=None, error_format="basal", ui=None):
                        [({}, st["hits"])]),
                       ("basal_state_cache_misses_total", "requests whose state was not", "counter",
                        [({}, st["misses"])]),
-                      ("basal_state_cache_prefix_hits_total", "states that began with a cached one", "counter",
+                      ("basal_state_cache_prefix_hits_total", "states that reused a cached prefix", "counter",
                        [({}, st["prefix_hits"])]),
                       ("basal_state_cache_evictions_total", "states evicted for the budget", "counter",
                        [({}, st["evictions"])])]

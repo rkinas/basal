@@ -202,6 +202,32 @@ def test_a_growing_state_is_continued_only_with_the_same_bits(tmp_path, forward,
             assert got == plain.run_shared([([s2 + x for x in q], lids)])[0]
 
 
+@FORWARDS
+def test_a_root_a_cached_state_holds_whole_is_reused_without_a_forward(tmp_path, forward):
+    """A root a longer cached entry holds whole is served from that entry's rows: _prefix returns them as they are,
+    no tokens of the root are forwarded, the readouts are the uncached engine's, and the longer entry is kept rather
+    than replaced by the shorter root."""
+    pytest.importorskip("mlx.core")
+    m = tiny_llama(tmp_path)
+    rnd = random.Random(5)
+    long_ = [rnd.randrange(1, 64) for _ in range(300)]
+    q, lids = [[5, 6, 10, 11], [5, 6, 11, 10]], [[10, 11], [10, 11]]
+    be = cached_stub(tmp_path, forward=forward, continuing=True)
+    be.run_shared([([long_ + x for x in q], lids, len(long_))])
+    assert be.state_cache.stats()["prefix_hits"] == 0
+    short = long_[:256]
+    found, longest = [], be.state_cache.longest
+    be.state_cache.longest = lambda *a, **k: found.append(longest(*a, **k)) or found[-1]
+    seen = count_tokens(be)
+    got = be.run_shared([([short + x for x in q], lids, len(short))])[0]
+    # the backend's own lookup found the 300-token entry and matched the 256-token root whole
+    assert [(m_, n) for _, _, m_, n in found] == [(256, 300)]
+    assert sum(seen) < len(short)  # no forward of the root: only the questions below the cut
+    assert close(reference(m, [short + x for x in q], lids), got)
+    st = be.state_cache.stats()
+    assert st["entries"] == 2 and st["prefix_hits"] == 1
+
+
 def test_kernel_rows_finds_where_the_row_count_stops_mattering():
     """_kernel_rows bisects for the fewest rows from which a product gives each row the bits it has at PROBE_ROWS rows
     (a fake kernel that sums in another order below 100 rows), and gives None when no such boundary checks out."""

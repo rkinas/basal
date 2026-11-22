@@ -134,10 +134,10 @@ def test_growing_and_edited_states_reuse_the_cached_prefix():
     s2 = s1 + [rnd.randrange(3, 50) for _ in range(9)]                  # the trace grows
     check(be, requests(rnd, s2, 2))
     st = be.state_cache.stats()
-    assert st["prefix_hits"] >= 1 and st["entries"] == 1               # s2 replaced s1
+    assert st["prefix_hits"] == 1 and st["entries"] == 1               # s2 replaced s1
     s3 = s2[:22] + [rnd.randrange(3, 50) for _ in range(15)]            # edited after token 22
     check(be, requests(rnd, s3, 1))
-    assert be.state_cache.stats()["prefix_hits"] >= 2 and be.state_cache.stats()["entries"] == 2
+    assert be.state_cache.stats()["prefix_hits"] == 2 and be.state_cache.stats()["entries"] == 2
 
 
 def test_block_fp8_serves_without_the_state_cache(capsys):
@@ -366,15 +366,91 @@ def test_longest_gives_an_8bit_entry_in_its_dtype_to_usable_and_the_caller():
 
 def test_longest_takes_usable_and_use_together():
     """#56's usable() and #50's use() in one lookup: usable() rejects a match the caller's keys / values cannot continue,
-    the next-longest one is returned, and a prefix hit is counted only when use(key) says the caller continues it."""
+    the next-longest one is returned, and a prefix hit is counted only when use(key, m, n) says the caller reuses
+    it."""
     c = StateCache(1 << 30)
     base = list(range(600))
     long_, short = base + list(range(1000, 1300)), base + list(range(2000, 2100))
     for toks in (long_, short):
         c.put(c.key(toks), [(torch.zeros(1, len(toks), 4), torch.zeros(1, len(toks), 4))], tokens=toks)
     query = long_[:700] + [7] * 50
-    found = c.longest(query, usable=lambda kv, m, n: n != len(long_), use=lambda key: False)
+    found = c.longest(query, usable=lambda kv, m, n: n != len(long_), use=lambda *_: False)
     assert found is not None and found[0] == c.key(short) and found[2] == 600 and c.prefix_hits == 0
-    found = c.longest(query, usable=lambda kv, m, n: True, use=lambda key: True)
+    found = c.longest(query, usable=lambda kv, m, n: True, use=lambda *_: True)
     assert found[0] == c.key(long_) and found[2] == 700 and c.prefix_hits == 1
     assert c.longest(query)[0] == c.key(long_) and c.prefix_hits == 2
+
+
+def test_use_receives_the_match_and_counts_only_a_reused_prefix():
+    c = StateCache(1 << 30)
+    long_ = list(range(700))
+    c.put(c.key(long_), [(torch.zeros(1, len(long_), 4), torch.zeros(1, len(long_), 4))], tokens=long_)
+    root = long_[:600]
+    seen = []
+    found = c.longest(root, use=lambda *a: seen.append(a) or False)
+    assert found is not None and found[0] == c.key(long_) and found[2] == 600 and found[3] == 700
+    assert seen == [(c.key(long_), 600, 700)]
+    assert c.prefix_hits == 0
+    assert c.longest(root, use=lambda *_: True) is not None and c.prefix_hits == 1
+    assert c.longest(root) is not None and c.prefix_hits == 2
+
+
+def test_a_root_a_cached_state_holds_whole_is_reused_without_a_forward():
+    """A root a longer cached state holds whole has no tokens left to extend, so _continue copies the entry's keys
+    and values and runs no forward of its own: every readout still equals a separate forward of its prompt, only
+    pass 2 runs, and the reuse is counted."""
+    rnd = random.Random(3)
+    be = Stub(tiny())
+    be.state_cache = StateCache(1e9)
+    be.state_cache.BLOCK = 4
+    long_ = [1] + [rnd.randrange(3, 50) for _ in range(39)]
+    check(be, requests(rnd, long_, 1))
+    assert be.state_cache.stats()["prefix_hits"] == 0
+    found, longest = [], be.state_cache.longest
+    be.state_cache.longest = lambda *a, **k: found.append(longest(*a, **k)) or found[-1]
+    seen = len(be.replays)
+    check(be, requests(rnd, long_[:20], 1))
+    # the engine's own lookup found the 40-token entry and matched the 20-token root whole
+    assert [(m, n) for _, _, m, n in found] == [(20, 40)]
+    assert all(kind == "tree" for kind, _, _ in be.replays[seen:])  # pass 2 only: the root came from the entry
+    assert be.state_cache.stats()["prefix_hits"] == 1
+
+
+def test_units_of_one_call_about_one_root_copy_the_cached_state_once():
+    """Several units of one call whose roots are the same state: the first copies it out of the longer entry, the
+    rest take what it cached, so one copy and one prefix hit serve them all. longest() returns the longer entry for
+    every one of them -- it matches the root whole and was indexed first -- so the root is matched by key instead."""
+    rnd = random.Random(3)
+    be = Stub(tiny())
+    be.state_cache = StateCache(1e9)
+    be.state_cache.BLOCK = 4
+    long_ = [1] + [rnd.randrange(3, 50) for _ in range(39)]
+    check(be, requests(rnd, long_, 1))
+    copies, cont = [], be._continue
+    be._continue = lambda tokens, prefix=None, m=0: copies.append((len(tokens), m)) or cont(tokens, prefix, m)
+    check(be, requests(rnd, long_[:20], 3))                        # six units, every one about the 20-token root
+    assert copies == [(20, 20)]
+    assert be.state_cache.stats()["prefix_hits"] == 1              # one reuse for the six of them, not six
+
+
+def test_gemma_falls_back_to_a_continuable_entry_from_one_holding_the_root_whole(monkeypatch):
+    """Gemma 4 cannot copy a root a longer entry holds whole (its sliding layers hold fewer tokens than a root of
+    that length keeps), so that entry is rejected during the search and the shorter entry the root can continue is
+    used instead of running the whole root again. The entry it falls back to is a branch point of the one passed
+    over, so it is kept rather than replaced."""
+    from tests.test_gemma4_graph import Stub as GemmaStub, tiny as gemma_tiny
+
+    be = GemmaStub(gemma_tiny("e4b", torch.float32))
+    root = [1] + [3 + i % 40 for i in range(119)]                  # 120 tokens: under window + MARGIN, so no
+    whole = root + [61] * 80                                       # sliding layer of either entry drops a token
+    short = root[:40]
+    cache = be.state_cache = StateCache(1 << 24)
+    cache.BLOCK = 4
+    for state in (whole, short):                                   # the longer entry is indexed first
+        cache.put(cache.key(state), be._continue(state)[0], tokens=state)
+    assert cache.longest(root)[2] == len(root) and be._usable(cache.get(cache.key(whole)), len(root), len(whole))
+    calls, cont = [], be._continue
+    monkeypatch.setattr(be, "_continue", lambda t, prefix=None, m=0: calls.append(m) or cont(t, prefix, m))
+    check(be, [([root + [10, 11]], [[10, 11]], len(root))])
+    assert calls == [len(short)]                                   # continued the 40-token entry, no full rerun
+    assert cache.get(cache.key(short)) is not None                 # kept: `whole` branches off it
