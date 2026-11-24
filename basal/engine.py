@@ -3889,6 +3889,17 @@ class MLXBackend(Capable):
         # length in batches of at most TOKEN_BUDGET padded tokens: ten suffixes of ~7k tokens in one float32 forward
         # asked Metal for an 18.7 GB buffer (the attention scores)
         self.alone = bool(what)
+        self.compact = False
+        if forward == "mlx-lm" and not (packed or what or adapter or self.state_cache is not None):
+            from .mlx_compact import supported
+            self.compact = supported(self.lm, self.quantization)
+            if self.compact:
+                # This unequal pair crosses the 128-row kernel boundary (118 compact, 154 padded).
+                rows = [[(13 + i * 7919 + j) % self.lm.args.vocab_size for i in range(n)]
+                        for j, n in enumerate((77, 41))]
+                prefix = self._prefix(rows[0][:16])
+                ref = self._padded(rows, prefix)
+                self.compact = bool(mx.array_equal(self._forward(rows, prefix), ref).item())
 
     def _exact_norms(self, md):
         """Qwen3.5: the (1 + w) RMSNorms as transformers computes them, (1 + w) in float32 and the product rounded to
@@ -4012,6 +4023,14 @@ class MLXBackend(Capable):
         return [row[: len(ids)] for row, ids in zip(p, lids)]
 
     def _forward(self, rows, prefix=None):
+        if getattr(self, "compact", False) and len(rows) > 1 and len(rows) * max(map(len, rows)) <= self.TOKEN_BUDGET:
+            from .mlx_compact import hidden
+            h = hidden(self.lm.model, rows, prefix)
+            if h is not None:
+                return h
+        return self._padded(rows, prefix)
+
+    def _padded(self, rows, prefix=None):
         """Token rows (right-padded into one batch) -> hidden state at each row's last token. `prefix`: per-layer
         (keys, values) of a shared prefix that every row continues (positions start after it), or the ArraysCache of a
         recurrent layer (Qwen3.5's Gated DeltaNet: convolution and recurrent states), copied for each row."""

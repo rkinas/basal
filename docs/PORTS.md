@@ -236,6 +236,12 @@ In such a file the certified confidence thresholds are copied from the bf16 mode
 
 ## Notes
 
+- **M4 Pro compact batches.** With MLX 0.32.3 / mlx-lm 0.32.0, the default forward can skip padding and repeated
+  token histories in the linear layers of the 2.0 mini (bf16 or affine 8-bit) and 4.5B (affine 8-bit). Attention
+  keeps the original batch shape. Projections keep the original summation order where removing rows would change
+  it. A model-load comparison checks a ragged batch against the padded forward. Other configurations use the
+  regular forward.
+
 - **Prefix sharing.** MLX: the longest common token prefix of a request's prompts (system prompt and state; for one
   question also the question) is computed once, and every suffix continues a copy of that KV cache in one right-padded
   batch, which is exact (a suffix sees the prefix and its own earlier tokens only; MLX bf16 agrees with PyTorch bf16 on
