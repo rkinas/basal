@@ -17,7 +17,8 @@ def supported(model, quant):
     shape = a.num_hidden_layers, a.hidden_size, a.intermediate_size, a.num_attention_heads, a.num_key_value_heads
     if shape != (32, 1536, 8960, 12, 2) and not (quant and shape == (60, 2048, 11008, 16, 2)):
         return False
-    if a.head_dim != 128 or (quant and quant != {"bits": 8, "group_size": 64, "mode": "affine"}):
+    # --quant q8 records no mode: nn.quantize's default, affine
+    if a.head_dim != 128 or (quant and {"mode": "affine", **quant} != {"bits": 8, "group_size": 64, "mode": "affine"}):
         return False
     for layer in model.model.layers:
         attn, mlp = layer.self_attn, layer.mlp
