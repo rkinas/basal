@@ -57,6 +57,43 @@ def test_rope_parameters_override():
     assert o["rope_theta"] == 5e5 and o["rope_scaling"]["rope_type"] == "llama3"
 
 
+@pytest.mark.parametrize("quant", [None, "q8"])
+def test_compact_keeps_distinct_histories_and_original_order(tmp_path, quant):
+    mx = pytest.importorskip("mlx.core")
+    from basal.mlx_compact import hidden
+    tiny_llama(tmp_path)
+    be = mlx_stub(tmp_path, quant)
+    assert not be.compact  # this shape is not an enabled checkpoint
+    if mx.device_info().get("device_name") != "Apple M4 Pro" or mx.__version__ != "0.32.3":
+        pytest.skip("split-K comparison requires the target Metal kernels")
+    common = list(range(1, 25))
+    # Two equal rows, an interior readout, and forks with the same token after different parents.
+    rows = [common + [31, 17] * 20, common, common + [30, 17] * 10, common + [31, 17] * 20]
+
+    def compare():
+        for past in (None, be._prefix([2, 8, 4, 10])):
+            h = hidden(be.lm.model, rows, past)
+            assert h is not None
+            ref = be._padded(rows, past)
+            assert mx.array_equal(h, ref).item()
+            assert hidden(be.lm.model, [[2, 3], [2, 4]], past) is None
+    be.pool.submit(compare).result()
+
+
+def test_compact_mismatch_falls_back_at_load(tmp_path, monkeypatch):
+    mx = pytest.importorskip("mlx.core")
+    from basal import mlx_compact
+    tiny_llama(tmp_path)
+    monkeypatch.setattr(mlx_compact, "supported", lambda *args: True)
+    monkeypatch.setattr(mlx_compact, "hidden", lambda model, rows, past: mx.zeros((len(rows), 64)))
+    be = mlx_stub(tmp_path)
+    assert not be.compact
+
+    def compare():
+        return mx.array_equal(be._forward(TOKS), be._padded(TOKS)).item()
+    assert be.pool.submit(compare).result()
+
+
 STATE = list(range(21, 61)) * 3  # 120 shared tokens
 # SOAM group: state | question 1 (two orders) | question 2 (two orders) | question 3, suffixes of unequal length
 TOKS = [STATE + [5, 6, 10, 11], STATE + [5, 6, 11, 10], STATE + [7, 8, 9, 10, 11, 12], STATE + [7, 8, 9, 12, 11, 10],

@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OPTIONAL = {"mlx_forward.py": {"mlx", "mlx_lm"},  # --mode mlx (the mlx extra)
+            "mlx_compact.py": {"mlx", "mlx_lm"},  # --mode mlx (the mlx extra)
             "tpu_kernels.py": {"jax"},  # --mode tpu (the tpu extra)
             "strix.py": {"triton"}}  # the AMD Strix Halo kernels: Triton comes with a ROCm or CUDA torch
 DIST = {"mlx_lm": "mlx-lm"}  # import name -> distribution, where they differ
